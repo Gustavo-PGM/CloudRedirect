@@ -1,0 +1,122 @@
+<Page x:Class="CloudRedirect.Pages.SettingsPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      xmlns:res="clr-namespace:CloudRedirect.Resources"
+      ScrollViewer.CanContentScroll="False">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
+        <StackPanel MaxWidth="800">
+            <TextBlock Text="{res:Loc Settings_Title}"
+                       FontSize="28" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,24" />
+
+            <TextBlock Text="{res:Loc Settings_Updates}"
+                       FontSize="20" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,12" />
+
+            <ui:CardControl Margin="0,0,0,32">
+                <ui:CardControl.Header>
+                    <StackPanel>
+                        <TextBlock x:Name="UpdateHeaderText"
+                                   Text="{res:Loc Settings_CheckForUpdates}"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock x:Name="UpdateStatusText"
+                                   Text="{res:Loc Settings_CheckForUpdatesHint}"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <StackPanel Orientation="Horizontal">
+                    <ui:Button x:Name="UpdateButton"
+                               Content="{res:Loc Settings_Check}"
+                               Icon="{ui:SymbolIcon ArrowSync24}"
+                               Click="CheckForUpdates_Click" />
+                    <ui:Button x:Name="DownloadButton"
+                               Content="{res:Loc Settings_Download}"
+                               Appearance="Primary"
+                               Icon="{ui:SymbolIcon ArrowDownload24}"
+                               Click="DownloadUpdate_Click"
+                               Visibility="Collapsed"
+                               Margin="8,0,0,0" />
+                </StackPanel>
+            </ui:CardControl>
+
+            <TextBlock Text="{res:Loc Settings_Language}"
+                       FontSize="20" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,12" />
+
+            <ui:CardControl Margin="0,0,0,32">
+                <ui:CardControl.Header>
+                    <StackPanel>
+                        <TextBlock Text="{res:Loc Settings_Language}"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock x:Name="LanguageHintText"
+                                   Text="{res:Loc Settings_LanguageHint}"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <StackPanel Orientation="Horizontal">
+                    <ComboBox x:Name="LanguageComboBox"
+                              Width="200"
+                              SelectionChanged="LanguageComboBox_SelectionChanged" />
+                    <ui:Button x:Name="RestartButton"
+                               Content="{res:Loc Settings_RestartNow}"
+                               Icon="{ui:SymbolIcon ArrowSync24}"
+                               Appearance="Primary"
+                               Click="RestartApp_Click"
+                               Visibility="Collapsed"
+                               Margin="8,0,0,0" />
+                </StackPanel>
+            </ui:CardControl>
+
+            <TextBlock Text="{res:Loc Settings_DangerZone}"
+                       FontSize="20" FontWeight="SemiBold"
+                       Foreground="#E74C3C"
+                       Margin="0,0,0,12" />
+
+            <ui:CardControl Margin="0,0,0,32">
+                <ui:CardControl.Header>
+                    <StackPanel>
+                        <TextBlock Text="{res:Loc Settings_ResetCacheTitle}" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock Text="{res:Loc Settings_ResetCacheDescription}"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ui:Button Content="{res:Loc Settings_Reset}"
+                           Appearance="Danger"
+                           Click="ResetData_Click" />
+            </ui:CardControl>
+
+            <TextBlock Text="{res:Loc Settings_About}"
+                       FontSize="20" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,12" />
+
+            <ui:CardControl Margin="0,0,0,8">
+                <ui:CardControl.Header>
+                    <StackPanel>
+                        <TextBlock x:Name="VersionText"
+                                   Text="{res:Loc Settings_CloudRedirect}"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock Text="{res:Loc Settings_AboutDescription}"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ui:Button Content="{res:Loc Settings_GitHub}"
+                           Icon="{ui:SymbolIcon Open24}"
+                           Click="OpenGitHub_Click" />
+            </ui:CardControl>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

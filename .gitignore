@@ -1,0 +1,19 @@
+# C++ build output
+build/
+
+# Python
+__pycache__/
+*.pyc
+
+# .NET build output
+ui/bin/
+ui/obj/
+ui/CloudRedirect.Tests/bin/
+ui/CloudRedirect.Tests/obj/
+
+# Legacy / dev-only (not part of public build)
+stfixer/
+tools/
+
+# Debug artifacts
+cleanup_scan.log

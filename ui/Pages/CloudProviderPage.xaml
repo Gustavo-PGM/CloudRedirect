@@ -1,0 +1,123 @@
+<Page x:Class="CloudRedirect.Pages.CloudProviderPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      xmlns:res="clr-namespace:CloudRedirect.Resources"
+      ScrollViewer.CanContentScroll="False">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
+        <StackPanel MaxWidth="800">
+            <TextBlock Text="{res:Loc CloudProvider_Title}"
+                       FontSize="28" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,8" />
+
+            <TextBlock Text="{res:Loc CloudProvider_Description}"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,24" />
+
+            <TextBlock Text="{res:Loc CloudProvider_Provider}"
+                       FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,8" />
+
+            <ComboBox x:Name="ProviderCombo"
+                      Width="300"
+                      HorizontalAlignment="Left"
+                      Margin="0,0,0,24"
+                      SelectionChanged="ProviderCombo_SelectionChanged">
+                <ComboBoxItem Content="{res:Loc CloudProvider_GoogleDrive}" Tag="gdrive" />
+                <ComboBoxItem Content="{res:Loc CloudProvider_OneDrive}" Tag="onedrive" />
+                <ComboBoxItem Content="{res:Loc CloudProvider_FolderMappedDrive}" Tag="folder" />
+                <ComboBoxItem Content="{res:Loc CloudProvider_LocalOnly}" Tag="local" />
+            </ComboBox>
+
+            <TextBlock x:Name="PathLabel"
+                       Text="{res:Loc CloudProvider_TokenFilePath}"
+                       FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,8" />
+
+            <Grid Margin="0,0,0,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <ui:TextBox x:Name="TokenPathBox"
+                            Grid.Column="0"
+                            PlaceholderText="{res:Loc CloudProvider_TokenPlaceholder}" />
+                <ui:Button x:Name="BrowseButton"
+                           Grid.Column="1"
+                           Content="{res:Loc CloudProvider_Browse}"
+                           Margin="8,0,0,0"
+                           Click="BrowseToken_Click" />
+            </Grid>
+
+            <TextBlock x:Name="PathHint"
+                       Text=""
+                       FontSize="11"
+                       Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,24" />
+
+            <TextBlock Text="{res:Loc CloudProvider_Authentication}"
+                       FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,8" />
+
+            <ui:CardControl Margin="0,0,0,16">
+                <ui:CardControl.Header>
+                    <StackPanel>
+                        <TextBlock Text="{res:Loc CloudProvider_AuthenticationStatus}" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock x:Name="AuthStatus"
+                                   Text="{res:Loc CloudProvider_NoTokensLoaded}"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ui:SymbolIcon x:Name="AuthIcon" Symbol="ShieldKeyhole24" FontSize="24" />
+            </ui:CardControl>
+
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,24">
+                <ui:Button x:Name="SignInButton"
+                           Content="{res:Loc CloudProvider_SignIn}"
+                           Appearance="Primary"
+                           Icon="{ui:SymbolIcon PersonKey20}"
+                           Click="SignIn_Click"
+                           Margin="0,0,8,0" />
+                <ui:Button x:Name="CancelAuthButton"
+                           Content="{res:Loc CloudProvider_Cancel}"
+                           Icon="{ui:SymbolIcon Dismiss24}"
+                           Click="CancelAuth_Click"
+                           Visibility="Collapsed" />
+            </StackPanel>
+
+            <Border x:Name="LogBorder"
+                    Background="{DynamicResource ControlFillColorDefaultBrush}"
+                    CornerRadius="4"
+                    Padding="12"
+                    Margin="0,0,0,24"
+                    Visibility="Collapsed"
+                    MaxHeight="200">
+                <ScrollViewer x:Name="LogScroll" VerticalScrollBarVisibility="Auto">
+                    <TextBox x:Name="LogOutput"
+                             FontFamily="Cascadia Mono,Consolas,monospace"
+                             FontSize="12"
+                             Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                             Background="Transparent"
+                             BorderThickness="0"
+                             IsReadOnly="True"
+                             TextWrapping="Wrap"
+                             AcceptsReturn="True" />
+                </ScrollViewer>
+            </Border>
+
+            <ui:Button Content="{res:Loc CloudProvider_SaveConfiguration}"
+                       Appearance="Primary"
+                       Icon="{ui:SymbolIcon Save24}"
+                       Click="SaveConfig_Click" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

@@ -1,0 +1,172 @@
+<Page x:Class="CloudRedirect.Pages.CleanupPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      xmlns:res="clr-namespace:CloudRedirect.Resources"
+      ScrollViewer.CanContentScroll="False">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
+        <StackPanel MaxWidth="800">
+
+            <TextBlock Text="{res:Loc Cleanup_Title}"
+                       FontSize="28" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,4" />
+            <TextBlock Text="{res:Loc Cleanup_Description}"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,24" />
+
+            <StackPanel x:Name="ScanCleanPanel">
+
+                <WrapPanel Margin="0,0,0,16">
+                    <ui:Button x:Name="ScanButton"
+                               Content="{res:Loc Cleanup_ScanForContamination}"
+                               Icon="{ui:SymbolIcon Search24}"
+                               Appearance="Primary"
+                               Click="ScanButton_Click"
+                               Margin="0,0,8,0" />
+                    <ui:Button x:Name="RestoreButton"
+                               Content="{res:Loc Cleanup_RestoreFromBackup}"
+                               Icon="{ui:SymbolIcon FolderOpen24}"
+                               Click="RestoreButton_Click"
+                               Margin="0,0,8,0" />
+                    <TextBlock x:Name="ScanStatus"
+                               Text=""
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               VerticalAlignment="Center" />
+                </WrapPanel>
+
+                <Border x:Name="UndoBanner"
+                        Visibility="Collapsed"
+                        Background="#303080E0"
+                        BorderBrush="#603080E0"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="16"
+                        Margin="0,0,0,16">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                            <TextBlock x:Name="UndoBannerText"
+                                       Text=""
+                                       FontSize="14" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock Text="{res:Loc Cleanup_UndoBannerDescription}"
+                                       FontSize="12"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap"
+                                       Margin="0,2,0,0" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                            <ui:Button x:Name="UndoButton"
+                                       Content="{res:Loc Cleanup_Undo}"
+                                       Icon="{ui:SymbolIcon ArrowUndo24}"
+                                       Appearance="Primary"
+                                       Click="UndoButton_Click"
+                                       Margin="0,0,8,0" />
+                            <ui:Button x:Name="UndoDismissButton"
+                                       Content="{res:Loc Cleanup_Dismiss}"
+                                       Click="UndoDismiss_Click" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <StackPanel x:Name="LoadingPanel"
+                            Visibility="Collapsed"
+                            HorizontalAlignment="Center"
+                            Margin="0,40,0,40">
+                    <ui:ProgressRing IsIndeterminate="True" Width="48" Height="48" Margin="0,0,0,12" />
+                    <TextBlock Text="{res:Loc Cleanup_ScanningApps}"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               HorizontalAlignment="Center" />
+                </StackPanel>
+
+                <Border x:Name="NukePanel"
+                        Visibility="Collapsed"
+                        Background="#30FF3030"
+                        BorderBrush="#60FF3030"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="20"
+                        Margin="0,0,0,20">
+                    <StackPanel>
+                        <TextBlock Text="{res:Loc Cleanup_DangerZone}"
+                                   FontSize="18" FontWeight="Bold"
+                                   Foreground="#FFE04040"
+                                   Margin="0,0,0,6" />
+                        <TextBlock x:Name="NukeDescription"
+                                   Text=""
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap"
+                                   Margin="0,0,0,12" />
+                        <ui:Button x:Name="NukeButton"
+                                   Content="{res:Loc Cleanup_CleanAllSuspectFiles}"
+                                   Icon="{ui:SymbolIcon Delete24}"
+                                   Appearance="Danger"
+                                   Click="NukeButton_Click" />
+                    </StackPanel>
+                </Border>
+
+                <ui:TextBox x:Name="GameSearchBox"
+                            PlaceholderText="{res:Loc Search_Placeholder}"
+                            Width="300"
+                            HorizontalAlignment="Left"
+                            TextChanged="GameSearchBox_TextChanged"
+                            Visibility="Collapsed"
+                            Margin="0,0,0,12" />
+
+                <StackPanel x:Name="GameListPanel"
+                            Visibility="Collapsed" />
+
+            </StackPanel>
+
+            <StackPanel x:Name="RestorePanel" Visibility="Collapsed">
+
+                <WrapPanel Margin="0,0,0,16">
+                    <ui:Button x:Name="BackButton"
+                               Content="{res:Loc Cleanup_Back}"
+                               Icon="{ui:SymbolIcon ArrowUndo24}"
+                               Click="BackToScan_Click"
+                               Margin="0,0,8,0" />
+                    <ui:Button x:Name="RefreshBackupsButton"
+                               Content="{res:Loc Cleanup_RefreshBackups}"
+                               Icon="{ui:SymbolIcon Search24}"
+                               Click="RefreshBackupsButton_Click"
+                               Margin="0,0,8,0" />
+                    <ui:TextBox x:Name="RestoreSearchBox"
+                                PlaceholderText="{res:Loc Search_Placeholder}"
+                                Width="250"
+                                TextChanged="RestoreSearchBox_TextChanged"
+                                Margin="0,0,8,0" />
+                    <TextBlock x:Name="RestoreStatus"
+                               Text=""
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               VerticalAlignment="Center" />
+                </WrapPanel>
+
+                <TextBlock Text="{res:Loc Cleanup_RestoreDescription}"
+                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,16" />
+
+                <StackPanel x:Name="RestoreLoadingPanel"
+                            Visibility="Collapsed"
+                            HorizontalAlignment="Center"
+                            Margin="0,40,0,40">
+                    <ui:ProgressRing IsIndeterminate="True" Width="48" Height="48" Margin="0,0,0,12" />
+                    <TextBlock Text="{res:Loc Cleanup_LoadingBackups}"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               HorizontalAlignment="Center" />
+                </StackPanel>
+
+                <StackPanel x:Name="BackupListPanel" />
+
+            </StackPanel>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

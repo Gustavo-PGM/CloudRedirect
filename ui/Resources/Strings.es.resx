@@ -1,0 +1,1339 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" msdata:Ordinal="0" />
+              <xsd:attribute name="type" type="xsd:string" />
+              <xsd:attribute name="mimetype" type="xsd:string" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="resheader">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <data name="MainWindow_Title" xml:space="preserve">
+    <value>CloudRedirect</value>
+  </data>
+  <data name="MainWindow_TitleBar" xml:space="preserve">
+    <value>CloudRedirect - Public Test Build #1</value>
+  </data>
+  <data name="Nav_Dashboard" xml:space="preserve">
+    <value>Panel</value>
+  </data>
+  <data name="Nav_Setup" xml:space="preserve">
+    <value>Configuración</value>
+  </data>
+  <data name="Nav_CloudProvider" xml:space="preserve">
+    <value>Proveedor de nube</value>
+  </data>
+  <data name="Nav_Apps" xml:space="preserve">
+    <value>Apps</value>
+  </data>
+  <data name="Nav_Cleanup" xml:space="preserve">
+    <value>Limpieza</value>
+  </data>
+  <data name="Nav_Settings" xml:space="preserve">
+    <value>Ajustes</value>
+  </data>
+
+  <data name="Setup_Title" xml:space="preserve">
+    <value>Configuración</value>
+  </data>
+  <data name="Setup_Description" xml:space="preserve">
+    <value>Todo en uno para parchear, desplegar y limpiar datos en la nube.</value>
+  </data>
+  <data name="Setup_SteamVersion" xml:space="preserve">
+    <value>Versión de Steam</value>
+  </data>
+  <data name="Setup_Checking" xml:space="preserve">
+    <value>Verificando...</value>
+  </data>
+  <data name="Setup_SteamPath" xml:space="preserve">
+    <value>Ruta de Steam</value>
+  </data>
+  <data name="Setup_Detecting" xml:space="preserve">
+    <value>Detectando...</value>
+  </data>
+  <data name="Setup_Change" xml:space="preserve">
+    <value>Cambiar</value>
+  </data>
+  <data name="Setup_RunAllPatches" xml:space="preserve">
+    <value>Ejecutar todos los parches</value>
+  </data>
+  <data name="Setup_OfflineSetupHeader" xml:space="preserve">
+    <value>Configuración sin conexión de SteamTools</value>
+  </data>
+  <data name="Setup_OfflineSetupDescription" xml:space="preserve">
+    <value>Parchea SteamTools para que funcione incluso cuando sus servidores de activación están caídos. Requerido para instalaciones nuevas.</value>
+  </data>
+  <data name="Setup_OfflineSetup" xml:space="preserve">
+    <value>Configuración sin conexión</value>
+  </data>
+  <data name="Setup_NotChecked" xml:space="preserve">
+    <value>No verificado</value>
+  </data>
+  <data name="Setup_ApplyOfflineSetup" xml:space="preserve">
+    <value>Aplicar configuración sin conexión</value>
+  </data>
+  <data name="Setup_RevertPatch" xml:space="preserve">
+    <value>Revertir parche</value>
+  </data>
+  <data name="Setup_StExeHeader" xml:space="preserve">
+    <value>Parche de SteamTools.exe</value>
+  </data>
+  <data name="Setup_StExeDescription" xml:space="preserve">
+    <value>Impide que la aplicación de escritorio SteamTools sobrescriba las DLL parcheadas en cada inicio. Sin esto, SteamTools deshará los parches principales.</value>
+  </data>
+  <data name="Setup_DllDeploy" xml:space="preserve">
+    <value>Despliegue de DLL</value>
+  </data>
+  <data name="Setup_PatchSteamToolsExe" xml:space="preserve">
+    <value>Parchear SteamTools.exe</value>
+  </data>
+  <data name="Setup_CloudRedirectPatchHeader" xml:space="preserve">
+    <value>Parche de Cloud Redirect</value>
+  </data>
+  <data name="Setup_CloudRedirectPatchDescription" xml:space="preserve">
+    <value>Parchea el payload de SteamTools para que las partidas guardadas en la nube de lua apps se redirijan a través del sistema CloudRedirect.</value>
+  </data>
+  <data name="Setup_PatchStatus" xml:space="preserve">
+    <value>Estado del parche</value>
+  </data>
+  <data name="Setup_ApplyPatch" xml:space="preserve">
+    <value>Aplicar parche</value>
+  </data>
+  <data name="Setup_DeployHeader" xml:space="preserve">
+    <value>Desplegar CloudRedirect</value>
+  </data>
+  <data name="Setup_DeployDescription" xml:space="preserve">
+    <value>Copia la DLL principal a tu carpeta de Steam.</value>
+  </data>
+  <data name="Setup_DllStatus" xml:space="preserve">
+    <value>Estado de la DLL</value>
+  </data>
+  <data name="Setup_DeployDll" xml:space="preserve">
+    <value>Desplegar DLL</value>
+  </data>
+  <data name="Setup_UninstallDll" xml:space="preserve">
+    <value>Desinstalar DLL</value>
+  </data>
+  <data name="Setup_LogOutput" xml:space="preserve">
+    <value>Registro de salida</value>
+  </data>
+  <data name="Setup_Ready" xml:space="preserve">
+    <value>Listo.</value>
+  </data>
+
+  <data name="Setup_SteamNotFoundManual" xml:space="preserve">
+    <value>No encontrado -- haz clic en Cambiar para establecerlo manualmente</value>
+  </data>
+  <data name="Setup_SteamNotFound" xml:space="preserve">
+    <value>Steam no encontrado</value>
+  </data>
+  <data name="Setup_VersionCouldNotDetermine" xml:space="preserve">
+    <value>No se pudo determinar la versión de Steam</value>
+  </data>
+  <data name="Setup_VersionSupported" xml:space="preserve">
+    <value>{0} (compatible)</value>
+  </data>
+  <data name="Setup_VersionUnsupported" xml:space="preserve">
+    <value>{0} (NO COMPATIBLE -- {1} de lo esperado {2})</value>
+  </data>
+  <data name="Setup_DirectionNewer" xml:space="preserve">
+    <value>más reciente</value>
+  </data>
+  <data name="Setup_DirectionOlder" xml:space="preserve">
+    <value>más antiguo</value>
+  </data>
+  <data name="Setup_PatchState_Patched" xml:space="preserve">
+    <value>Parcheado</value>
+  </data>
+  <data name="Setup_PatchState_Unpatched" xml:space="preserve">
+    <value>Sin parchear</value>
+  </data>
+  <data name="Setup_PatchState_PartiallyPatched" xml:space="preserve">
+    <value>Parcialmente parcheado</value>
+  </data>
+  <data name="Setup_PatchState_NotInstalled" xml:space="preserve">
+    <value>SteamTools no instalado</value>
+  </data>
+  <data name="Setup_PatchState_UnknownVersion" xml:space="preserve">
+    <value>Versión desconocida</value>
+  </data>
+  <data name="Setup_PatchState_OutOfDate" xml:space="preserve">
+    <value>Desactualizado</value>
+  </data>
+  <data name="Setup_PatchState_Unknown" xml:space="preserve">
+    <value>Desconocido</value>
+  </data>
+  <data name="Setup_OfflinePatched" xml:space="preserve">
+    <value>Parcheado (modo sin conexión activado)</value>
+  </data>
+  <data name="Setup_StExePatched" xml:space="preserve">
+    <value>Parcheado (despliegue de DLL desactivado)</value>
+  </data>
+  <data name="Setup_StExeActive" xml:space="preserve">
+    <value>Activo -- ¡sobrescribirá las DLL parcheadas!</value>
+  </data>
+  <data name="Setup_StExeNotFound" xml:space="preserve">
+    <value>SteamTools Desktop no encontrado</value>
+  </data>
+  <data name="Setup_CouldNotCheck" xml:space="preserve">
+    <value>No se pudo verificar: {0}</value>
+  </data>
+  <data name="Setup_DllInstalledOutdated" xml:space="preserve">
+    <value>Instalado pero desactualizado ({0}) -- actualización disponible</value>
+  </data>
+  <data name="Setup_DllInstalled" xml:space="preserve">
+    <value>Instalado ({0} bytes, {1})</value>
+  </data>
+  <data name="Setup_UpdateDll" xml:space="preserve">
+    <value>Actualizar DLL</value>
+  </data>
+  <data name="Setup_Deploy" xml:space="preserve">
+    <value>Desplegar</value>
+  </data>
+  <data name="Setup_DllNotInstalledReady" xml:space="preserve">
+    <value>No instalado -- listo para desplegar</value>
+  </data>
+  <data name="Setup_DllNotInstalledNoEmbed" xml:space="preserve">
+    <value>No instalado -- DLL no incluida en esta compilación</value>
+  </data>
+  <data name="Setup_InvalidSteamFolder" xml:space="preserve">
+    <value>Carpeta de Steam no válida</value>
+  </data>
+  <data name="Setup_BrowseSteamFolderTitle" xml:space="preserve">
+    <value>Seleccionar carpeta de instalación de Steam</value>
+  </data>
+  <data name="Setup_InvalidSteamFolderMessage" xml:space="preserve">
+    <value>La carpeta seleccionada no contiene steam.exe.
+
+Selecciona la carpeta donde está instalado Steam.</value>
+  </data>
+  <data name="Setup_PatchAppliedSuccessfully" xml:space="preserve">
+    <value>Parche aplicado correctamente</value>
+  </data>
+  <data name="Setup_PatchFailedSeeLog" xml:space="preserve">
+    <value>El parche falló -- ver registro</value>
+  </data>
+  <data name="Setup_FailedSeeLog" xml:space="preserve">
+    <value>Falló -- ver registro</value>
+  </data>
+  <data name="Setup_DeployFailed" xml:space="preserve">
+    <value>El despliegue falló</value>
+  </data>
+  <data name="Setup_NotInstalled" xml:space="preserve">
+    <value>No instalado</value>
+  </data>
+  <data name="Setup_UninstallFailedSteam" xml:space="preserve">
+    <value>La desinstalación falló -- ¿está Steam en ejecución?</value>
+  </data>
+  <data name="Setup_DllNotEmbedded" xml:space="preserve">
+    <value>No encontrado</value>
+  </data>
+  <data name="Setup_DllNotEmbeddedMessage" xml:space="preserve">
+    <value>cloud_redirect.dll no está incluida en esta compilación.
+
+Recompila la interfaz después de compilar la DLL de C++.</value>
+  </data>
+  <data name="Setup_ConfirmRunAll" xml:space="preserve">
+    <value>Esto aplicará todos los parches y desplegará la DLL:
+
+  1. Configuración sin conexión de SteamTools
+  2. Parchear SteamTools.exe
+  3. Parche de Cloud Redirect
+  4. Desplegar cloud_redirect.dll
+
+Si Steam está en ejecución, se cerrará automáticamente.
+Se crearán copias de seguridad.
+
+¿Continuar?</value>
+  </data>
+  <data name="Setup_ConfirmOfflineSetup" xml:space="preserve">
+    <value>Esto parchea SteamTools para que funcione incluso cuando sus servidores
+de activación están caídos.
+
+Si Steam está en ejecución, se cerrará automáticamente.
+Se creará una copia de seguridad.
+
+¿Continuar?</value>
+  </data>
+  <data name="Setup_ConfirmRevertOffline" xml:space="preserve">
+    <value>Esto revertirá el parche de configuración sin conexión, restaurando
+el comportamiento original de activación de SteamTools.
+
+Si Steam está en ejecución, se cerrará automáticamente.
+
+¿Continuar?</value>
+  </data>
+  <data name="Setup_ConfirmPatchStExe" xml:space="preserve">
+    <value>Esto parchea SteamTools.exe para evitar que sobrescriba
+las DLL parcheadas en cada inicio.
+
+Si Steam está en ejecución, se cerrará automáticamente.
+Se creará una copia de seguridad.
+
+¿Continuar?</value>
+  </data>
+  <data name="Setup_ConfirmRevertStExe" xml:space="preserve">
+    <value>Esto restaurará SteamTools.exe a su estado original,
+permitiéndole sobrescribir las DLL en cada inicio.
+
+Si Steam está en ejecución, se cerrará automáticamente.
+
+¿Continuar?</value>
+  </data>
+  <data name="Setup_ConfirmApplyPatch" xml:space="preserve">
+    <value>Esto parcheará steamclient64.dll para redirigir las RPC de la nube.
+
+Si Steam está en ejecución, se cerrará automáticamente.
+Se creará una copia de seguridad.
+
+¿Continuar?</value>
+  </data>
+  <data name="Setup_ConfirmRevertPatch" xml:space="preserve">
+    <value>Esto revertirá el parche de redirección de nube en
+steamclient64.dll, restaurando el comportamiento original.
+
+Si Steam está en ejecución, se cerrará automáticamente.
+
+¿Continuar?</value>
+  </data>
+  <data name="Setup_ConfirmDeploy" xml:space="preserve">
+    <value>Esto desplegará cloud_redirect.dll en tu carpeta de Steam.
+
+Si Steam está en ejecución, se cerrará automáticamente.
+
+¿Continuar?</value>
+  </data>
+  <data name="Setup_ConfirmUninstall" xml:space="preserve">
+    <value>Esto eliminará cloud_redirect.dll de tu carpeta de Steam.
+
+Si Steam está en ejecución, se cerrará automáticamente.
+
+¿Continuar?</value>
+  </data>
+  <data name="Setup_ConfigureProviderTitle" xml:space="preserve">
+    <value>Configurar proveedor de nube</value>
+  </data>
+  <data name="Setup_ConfigureProviderExisting" xml:space="preserve">
+    <value>{0}
+
+Proveedor de nube actual: {1}
+
+¿Deseas revisar o cambiar la configuración de tu proveedor de nube?</value>
+  </data>
+  <data name="Setup_ConfigureProviderNew" xml:space="preserve">
+    <value>{0}
+
+¿Deseas configurar un proveedor de nube (Google Drive, OneDrive o una carpeta de red) para sincronizar tus partidas guardadas?
+
+Si omites esto, las partidas se almacenarán localmente en tu carpeta de Steam.</value>
+  </data>
+  <data name="Setup_AllPatchesApplied" xml:space="preserve">
+    <value>¡Todos los parches aplicados correctamente!</value>
+  </data>
+  <data name="Setup_PatchingFinishedWithErrors" xml:space="preserve">
+    <value>Parcheado finalizado (algunos pasos fallaron -- ver registro).</value>
+  </data>
+  <data name="Setup_ConfigureProvider" xml:space="preserve">
+    <value>Configurar proveedor</value>
+  </data>
+  <data name="Setup_UseLocalStorage" xml:space="preserve">
+    <value>Usar almacenamiento local</value>
+  </data>
+  <data name="Setup_ConfirmOfflineSetupTitle" xml:space="preserve">
+    <value>Configuración sin conexión de SteamTools</value>
+  </data>
+  <data name="Setup_RevertOfflineSetupTitle" xml:space="preserve">
+    <value>Revertir configuración sin conexión</value>
+  </data>
+  <data name="Setup_PatchSteamToolsExeTitle" xml:space="preserve">
+    <value>Parchear SteamTools.exe</value>
+  </data>
+  <data name="Setup_RevertStExeTitle" xml:space="preserve">
+    <value>Revertir parche de SteamTools.exe</value>
+  </data>
+  <data name="Setup_ApplyPatchTitle" xml:space="preserve">
+    <value>Aplicar parche</value>
+  </data>
+  <data name="Setup_RevertCloudRedirectTitle" xml:space="preserve">
+    <value>Revertir parche de Cloud Redirect</value>
+  </data>
+  <data name="Setup_DeployDllTitle" xml:space="preserve">
+    <value>Desplegar DLL</value>
+  </data>
+  <data name="Setup_UninstallDllTitle" xml:space="preserve">
+    <value>Desinstalar DLL</value>
+  </data>
+
+  <data name="Dashboard_Title" xml:space="preserve">
+    <value>Panel</value>
+  </data>
+  <data name="Dashboard_UpdateNow" xml:space="preserve">
+    <value>Actualizar ahora</value>
+  </data>
+  <data name="Dashboard_UpdateAvailable" xml:space="preserve">
+    <value>Actualización disponible</value>
+  </data>
+  <data name="Dashboard_UpdateAvailableDescription" xml:space="preserve">
+    <value>Hay una versión más reciente de la DLL de CloudRedirect disponible. Por favor, actualiza.</value>
+  </data>
+  <data name="Dashboard_CloudProvider" xml:space="preserve">
+    <value>Proveedor de nube</value>
+  </data>
+  <data name="Dashboard_NotConfigured" xml:space="preserve">
+    <value>No configurado</value>
+  </data>
+  <data name="Dashboard_SteamInstallation" xml:space="preserve">
+    <value>Instalación de Steam</value>
+  </data>
+  <data name="Dashboard_Detecting" xml:space="preserve">
+    <value>Detectando...</value>
+  </data>
+  <data name="Dashboard_AppsSyncing" xml:space="preserve">
+    <value>Apps sincronizando</value>
+  </data>
+  <data name="Dashboard_AppCountDefault" xml:space="preserve">
+    <value>0 apps configuradas</value>
+  </data>
+  <data name="Dashboard_CloudRedirectDll" xml:space="preserve">
+    <value>DLL de CloudRedirect</value>
+  </data>
+  <data name="Dashboard_DllChecking" xml:space="preserve">
+    <value>Verificando...</value>
+  </data>
+  <data name="Dashboard_QuickActions" xml:space="preserve">
+    <value>Acciones rápidas</value>
+  </data>
+  <data name="Dashboard_OpenLogFile" xml:space="preserve">
+    <value>Abrir archivo de registro</value>
+  </data>
+  <data name="Dashboard_RestartSteam" xml:space="preserve">
+    <value>Reiniciar Steam</value>
+  </data>
+
+  <data name="Dashboard_NotFound" xml:space="preserve">
+    <value>No encontrado</value>
+  </data>
+  <data name="Dashboard_DllNotInstalled" xml:space="preserve">
+    <value>No instalado</value>
+  </data>
+  <data name="Dashboard_DllInstalledUpdateAvailable" xml:space="preserve">
+    <value>Instalado (actualización disponible)</value>
+  </data>
+  <data name="Dashboard_DllInstalled" xml:space="preserve">
+    <value>Instalado</value>
+  </data>
+  <data name="Dashboard_AppCountFormat" xml:space="preserve">
+    <value>{0} app(s) con datos en la nube</value>
+  </data>
+  <data name="Dashboard_FolderAccessible" xml:space="preserve">
+    <value>{0} -- Carpeta accesible</value>
+  </data>
+  <data name="Dashboard_FolderNotFound" xml:space="preserve">
+    <value>{0} -- Carpeta no encontrada</value>
+  </data>
+  <data name="Dashboard_NoSyncFolder" xml:space="preserve">
+    <value>{0} -- No hay carpeta de sincronización configurada</value>
+  </data>
+  <data name="Dashboard_Authenticated" xml:space="preserve">
+    <value>{0} -- Autenticado</value>
+  </data>
+  <data name="Dashboard_AuthStatus" xml:space="preserve">
+    <value>{0} -- {1}</value>
+  </data>
+  <data name="Dashboard_NoTokenPath" xml:space="preserve">
+    <value>{0} -- No hay ruta de token configurada</value>
+  </data>
+  <data name="Dashboard_LogNotFound" xml:space="preserve">
+    <value>Archivo de registro no encontrado. Inicia Steam con CloudRedirect instalado primero.</value>
+  </data>
+  <data name="Dashboard_ClosingSteam" xml:space="preserve">
+    <value>Cerrando Steam...</value>
+  </data>
+  <data name="Dashboard_Updating" xml:space="preserve">
+    <value>Actualizando...</value>
+  </data>
+  <data name="Dashboard_UpdateFailed" xml:space="preserve">
+    <value>La actualización falló</value>
+  </data>
+  <data name="Dashboard_DllInstalledUpdated" xml:space="preserve">
+    <value>Instalado (actualizado)</value>
+  </data>
+  <data name="Dashboard_DllUpdatedTitle" xml:space="preserve">
+    <value>DLL actualizada</value>
+  </data>
+  <data name="Dashboard_DllUpdatedRestartPrompt" xml:space="preserve">
+    <value>cloud_redirect.dll ha sido actualizada.
+
+¿Reiniciar Steam ahora?</value>
+  </data>
+  <data name="Dashboard_FailedUpdateDll" xml:space="preserve">
+    <value>Error al actualizar la DLL: {0}</value>
+  </data>
+  <data name="Dashboard_RestartSteamPrompt" xml:space="preserve">
+    <value>Esto cerrará Steam y lo reiniciará.
+¿Continuar?</value>
+  </data>
+  <data name="Dashboard_ShuttingDownSteam" xml:space="preserve">
+    <value>Cerrando Steam...</value>
+  </data>
+  <data name="Dashboard_SteamStillRunning" xml:space="preserve">
+    <value>Steam sigue en ejecución</value>
+  </data>
+  <data name="Dashboard_SteamStillRunningPrompt" xml:space="preserve">
+    <value>Steam no se cerró en 15 segundos.
+¿Forzar cierre?</value>
+  </data>
+  <data name="Dashboard_ForceKilling" xml:space="preserve">
+    <value>Forzando cierre de Steam...</value>
+  </data>
+  <data name="Dashboard_StartingSteam" xml:space="preserve">
+    <value>Iniciando Steam...</value>
+  </data>
+  <data name="Dashboard_FailedRestartSteam" xml:space="preserve">
+    <value>Error al reiniciar Steam: {0}</value>
+  </data>
+  <data name="Dashboard_SteamExeNotFound" xml:space="preserve">
+    <value>steam.exe no encontrado.</value>
+  </data>
+  <data name="Dashboard_CouldNotFindSteam" xml:space="preserve">
+    <value>No se pudo encontrar la instalación de Steam.</value>
+  </data>
+
+  <data name="CloudProvider_Title" xml:space="preserve">
+    <value>Proveedor de nube</value>
+  </data>
+  <data name="CloudProvider_Description" xml:space="preserve">
+    <value>Configura tu proveedor de Steam Cloud. Solo Google Drive/OneDrive/Carpeta local por ahora.</value>
+  </data>
+  <data name="CloudProvider_Provider" xml:space="preserve">
+    <value>Proveedor</value>
+  </data>
+  <data name="CloudProvider_GoogleDrive" xml:space="preserve">
+    <value>Google Drive</value>
+  </data>
+  <data name="CloudProvider_OneDrive" xml:space="preserve">
+    <value>OneDrive</value>
+  </data>
+  <data name="CloudProvider_FolderMappedDrive" xml:space="preserve">
+    <value>Carpeta / Unidad asignada</value>
+  </data>
+  <data name="CloudProvider_LocalOnly" xml:space="preserve">
+    <value>Solo local (sin sincronización en la nube)</value>
+  </data>
+  <data name="CloudProvider_TokenFilePath" xml:space="preserve">
+    <value>Ruta del archivo de token</value>
+  </data>
+  <data name="CloudProvider_TokenPlaceholder" xml:space="preserve">
+    <value>Ruta al archivo de tokens OAuth</value>
+  </data>
+  <data name="CloudProvider_Browse" xml:space="preserve">
+    <value>Examinar</value>
+  </data>
+  <data name="CloudProvider_Authentication" xml:space="preserve">
+    <value>Autenticación</value>
+  </data>
+  <data name="CloudProvider_AuthenticationStatus" xml:space="preserve">
+    <value>Estado de autenticación</value>
+  </data>
+  <data name="CloudProvider_NoTokensLoaded" xml:space="preserve">
+    <value>No se cargaron tokens</value>
+  </data>
+  <data name="CloudProvider_SignIn" xml:space="preserve">
+    <value>Iniciar sesión</value>
+  </data>
+  <data name="CloudProvider_Cancel" xml:space="preserve">
+    <value>Cancelar</value>
+  </data>
+  <data name="CloudProvider_SaveConfiguration" xml:space="preserve">
+    <value>Guardar configuración</value>
+  </data>
+
+  <data name="CloudProvider_NoConfigFound" xml:space="preserve">
+    <value>No se encontró config.json -- usando valores predeterminados</value>
+  </data>
+  <data name="CloudProvider_ErrorReadingConfig" xml:space="preserve">
+    <value>Error al leer la configuración: {0}</value>
+  </data>
+  <data name="CloudProvider_SyncFolderPath" xml:space="preserve">
+    <value>Ruta de la carpeta de sincronización</value>
+  </data>
+  <data name="CloudProvider_SyncFolderPlaceholder" xml:space="preserve">
+    <value>Ruta a la carpeta de sincronización (ej. Z:\CloudRedirect)</value>
+  </data>
+  <data name="CloudProvider_SyncFolderHint" xml:space="preserve">
+    <value>Elige cualquier carpeta -- incluyendo una unidad de red asignada, USB o recurso NAS.</value>
+  </data>
+  <data name="CloudProvider_LocalStoragePath" xml:space="preserve">
+    <value>Ruta de almacenamiento local</value>
+  </data>
+  <data name="CloudProvider_LocalStorageHint" xml:space="preserve">
+    <value>Las partidas se almacenan localmente en tu carpeta de Steam. Sin sincronización en la nube.</value>
+  </data>
+  <data name="CloudProvider_SelectSyncFolder" xml:space="preserve">
+    <value>Seleccionar carpeta de sincronización</value>
+  </data>
+  <data name="CloudProvider_SelectTokenFile" xml:space="preserve">
+    <value>Seleccionar archivo de token OAuth</value>
+  </data>
+  <data name="CloudProvider_MissingPath" xml:space="preserve">
+    <value>Ruta faltante</value>
+  </data>
+  <data name="CloudProvider_MissingPathMessage" xml:space="preserve">
+    <value>Establece primero una ruta para el archivo de token.</value>
+  </data>
+  <data name="CloudProvider_Saved" xml:space="preserve">
+    <value>Guardado</value>
+  </data>
+  <data name="CloudProvider_SavedMessage" xml:space="preserve">
+    <value>Configuración guardada correctamente.</value>
+  </data>
+  <data name="CloudProvider_FailedSaveConfig" xml:space="preserve">
+    <value>Error al guardar la configuración: {0}</value>
+  </data>
+  <data name="CloudProvider_LocalModeStored" xml:space="preserve">
+    <value>Modo local -- partidas almacenadas en: {0}</value>
+  </data>
+  <data name="CloudProvider_LocalModeNoSync" xml:space="preserve">
+    <value>Modo local -- sin sincronización en la nube</value>
+  </data>
+  <data name="CloudProvider_NoSyncFolder" xml:space="preserve">
+    <value>No se especificó carpeta de sincronización</value>
+  </data>
+  <data name="CloudProvider_FolderAccessible" xml:space="preserve">
+    <value>Carpeta accesible: {0}</value>
+  </data>
+  <data name="CloudProvider_FolderNotFound" xml:space="preserve">
+    <value>Carpeta no encontrada: {0}</value>
+  </data>
+  <data name="CloudProvider_NoTokenFilePath" xml:space="preserve">
+    <value>No se especificó ruta de archivo de token</value>
+  </data>
+
+  <data name="Apps_Title" xml:space="preserve">
+    <value>Apps</value>
+  </data>
+  <data name="Apps_Description" xml:space="preserve">
+    <value>Datos de partidas guardadas en la nube para tus apps inyectadas.</value>
+  </data>
+  <data name="Apps_RestoreSaves" xml:space="preserve">
+    <value>Restaurar partidas</value>
+  </data>
+  <data name="Apps_Files" xml:space="preserve">
+    <value>archivos</value>
+  </data>
+  <data name="Apps_ChangeNumber" xml:space="preserve">
+    <value>CN:</value>
+  </data>
+  <data name="Apps_DeleteTooltip" xml:space="preserve">
+    <value>Eliminar todas las partidas de esta app</value>
+  </data>
+  <data name="Apps_Back" xml:space="preserve">
+    <value>Volver</value>
+  </data>
+  <data name="Apps_Refresh" xml:space="preserve">
+    <value>Actualizar</value>
+  </data>
+  <data name="Apps_RestoreDescription" xml:space="preserve">
+    <value>Restaura archivos de una copia de seguridad anterior. Cada eliminación crea una copia de seguridad inmutable con marca de tiempo. La restauración copia los archivos sin modificar la copia de seguridad.</value>
+  </data>
+  <data name="Apps_LoadingBackups" xml:space="preserve">
+    <value>Cargando copias de seguridad...</value>
+  </data>
+
+  <data name="Apps_DeleteAllSavesTitle" xml:space="preserve">
+    <value>Eliminar todas las partidas</value>
+  </data>
+  <data name="Apps_DeletePromptHeader" xml:space="preserve">
+    <value>¿Eliminar todos los datos guardados de {0} ({1})?
+
+</value>
+  </data>
+  <data name="Apps_DeletePromptWillDelete" xml:space="preserve">
+    <value>Esto </value>
+  </data>
+  <data name="Apps_DeletePromptDelete" xml:space="preserve">
+    <value>eliminará</value>
+  </data>
+  <data name="Apps_DeletePromptLocalStorage" xml:space="preserve">
+    <value>  - Almacenamiento local de CloudRedirect: {0} archivo(s) ({1})
+</value>
+  </data>
+  <data name="Apps_DeletePromptCloudCopies" xml:space="preserve">
+    <value>Copias en la nube en {0}</value>
+  </data>
+  <data name="Apps_DeletePromptUserdata" xml:space="preserve">
+    <value>  - Datos de usuario de Steam: {0}
+</value>
+  </data>
+  <data name="Apps_DeletePromptGameSaves" xml:space="preserve">
+    <value>  - Partidas guardadas del juego: {0}
+</value>
+  </data>
+  <data name="Apps_DeletePromptSkipped" xml:space="preserve">
+    <value>
+  (Se omitieron {0} ruta(s) que no se pudieron resolver: {1})
+</value>
+  </data>
+  <data name="Apps_DeletePromptWarning" xml:space="preserve">
+    <value>Esto eliminará tus partidas guardadas.</value>
+  </data>
+  <data name="Apps_DeletePromptExplanation" xml:space="preserve">
+    <value>Las partidas locales se respaldarán, pero restaurarlas es complejo. Tendrías que desactivar el almacenamiento en la nube del juego en Steam, restaurar la copia de seguridad y luego iniciar el juego. Si continúas, tus partidas en la nube se perderán. Esas no se respaldan.</value>
+  </data>
+  <data name="Apps_DeletePromptConsequence" xml:space="preserve">
+    <value>Si continúas, el juego se comportará como si nunca lo hubieras jugado. Empezarás el juego desde el principio en el próximo inicio.</value>
+  </data>
+  <data name="Apps_DeletePromptBeSure" xml:space="preserve">
+    <value>Asegúrate.</value>
+  </data>
+  <data name="Apps_FinalConfirmTitle" xml:space="preserve">
+    <value>Confirmación final</value>
+  </data>
+  <data name="Apps_FinalConfirmMessage" xml:space="preserve">
+    <value>Esto eliminará todos los datos guardados de {0} ({1}).
+
+Las partidas locales se respaldarán, pero las copias en la nube se perderán permanentemente. Restaurar partidas es complicado.
+
+¿Estás seguro?</value>
+  </data>
+  <data name="Apps_PartialDeleteTitle" xml:space="preserve">
+    <value>Eliminación parcial</value>
+  </data>
+  <data name="Apps_PartialDeleteMessage" xml:space="preserve">
+    <value>Algunos datos no se pudieron eliminar:
+
+{0}
+
+Copia de seguridad local guardada en:
+{1}
+
+Puedes restaurar desde el panel de Restaurar partidas.</value>
+  </data>
+  <data name="Apps_DeletedTitle" xml:space="preserve">
+    <value>Eliminado</value>
+  </data>
+  <data name="Apps_DeletedMessage" xml:space="preserve">
+    <value>Todos los datos guardados de {0} ({1}) han sido eliminados.
+
+Copia de seguridad guardada en:
+{2}
+
+Puedes restaurar desde el panel de Restaurar partidas.</value>
+  </data>
+  <data name="Apps_DeleteFailedTitle" xml:space="preserve">
+    <value>La eliminación falló</value>
+  </data>
+  <data name="Apps_SteamNotFound" xml:space="preserve">
+    <value>Steam no encontrado</value>
+  </data>
+  <data name="Apps_NoDeleteBackups" xml:space="preserve">
+    <value>No se encontraron copias de seguridad de eliminación.</value>
+  </data>
+  <data name="Apps_BackupCountFormat" xml:space="preserve">
+    <value>{0} copia(s) de seguridad encontrada(s)</value>
+  </data>
+  <data name="Apps_FailedLoadBackups" xml:space="preserve">
+    <value>Error al cargar copias de seguridad: {0}</value>
+  </data>
+  <data name="Apps_RestoreSavesExperimentalTitle" xml:space="preserve">
+    <value>Restaurar partidas (Experimental)</value>
+  </data>
+  <data name="Apps_RestoreConfirmMessage" xml:space="preserve">
+    <value>¿Restaurar datos guardados de la copia de seguridad en {0}?
+
+La copia contiene: {1} archivo(s) ({2})
+Apps: {3}
+
+IMPORTANTE: Antes de restaurar, debes desactivar Steam Cloud para este juego:
+  Steam > clic derecho en el juego > Propiedades > General >
+  desmarca "Mantener partidas guardadas en Steam Cloud"
+
+Si Steam Cloud está activado, Steam puede sobrescribir los archivos restaurados.
+
+Esta función es experimental. Los archivos existentes en las ubicaciones originales se omitirán.
+La copia de seguridad nunca se modifica ni se elimina.</value>
+  </data>
+  <data name="Apps_Restoring" xml:space="preserve">
+    <value>Restaurando...</value>
+  </data>
+  <data name="Apps_Restore" xml:space="preserve">
+    <value>Restaurar</value>
+  </data>
+  <data name="Apps_RestoreCompleteTitle" xml:space="preserve">
+    <value>Restauración completa</value>
+  </data>
+  <data name="Apps_RestoredFormat" xml:space="preserve">
+    <value>{0} archivo(s) restaurado(s).</value>
+  </data>
+  <data name="Apps_RestoredRemotecacheFormat" xml:space="preserve">
+    <value> {0} remotecache(s).</value>
+  </data>
+  <data name="Apps_SkippedFormat" xml:space="preserve">
+    <value>
+Se omitieron {0} archivo(s) (ya existen en la ubicación original).</value>
+  </data>
+  <data name="Apps_ErrorsFormat" xml:space="preserve">
+    <value>
+
+{0} error(es):
+{1}</value>
+  </data>
+  <data name="Apps_RestoreFailedTitle" xml:space="preserve">
+    <value>La restauración falló</value>
+  </data>
+  <data name="Apps_AppFallbackName" xml:space="preserve">
+    <value>App {0}</value>
+  </data>
+
+  <data name="Cleanup_Title" xml:space="preserve">
+    <value>Limpieza</value>
+  </data>
+  <data name="Cleanup_Description" xml:space="preserve">
+    <value>SteamTools redirigía todas las partidas guardadas en la nube de lua apps a través de la app 760, contaminando la carpeta remote/ de cada juego con archivos de otros juegos. Escanea para ver qué apps están afectadas y selecciona archivos para eliminar.</value>
+  </data>
+  <data name="Cleanup_ScanForContamination" xml:space="preserve">
+    <value>Escanear contaminación</value>
+  </data>
+  <data name="Cleanup_RestoreFromBackup" xml:space="preserve">
+    <value>Restaurar desde copia de seguridad</value>
+  </data>
+  <data name="Cleanup_UndoBannerDescription" xml:space="preserve">
+    <value>La copia de seguridad está a salvo -- haz clic en Deshacer para restaurar todos los archivos a sus ubicaciones originales.</value>
+  </data>
+  <data name="Cleanup_Undo" xml:space="preserve">
+    <value>Deshacer</value>
+  </data>
+  <data name="Cleanup_Dismiss" xml:space="preserve">
+    <value>Cerrar</value>
+  </data>
+  <data name="Cleanup_ScanningApps" xml:space="preserve">
+    <value>Escaneando apps...</value>
+  </data>
+  <data name="Cleanup_DangerZone" xml:space="preserve">
+    <value>Zona de peligro</value>
+  </data>
+  <data name="Cleanup_CleanAllSuspectFiles" xml:space="preserve">
+    <value>Limpiar todos los archivos sospechosos</value>
+  </data>
+  <data name="Cleanup_Back" xml:space="preserve">
+    <value>Volver</value>
+  </data>
+  <data name="Cleanup_RefreshBackups" xml:space="preserve">
+    <value>Actualizar copias de seguridad</value>
+  </data>
+  <data name="Cleanup_RestoreDescription" xml:space="preserve">
+    <value>Restaura archivos de una copia de seguridad de limpieza anterior. Cada limpieza crea una copia de seguridad inmutable con marca de tiempo. La restauración copia los archivos sin modificar la copia de seguridad.</value>
+  </data>
+  <data name="Cleanup_LoadingBackups" xml:space="preserve">
+    <value>Cargando copias de seguridad...</value>
+  </data>
+
+  <data name="Cleanup_SteamNotFound" xml:space="preserve">
+    <value>Steam no encontrado</value>
+  </data>
+  <data name="Cleanup_NoNamespaceApps" xml:space="preserve">
+    <value>No se encontraron namespace apps con archivos.</value>
+  </data>
+  <data name="Cleanup_ScanStatusFormat" xml:space="preserve">
+    <value>{0} apps escaneadas, {1} archivos sospechosos en {2} apps</value>
+  </data>
+  <data name="Cleanup_NukeDescriptionFormat" xml:space="preserve">
+    <value>Eliminar los {0} archivos sospechosos ({1}) en {2} app(s) de una sola vez. Todo se respalda y se puede restaurar desde la pestaña Restaurar.</value>
+  </data>
+  <data name="Cleanup_ScanFailed" xml:space="preserve">
+    <value>El escaneo falló: {0}</value>
+  </data>
+  <data name="Cleanup_Cleaning" xml:space="preserve">
+    <value>Limpiando...</value>
+  </data>
+  <data name="Cleanup_ConfirmCleanAllTitle" xml:space="preserve">
+    <value>Limpiar todos los archivos sospechosos</value>
+  </data>
+  <data name="Cleanup_ConfirmCleanAllMessage" xml:space="preserve">
+    <value>Esto moverá {0} archivo(s) sospechoso(s) ({1}) en {2} app(s) a la carpeta de copia de seguridad.
+
+Ubicación de la copia: cloud_redirect/cleanup_tab_backup/
+
+Todo se puede restaurar desde la pestaña Restaurar.
+
+¿Estás seguro?</value>
+  </data>
+  <data name="Cleanup_CleanupCompleteTitle" xml:space="preserve">
+    <value>Limpieza completa</value>
+  </data>
+  <data name="Cleanup_CleanupCompleteMessage" xml:space="preserve">
+    <value>Se movieron {0} archivo(s) a la copia de seguridad.
+Puedes restaurarlos desde la pestaña Restaurar si es necesario.</value>
+  </data>
+  <data name="Cleanup_CleanupFailedTitle" xml:space="preserve">
+    <value>La limpieza falló</value>
+  </data>
+  <data name="Cleanup_CleanedBannerFormat" xml:space="preserve">
+    <value>Se limpiaron {0} archivo(s) a la copia de seguridad.</value>
+  </data>
+  <data name="Cleanup_BackToScan" xml:space="preserve">
+    <value>Volver al escaneo</value>
+  </data>
+  <data name="Cleanup_NoBackupsFound" xml:space="preserve">
+    <value>No se encontraron copias de seguridad.</value>
+  </data>
+  <data name="Cleanup_BackupCountFormat" xml:space="preserve">
+    <value>{0} copia(s) de seguridad encontrada(s)</value>
+  </data>
+  <data name="Cleanup_FailedLoadBackups" xml:space="preserve">
+    <value>Error al cargar copias de seguridad: {0}</value>
+  </data>
+  <data name="Cleanup_RestoreFromBackupTitle" xml:space="preserve">
+    <value>Restaurar desde copia de seguridad</value>
+  </data>
+  <data name="Cleanup_RestoreConfirmMessage" xml:space="preserve">
+    <value>Esto copiará los archivos de la copia de seguridad en {0} a sus ubicaciones originales.
+
+Cuenta: {1}
+Archivos: {2}
+Apps: {3}
+
+Los archivos existentes en las ubicaciones originales se OMITIRÁN.
+La copia de seguridad nunca se modifica ni se elimina.
+
+¿Continuar?</value>
+  </data>
+  <data name="Cleanup_RestoreCompleteTitle" xml:space="preserve">
+    <value>Restauración completa</value>
+  </data>
+  <data name="Cleanup_RestoredFormat" xml:space="preserve">
+    <value>{0} archivo(s) restaurado(s), {1} remotecache(s).</value>
+  </data>
+  <data name="Cleanup_SkippedFormat" xml:space="preserve">
+    <value>
+Se omitieron {0} archivo(s) (ya existen en la ubicación original).</value>
+  </data>
+  <data name="Cleanup_ErrorsFormat" xml:space="preserve">
+    <value>
+
+{0} error(es) ocurridos:
+{1}</value>
+  </data>
+  <data name="Cleanup_RestoreFailedTitle" xml:space="preserve">
+    <value>La restauración falló</value>
+  </data>
+  <data name="Cleanup_UndoFailedTitle" xml:space="preserve">
+    <value>Deshacer falló</value>
+  </data>
+  <data name="Cleanup_UndoSteamNotFound" xml:space="preserve">
+    <value>Steam no encontrado.</value>
+  </data>
+  <data name="Cleanup_UndoNoBackupFound" xml:space="preserve">
+    <value>No se pudo encontrar la copia de seguridad de la última limpieza. Usa Restaurar desde copia de seguridad para buscarla manualmente.</value>
+  </data>
+  <data name="Cleanup_UndoCompleteTitle" xml:space="preserve">
+    <value>Deshacer completo</value>
+  </data>
+
+  <data name="Cleanup_Badge_CrossApp" xml:space="preserve">
+    <value>cross-app</value>
+  </data>
+  <data name="Cleanup_Badge_WrongAppId" xml:space="preserve">
+    <value>wrong appid</value>
+  </data>
+  <data name="Cleanup_Badge_Mangled" xml:space="preserve">
+    <value>mangled</value>
+  </data>
+  <data name="Cleanup_Badge_Orphan" xml:space="preserve">
+    <value>orphan</value>
+  </data>
+  <data name="Cleanup_Badge_Legit" xml:space="preserve">
+    <value>legit</value>
+  </data>
+  <data name="Cleanup_Badge_Unknown" xml:space="preserve">
+    <value>unknown</value>
+  </data>
+
+  <data name="Cleanup_SuspectFiles" xml:space="preserve">
+    <value>Archivos sospechosos</value>
+  </data>
+  <data name="Cleanup_Unknown" xml:space="preserve">
+    <value>Desconocido</value>
+  </data>
+  <data name="Cleanup_Legitimate" xml:space="preserve">
+    <value>Legítimo</value>
+  </data>
+  <data name="Cleanup_GroupHeaderFormat" xml:space="preserve">
+    <value>{0} ({1})</value>
+  </data>
+  <data name="Cleanup_Clean" xml:space="preserve">
+    <value>limpio</value>
+  </data>
+  <data name="Cleanup_Suspect" xml:space="preserve">
+    <value>{0} sospechoso(s)</value>
+  </data>
+  <data name="Cleanup_FilesCount" xml:space="preserve">
+    <value>{0} archivos</value>
+  </data>
+  <data name="Cleanup_ReviewFiles" xml:space="preserve">
+    <value>Revisar archivos</value>
+  </data>
+  <data name="Cleanup_ViewFiles" xml:space="preserve">
+    <value>Ver archivos</value>
+  </data>
+  <data name="Cleanup_Collapse" xml:space="preserve">
+    <value>Contraer</value>
+  </data>
+  <data name="Cleanup_SelectAllSuspect" xml:space="preserve">
+    <value>Seleccionar todos los sospechosos</value>
+  </data>
+  <data name="Cleanup_DeselectAll" xml:space="preserve">
+    <value>Deseleccionar todo</value>
+  </data>
+  <data name="Cleanup_CleanSelected" xml:space="preserve">
+    <value>Limpiar seleccionados</value>
+  </data>
+  <data name="Cleanup_NothingSelectedTitle" xml:space="preserve">
+    <value>Nada seleccionado</value>
+  </data>
+  <data name="Cleanup_NothingSelectedMessage" xml:space="preserve">
+    <value>Selecciona archivos a eliminar marcando las casillas.</value>
+  </data>
+  <data name="Cleanup_ConfirmCleanupTitle" xml:space="preserve">
+    <value>Confirmar limpieza</value>
+  </data>
+  <data name="Cleanup_ConfirmCleanupMessage" xml:space="preserve">
+    <value>Esto moverá {0} archivo(s) ({1}) a la carpeta de copia de seguridad.
+
+Ubicación de la copia: cloud_redirect/cleanup_tab_backup/{2}/
+
+Los archivos se pueden restaurar desde la pestaña Restaurar. ¿Continuar?</value>
+  </data>
+
+  <data name="Settings_Title" xml:space="preserve">
+    <value>Ajustes</value>
+  </data>
+  <data name="Settings_Updates" xml:space="preserve">
+    <value>Actualizaciones</value>
+  </data>
+  <data name="Settings_CheckForUpdates" xml:space="preserve">
+    <value>Buscar actualizaciones</value>
+  </data>
+  <data name="Settings_CheckForUpdatesHint" xml:space="preserve">
+    <value>Haz clic para buscar una versión más reciente.</value>
+  </data>
+  <data name="Settings_Check" xml:space="preserve">
+    <value>Verificar</value>
+  </data>
+  <data name="Settings_Download" xml:space="preserve">
+    <value>Descargar</value>
+  </data>
+  <data name="Settings_DangerZone" xml:space="preserve">
+    <value>Zona de peligro</value>
+  </data>
+  <data name="Settings_ResetCacheTitle" xml:space="preserve">
+    <value>Restablecer caché local de CloudRedirect</value>
+  </data>
+  <data name="Settings_ResetCacheDescription" xml:space="preserve">
+    <value>Elimina la caché local de CloudRedirect. Solo elimina la caché y obliga al proveedor de nube a resincronizar. ¡Esto puede causar pérdida de datos en algunos casos!</value>
+  </data>
+  <data name="Settings_Reset" xml:space="preserve">
+    <value>Restablecer</value>
+  </data>
+  <data name="Settings_About" xml:space="preserve">
+    <value>Acerca de</value>
+  </data>
+  <data name="Settings_CloudRedirect" xml:space="preserve">
+    <value>CloudRedirect</value>
+  </data>
+  <data name="Settings_AboutDescription" xml:space="preserve">
+    <value>Partidas guardadas en la nube para juegos de Steam no comprados</value>
+  </data>
+  <data name="Settings_GitHub" xml:space="preserve">
+    <value>GitHub</value>
+  </data>
+
+  <data name="Settings_VersionFormat" xml:space="preserve">
+    <value>{0}.{1}.{2} (Public Test Build #1)</value>
+  </data>
+  <data name="Settings_Checking" xml:space="preserve">
+    <value>Verificando...</value>
+  </data>
+  <data name="Settings_ContactingGitHub" xml:space="preserve">
+    <value>Contactando GitHub...</value>
+  </data>
+  <data name="Settings_UpdateAvailableFormat" xml:space="preserve">
+    <value>Actualización disponible: {0}</value>
+  </data>
+  <data name="Settings_NewerVersionAvailable" xml:space="preserve">
+    <value>Hay una versión más reciente disponible. Estás ejecutando la v{0}.</value>
+  </data>
+  <data name="Settings_UpToDate" xml:space="preserve">
+    <value>Actualizado</value>
+  </data>
+  <data name="Settings_LatestVersionFormat" xml:space="preserve">
+    <value>Estás ejecutando la última versión (v{0}).</value>
+  </data>
+  <data name="Settings_LatestReleaseFormat" xml:space="preserve">
+    <value>Última versión: {0}</value>
+  </data>
+  <data name="Settings_CouldNotCompare" xml:space="preserve">
+    <value>No se pudieron comparar las versiones automáticamente.</value>
+  </data>
+  <data name="Settings_FailedToCheck" xml:space="preserve">
+    <value>Error al verificar: {0}</value>
+  </data>
+  <data name="Settings_ConfirmResetTitle" xml:space="preserve">
+    <value>Confirmar restablecimiento</value>
+  </data>
+  <data name="Settings_ConfirmResetMessage" xml:space="preserve">
+    <value>Esto eliminará la caché local de CloudRedirect y obligará al proveedor de nube a resincronizar.
+
+Esto puede causar pérdida de datos en algunos casos.
+
+¿Estás seguro?</value>
+  </data>
+  <data name="Settings_Done" xml:space="preserve">
+    <value>Listo</value>
+  </data>
+  <data name="Settings_ResetDoneMessage" xml:space="preserve">
+    <value>La caché local ha sido restablecida. El proveedor de nube resincronizará en el próximo inicio.</value>
+  </data>
+  <data name="Settings_FailedReset" xml:space="preserve">
+    <value>Error al restablecer: {0}</value>
+  </data>
+
+  <data name="Disclaimer_WindowTitle" xml:space="preserve">
+    <value>ADVERTENCIA</value>
+  </data>
+  <data name="Disclaimer_BuildBanner" xml:space="preserve">
+    <value>CloudRedirect - Public Test Build #1</value>
+  </data>
+  <data name="Disclaimer_ExperimentalBanner" xml:space="preserve">
+    <value>!  EXPERIMENTAL  -  RIESGO  DE  PÉRDIDA  DE  DATOS  !</value>
+  </data>
+  <data name="Disclaimer_WarningBold" xml:space="preserve">
+    <value>La redirección de partidas guardadas en la nube es EXPERIMENTAL y está en desarrollo activo.</value>
+  </data>
+  <data name="Disclaimer_ItMay" xml:space="preserve">
+    <value>Puede:</value>
+  </data>
+  <data name="Disclaimer_Corrupt" xml:space="preserve">
+    <value>CORROMPER</value>
+  </data>
+  <data name="Disclaimer_CorruptSuffix" xml:space="preserve">
+    <value> tus archivos de partidas guardadas</value>
+  </data>
+  <data name="Disclaimer_Lose" xml:space="preserve">
+    <value>PERDER</value>
+  </data>
+  <data name="Disclaimer_LoseSuffix" xml:space="preserve">
+    <value> tus datos de partidas guardadas</value>
+  </data>
+  <data name="Disclaimer_Overwrite" xml:space="preserve">
+    <value>SOBRESCRIBIR</value>
+  </data>
+  <data name="Disclaimer_OverwriteSuffix" xml:space="preserve">
+    <value> partidas buenas con malas</value>
+  </data>
+  <data name="Disclaimer_BackUpBold" xml:space="preserve">
+    <value>HAZ UNA COPIA DE SEGURIDAD DE TUS PARTIDAS antes de usar esto.</value>
+  </data>
+  <data name="Disclaimer_ExplanationText" xml:space="preserve">
+    <value>Si algo sale mal, tus PARTIDAS LOCALES podrían corromperse o perderse. Asegúrate de tener copias de seguridad de cualquier partida que te importe antes de continuar.</value>
+  </data>
+  <data name="Disclaimer_PleaseReadCarefully" xml:space="preserve">
+    <value>Por favor lee con cuidado...</value>
+  </data>
+  <data name="Disclaimer_Cancel" xml:space="preserve">
+    <value>Cancelar</value>
+  </data>
+  <data name="Disclaimer_AcceptButton" xml:space="preserve">
+    <value>Entiendo los riesgos</value>
+  </data>
+
+  <data name="Disclaimer_CountdownFormat" xml:space="preserve">
+    <value>Por favor lee con cuidado... ({0}s)</value>
+  </data>
+  <data name="Disclaimer_Warned" xml:space="preserve">
+    <value>Has sido advertido.</value>
+  </data>
+
+  <data name="Dialog_OK" xml:space="preserve">
+    <value>OK</value>
+  </data>
+  <data name="Dialog_Yes" xml:space="preserve">
+    <value>Sí</value>
+  </data>
+  <data name="Dialog_No" xml:space="preserve">
+    <value>No</value>
+  </data>
+  <data name="Dialog_YesCountdownFormat" xml:space="preserve">
+    <value>Sí ({0})</value>
+  </data>
+  <data name="Dialog_YesDeleteEverything" xml:space="preserve">
+    <value>Sí -- ELIMINAR TODO</value>
+  </data>
+
+  <data name="Steam_IsRunningTitle" xml:space="preserve">
+    <value>Steam está en ejecución</value>
+  </data>
+  <data name="Steam_IsRunningMessage" xml:space="preserve">
+    <value>Steam debe estar cerrado antes de restaurar partidas. Cierra Steam e intenta de nuevo.</value>
+  </data>
+
+  <data name="Provider_GoogleDrive" xml:space="preserve">
+    <value>Google Drive</value>
+  </data>
+  <data name="Provider_OneDrive" xml:space="preserve">
+    <value>OneDrive</value>
+  </data>
+  <data name="Provider_FolderNetworkDrive" xml:space="preserve">
+    <value>Carpeta / Unidad de red</value>
+  </data>
+  <data name="Provider_LocalOnly" xml:space="preserve">
+    <value>Solo local</value>
+  </data>
+
+  <data name="Backup_UnknownApp" xml:space="preserve">
+    <value>App desconocida</value>
+  </data>
+  <data name="Backup_AppIdFormat" xml:space="preserve">
+    <value>AppID {0}</value>
+  </data>
+  <data name="Backup_Legacy" xml:space="preserve">
+    <value>legacy</value>
+  </data>
+  <data name="Backup_Recent" xml:space="preserve">
+    <value>reciente</value>
+  </data>
+  <data name="Backup_FileCountFormat" xml:space="preserve">
+    <value>{0} archivo(s)</value>
+  </data>
+  <data name="Backup_OperationsFormat" xml:space="preserve">
+    <value>{0} op(s)</value>
+  </data>
+  <data name="Backup_OtherAppsFormat" xml:space="preserve">
+    <value>(+ {0} otra(s) app{1})</value>
+  </data>
+  <data name="Backup_Preview" xml:space="preserve">
+    <value>Vista previa</value>
+  </data>
+  <data name="Backup_HidePreview" xml:space="preserve">
+    <value>Ocultar vista previa</value>
+  </data>
+  <data name="Backup_Loading" xml:space="preserve">
+    <value>Cargando...</value>
+  </data>
+  <data name="Backup_NoFilesOnDisk" xml:space="preserve">
+    <value>No se encontraron archivos de copia de seguridad en disco</value>
+  </data>
+
+  <data name="Preview_SummaryFormat" xml:space="preserve">
+    <value>Vista previa: {0} archivo(s) se restaurarían, {1} omitido(s) (ya existen), {2} remotecache(s)</value>
+  </data>
+  <data name="Preview_Failed" xml:space="preserve">
+    <value>La vista previa falló</value>
+  </data>
+  <data name="Preview_ErrorsHeader" xml:space="preserve">
+    <value>Errores:
+{0}</value>
+  </data>
+  <data name="Preview_FailedTitle" xml:space="preserve">
+    <value>Vista previa falló</value>
+  </data>
+
+  <data name="EmbeddedDll_NotEmbedded" xml:space="preserve">
+    <value>cloud_redirect.dll no está incluida en esta compilación</value>
+  </data>
+  <data name="EmbeddedDll_InUse" xml:space="preserve">
+    <value>cloud_redirect.dll está en uso (cierra Steam primero)</value>
+  </data>
+
+  <data name="Common_Info" xml:space="preserve">
+    <value>Información</value>
+  </data>
+  <data name="Common_Error" xml:space="preserve">
+    <value>Error</value>
+  </data>
+  <data name="Common_UpdateFailed" xml:space="preserve">
+    <value>La actualización falló</value>
+  </data>
+
+  <data name="OAuth_AuthSuccessTitle" xml:space="preserve">
+    <value>Autorización exitosa</value>
+  </data>
+  <data name="OAuth_AuthSuccessBody" xml:space="preserve">
+    <value>Puedes cerrar esta pestaña y volver a CloudRedirect.</value>
+  </data>
+  <data name="OAuth_AuthFailedTitle" xml:space="preserve">
+    <value>Autorización fallida</value>
+  </data>
+  <data name="OAuth_AuthFailedBody" xml:space="preserve">
+    <value>Cierra esta pestaña e intenta de nuevo.</value>
+  </data>
+
+  <data name="Settings_Language" xml:space="preserve">
+    <value>Idioma</value>
+  </data>
+  <data name="Settings_LanguageHint" xml:space="preserve">
+    <value>Seleccione su idioma preferido. Los cambios se aplican al reiniciar.</value>
+  </data>
+  <data name="Settings_RestartRequired" xml:space="preserve">
+    <value>Reinicio necesario para cambiar el idioma.</value>
+  </data>
+  <data name="Settings_RestartNow" xml:space="preserve">
+    <value>Reiniciar ahora</value>
+  </data>
+  <data name="Settings_SystemDefault" xml:space="preserve">
+    <value>Predeterminado del sistema</value>
+  </data>
+  <data name="Settings_LanguageEnglish" xml:space="preserve">
+    <value>English</value>
+  </data>
+  <data name="Settings_LanguageSpanish" xml:space="preserve">
+    <value>Español</value>
+  </data>
+  <data name="Settings_LanguagePortuguese" xml:space="preserve">
+    <value>Português (Brasil)</value>
+  </data>
+
+  <data name="Search_Placeholder" xml:space="preserve">
+    <value>Buscar por nombre o ID de app...</value>
+  </data>
+
+  <data name="AppUpdate_Skip" xml:space="preserve">
+    <value>Omitir</value>
+  </data>
+  <data name="AppUpdate_UpdateNow" xml:space="preserve">
+    <value>Actualizar ahora</value>
+  </data>
+
+</root>
