@@ -43,6 +43,8 @@ Make sure you are on Steam version 1773426488. That is the only supported versio
 
 Grab the latest release from the [Releases page](https://github.com/Selectively11/CloudRedirect/releases).
 
+Note that you do not need to run STFixer with this. The 'Capcom save fix' is always present with this tool. 
+
 Run the EXE. In Setup, hit 'Run All Patches'. Go to the Cloud Provider tab, select your provider. If it is a cloud provider, hit 'Sign In' and sign in. 
 
 That's it. Go launch Steam. Your games should start syncing now. You may have errors if your userdata folder was filled with garbage by SteamTools and the game is a Steam AutoCloud save. In that case, you need to identify which files belong in that folder and which files belong to another game and clean it up. 
