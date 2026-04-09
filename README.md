@@ -29,7 +29,7 @@ CloudRedirect is good software. It's clever.
 CloudRedirect consists of a C++ DLL and a WPF companion app:
 
 1. The companion app patches the SteamTools payload to load the CloudRedirect DLL at startup.
-2. The DLL hooks Steam's internal cloud save RPC handlers via vtable interception black magic.
+2. The DLL hooks Steam's internal cloud save RPC handlers via ~~vtable interception~~ black magic.
 3. When a lua game attempts to read or write cloud save data, the DLL intercepts the calls and redirects them to a local cache directory. If the game is owned, the game uses normal Steam Cloud as expected. If a lua is present that only unlocks DLC, the game will use normal Steam Cloud.
 4. More dark magic occurs and the saves are synced to or from your chosen cloud provider. This all is visible in the Steam UI and looks identical to normal Steam Cloud functionality.
    
