@@ -122,6 +122,31 @@ uint64_t GetChangeNumber(uint32_t accountId, uint32_t appId) {
     return 1;
 }
 
+void SetChangeNumber(uint32_t accountId, uint32_t appId, uint64_t cn) {
+    std::lock_guard<std::shared_mutex> lock(g_mutex);
+    auto key = MakeKey(accountId, appId);
+    g_changeNumbers[key] = cn;
+    SaveChangeNumberLocked(accountId, appId);
+    LOG("SetChangeNumber: CN=%llu for app %u", cn, appId);
+}
+
+uint64_t IncrementChangeNumber(uint32_t accountId, uint32_t appId) {
+    std::lock_guard<std::shared_mutex> lock(g_mutex);
+    auto key = MakeKey(accountId, appId);
+    auto it = g_changeNumbers.find(key);
+    if (it == g_changeNumbers.end()) {
+        // Load from disk first if not in memory
+        std::string cnPath = GetAppPathInternal(accountId, appId) + "cn.dat";
+        std::ifstream f(cnPath);
+        uint64_t cn = 1;
+        if (f) { f >> cn; if (cn == 0) cn = 1; }
+        g_changeNumbers[key] = cn;
+    }
+    uint64_t newCN = ++g_changeNumbers[key];
+    SaveChangeNumberLocked(accountId, appId);
+    return newCN;
+}
+
 std::vector<uint8_t> SHA1(const uint8_t* data, size_t len) {
     std::vector<uint8_t> hash(20, 0);
     HCRYPTPROV hProv = 0;
@@ -293,6 +318,27 @@ bool WriteFile(uint32_t accountId, uint32_t appId, const std::string& filename, 
     ++g_changeNumbers[MakeKey(accountId, appId)];
     SaveChangeNumberLocked(accountId, appId);
     LOG("WriteFile: app %u %s (%zu bytes)", appId, filename.c_str(), len);
+    return true;
+}
+
+bool WriteFileNoIncrement(uint32_t accountId, uint32_t appId, const std::string& filename, const uint8_t* data, size_t len) {
+    std::lock_guard<std::shared_mutex> lock(g_mutex);
+
+    std::string appRoot = GetAppPathInternal(accountId, appId);
+    std::string fullPath = ValidateFilename(appRoot, filename);
+    if (fullPath.empty()) {
+        LOG("WriteFileNoIncrement BLOCKED: path traversal in filename '%s'", filename.c_str());
+        return false;
+    }
+
+    auto parent = std::filesystem::path(fullPath).parent_path();
+    std::filesystem::create_directories(parent);
+
+    if (!FileUtil::AtomicWriteBinary(fullPath, data, len)) {
+        LOG("WriteFileNoIncrement failed: %s (%zu bytes)", fullPath.c_str(), len);
+        return false;
+    }
+    LOG("WriteFileNoIncrement: app %u %s (%zu bytes)", appId, filename.c_str(), len);
     return true;
 }
 

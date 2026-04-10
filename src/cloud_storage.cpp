@@ -234,6 +234,17 @@ static void EnqueueWork(WorkItem item) {
     g_queueCV.notify_one();
 }
 
+// Enqueue a cloud upload of the current CN value for this app.
+// Dedup in EnqueueWork will coalesce multiple calls during a batch.
+static void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn) {
+    std::string cnStr = std::to_string(cn);
+    WorkItem wi;
+    wi.type = WorkItem::Upload;
+    wi.cloudPath = CloudMetadataPath(accountId, appId, "cn.dat");
+    wi.data.assign(cnStr.begin(), cnStr.end());
+    EnqueueWork(std::move(wi));
+}
+
 
 void Init(const std::string& localRoot, std::unique_ptr<ICloudProvider> provider) {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -319,6 +330,10 @@ bool StoreBlob(uint32_t accountId, uint32_t appId,
     }
     LOG("[CloudStorage] StoreBlob: cached locally: %s (%zu bytes)", filename.c_str(), len);
 
+    // Increment change number so Steam sees serverCN > clientCN on next restart
+    // and actually processes the file list instead of short-circuiting.
+    uint64_t newCN = LocalStorage::IncrementChangeNumber(accountId, appId);
+
     // 2. Enqueue async upload to cloud provider
     if (g_provider) {
         WorkItem wi;
@@ -326,6 +341,8 @@ bool StoreBlob(uint32_t accountId, uint32_t appId,
         wi.cloudPath = CloudBlobPath(accountId, appId, filename);
         wi.data.assign(data, data + len);
         EnqueueWork(std::move(wi));
+
+        PushCNToCloud(accountId, appId, newCN);
     }
 
     return true;
@@ -379,12 +396,17 @@ bool DeleteBlob(uint32_t accountId, uint32_t appId,
 
     LOG("[CloudStorage] DeleteBlob: removed local cache: %s", filename.c_str());
 
+    // Increment change number so Steam sees serverCN > clientCN on next restart
+    uint64_t newCN = LocalStorage::IncrementChangeNumber(accountId, appId);
+
     // 2. Enqueue cloud delete
     if (g_provider) {
         WorkItem wi;
         wi.type = WorkItem::Delete;
         wi.cloudPath = CloudBlobPath(accountId, appId, filename);
         EnqueueWork(std::move(wi));
+
+        PushCNToCloud(accountId, appId, newCN);
     }
 
     return true;
@@ -498,8 +520,10 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     std::filesystem::create_directories(storagePath);
 
     // 1. Sync CN: take max of local and cloud
+    //    Read from LocalStorage's in-memory cache (matches Steam behavior where
+    //    CN is read from an in-memory structure, not from disk).
     {
-        uint64_t localCN = GetChangeNumber(accountId, appId);
+        uint64_t localCN = LocalStorage::GetChangeNumber(accountId, appId);
 
         std::string cloudCNPath = CloudMetadataPath(accountId, appId, "cn.dat");
         std::vector<uint8_t> cloudData;
@@ -512,17 +536,12 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         if (cloudCN > localCN) {
             LOG("[CloudStorage] SyncFromCloud app %u: cloud CN=%llu > local CN=%llu, using cloud",
                 appId, cloudCN, localCN);
-            WriteLocalText(storagePath + "cn.dat", std::to_string(cloudCN));
+            LocalStorage::SetChangeNumber(accountId, appId, cloudCN);
             hadNewer = true;
         } else if (localCN > cloudCN && cloudCN > 0) {
             LOG("[CloudStorage] SyncFromCloud app %u: local CN=%llu > cloud CN=%llu, pushing local to cloud",
                 appId, localCN, cloudCN);
-            std::string cnStr = std::to_string(localCN);
-            WorkItem wi;
-            wi.type = WorkItem::Upload;
-            wi.cloudPath = cloudCNPath;
-            wi.data.assign(cnStr.begin(), cnStr.end());
-            EnqueueWork(std::move(wi));
+            PushCNToCloud(accountId, appId, localCN);
         } else {
             LOG("[CloudStorage] SyncFromCloud app %u: CN in sync (local=%llu, cloud=%llu)",
                 appId, localCN, cloudCN);
@@ -681,9 +700,11 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
 
                 // Also write to LocalStorage so GetFileList() can find the file.
                 // Without this, the changelist would report zero files on a fresh machine.
+                // Use WriteFileNoIncrement: CN was already set from the cloud response
+                // in step 1 (matching real Steam behavior where CN is set once, not per-file).
                 if (!data.empty()) {
-                    LocalStorage::WriteFile(accountId, appId, filename,
-                                            data.data(), data.size());
+                    LocalStorage::WriteFileNoIncrement(accountId, appId, filename,
+                                                      data.data(), data.size());
                 }
             } else {
                 LOG("[CloudStorage] SyncFromCloud app %u: FAILED to download blob %s",

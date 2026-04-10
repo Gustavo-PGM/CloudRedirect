@@ -523,13 +523,9 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
             LOG("[NS-UP]   committed: %s (%zu bytes)", cleanName.c_str(), blobData.size());
 
             if (!blobData.empty()) {
-                // After storage/blob unification, the HTTP PUT handler already
-                // wrote this file to storage/. We intentionally do NOT call
-                // LocalStorage::WriteFile() here because it would redundantly
-                // overwrite the same data AND increment the change number (CN).
-                // CN must NOT be incremented by client-initiated uploads -- otherwise
-                // Steam sees serverCN > clientCN after exit sync and triggers a
-                // spurious download loop.
+                // CloudStorage::StoreBlob writes to the local cache (same dir as
+                // LocalStorage) and increments the change number so Steam sees
+                // serverCN > clientCN on next restart and processes the file list.
 
                 // Push blob to cloud provider (async -- enqueues upload if provider active)
                 CloudStorage::StoreBlob(accountId, appId, cleanName,
@@ -642,12 +638,8 @@ PB::Writer HandleDeleteFile(uint32_t appId, const std::vector<PB::Field>& reqBod
     LOG("[NS] DeleteFile app=%u file=%s (clean=%s)", appId, filename.c_str(), cleanName.c_str());
 
     uint32_t accountId = GetAccountId();
-    // After storage/blob unification, LocalStorage and HttpServer point to the
-    // same directory. We use HttpServer::DeleteBlob() to remove the file, and
-    // intentionally do NOT call LocalStorage::DeleteFile() because it increments
-    // the change number (CN). CN must NOT be incremented by client-initiated deletes
-    // -- otherwise Steam sees serverCN > clientCN after exit sync and triggers a
-    // spurious download loop.
+    // CloudStorage::DeleteBlob removes from local cache and cloud, and
+    // increments the change number so Steam re-downloads the file list.
     HttpServer::DeleteBlob(appId, cleanName);
 
     // Delete from cloud provider (async -- enqueues delete if provider active)
