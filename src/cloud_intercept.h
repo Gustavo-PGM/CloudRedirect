@@ -27,6 +27,9 @@ void Init(const std::string& steamPath);
 // hook the saved-original RecvPkt pointer to monitor incoming packets
 void InstallRecvPktMonitor(void* savedOrigPtrAddr);
 
+// install inline detour on steamclient64 for manifest pinning
+void InstallManifestPinHook();
+
 // compute payload base and set up cave replacement buffer globals
 void SetSendPktAddr(void* recvPktGlobalAddr);
 

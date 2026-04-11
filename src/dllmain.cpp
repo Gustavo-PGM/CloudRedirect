@@ -56,6 +56,9 @@ int CloudOnSendPkt(void* thisptr, const uint8_t* data, uint32_t size, void* recv
                 CloudIntercept::InstallRecvPktMonitor((void*)savedOrigAddr);
             }
 
+            // install inline detour on steamclient64 for manifest pinning
+            CloudIntercept::InstallManifestPinHook();
+
             LOG("CloudRedirect fully initialized with hooks");
         } catch (const std::exception& ex) {
             LOG("CloudRedirect init FAILED: %s", ex.what());

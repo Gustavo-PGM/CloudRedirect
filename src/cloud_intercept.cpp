@@ -40,6 +40,25 @@ static constexpr uint32_t HDR_ERESULT = 13;
 
 // Payload.dll RVAs (still needed for SteamTools integration)
 static constexpr uintptr_t RVA_RECV_PKT_GLOBAL     = 0x1CAB48;
+static constexpr uintptr_t RVA_CM_HANDLER_ORIG     = 0x1CAAF0;  // g_pfnOriginalCMServerHandler
+static constexpr uintptr_t RVA_CM_VTABLE_SLOT      = 0x1CAB38;  // vtable slot where payload installed CMServerHandler_Hooked
+static constexpr uintptr_t RVA_DEPOT_MANIFESTS     = 0x1C3868;  // g_pDepotManifests (heap ptr)
+static constexpr uintptr_t RVA_DEPOT_MANIFEST_CNT  = 0x1C3870;  // g_nDepotManifestCount
+
+static constexpr uint32_t EMSG_CLIENT_PICSPRODUCTINFO = 8903;
+
+// steamclient64.dll RVAs for manifest pinning inline detour
+// IDA image base: 0x138000000
+// sub_1384B72B0 = CUserAppManager::BuildDepotDependency
+// Signature: __int64 __fastcall(QWORD* a1, uint a2, int64 a3, int64 a4, int64 a5, int64 a6, DWORD* a7, BYTE* a8)
+//   a1 (rcx) = CUserAppManager*
+//   a2 (edx) = appId
+//   a4 (r9)  = output depot vector (app's own depots)
+//   a5 ([rsp+28h]) = output depot vector (DLC/shared depots)
+// Depot vectors: *(QWORD*)vec = array base, *(int*)(vec+16) = count
+// Each entry is 32 bytes: {uint32 depotId, uint32 appId, uint64 manifestId, ...}
+static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4B72B0;
+static constexpr size_t SC_BDD_STOLEN_BYTES = 14;  // first 14 bytes of prologue
 
 // steamclient64.dll RVAs for CCMInterface discovery
 // IDA image base: 0x138000000
@@ -166,6 +185,7 @@ static void InstallServiceMethodHook();
 static bool IsSelfUnlockingLua(const std::string& filePath, uint32_t appId);
 static bool __fastcall NotificationWrapperHook(void* thisptr, const char* methodName, void* request);
 static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodName, void* bodyObj, int* flags);
+static int64_t __fastcall CMServerHandlerHook(int64_t a1, const uint8_t* data, uint64_t size);
 
 static thread_local uintptr_t s_crashAccessAddr = 0;
 static thread_local uintptr_t s_crashAccessType = 0;
@@ -208,6 +228,19 @@ static std::vector<std::thread> g_bgThreads;
 static std::atomic<bool> g_syncAchievements{false};
 static std::atomic<bool> g_syncPlaytime{false};
 static std::atomic<bool> g_syncLuas{false};
+
+// Manifest pinning (depot -> manifest override)
+static std::atomic<bool> g_manifestPinsEnabled{false};
+static std::unordered_map<uint32_t, std::unordered_map<uint32_t, uint64_t>> g_manifestPins;  // appId -> {depotId -> manifestId}
+
+// Inline detour on steamclient64!sub_1384B72B0 (CUserAppManager::BuildDepotDependency)
+// Post-call hook: call original via trampoline, then patch manifest IDs in output vectors.
+using BuildDepotDependencyFn = __int64(__fastcall*)(__int64* a1, unsigned int a2, __int64 a3,
+                                                     __int64 a4, __int64 a5, __int64 a6,
+                                                     uint32_t* a7, uint8_t* a8);
+static BuildDepotDependencyFn g_origBuildDepotDependency = nullptr;  // trampoline
+static uint8_t* g_bddTrampoline = nullptr;                           // allocated trampoline memory
+static uint8_t* g_bddOrigAddr = nullptr;                             // original function address
 
 // BRouteMsgToJob bypass function pointers (resolved once from steamclient64.dll)
 static WrapPacketFn g_wrapPacket = nullptr;
@@ -1599,6 +1632,56 @@ static void InstallServiceMethodHook() {
     }
 }
 
+// Inline detour hook on CUserAppManager::BuildDepotDependency (sub_1384B72B0).
+// This is a POST-CALL hook: we call the original first, then patch the output
+// depot vectors to replace manifest IDs for pinned depots. This fixes both
+// the download path AND the scheduler comparison (which caused the update loop
+// when we hooked BYldBuildFileMapping instead).
+static void PatchDepotVector(__int64 vec, uint32_t appId,
+                             const std::unordered_map<uint32_t, uint64_t>& depotPins,
+                             const char* vecName) {
+    if (!vec) return;
+    uint8_t* arrayBase = *reinterpret_cast<uint8_t**>(vec);
+    int count = *reinterpret_cast<int*>(vec + 16);
+    if (!arrayBase || count <= 0) return;
+
+    for (int i = 0; i < count; i++) {
+        uint8_t* entry = arrayBase + static_cast<size_t>(i) * 32;
+        uint32_t depotId = *reinterpret_cast<uint32_t*>(entry);
+        auto pinIt = depotPins.find(depotId);
+        if (pinIt != depotPins.end()) {
+            uint64_t* pManifestId = reinterpret_cast<uint64_t*>(entry + 8);
+            uint64_t oldManifest = *pManifestId;
+            if (oldManifest != pinIt->second) {
+                *pManifestId = pinIt->second;
+                LOG("[ManifestPin] app %u depot %u (%s): manifest %llu -> %llu",
+                    appId, depotId, vecName, oldManifest, pinIt->second);
+            }
+        }
+    }
+}
+
+static __int64 __fastcall BuildDepotDependencyHook(__int64* a1, unsigned int a2, __int64 a3,
+                                                    __int64 a4, __int64 a5, __int64 a6,
+                                                    uint32_t* a7, uint8_t* a8) {
+    HookGuard guard;
+    if (g_shuttingDown.load(std::memory_order_acquire) || !g_origBuildDepotDependency)
+        return g_origBuildDepotDependency ? g_origBuildDepotDependency(a1, a2, a3, a4, a5, a6, a7, a8) : 0;
+
+    __int64 result = g_origBuildDepotDependency(a1, a2, a3, a4, a5, a6, a7, a8);
+
+    if (g_manifestPinsEnabled.load(std::memory_order_relaxed) && result) {
+        auto appIt = g_manifestPins.find(a2);
+        if (appIt != g_manifestPins.end()) {
+            auto& depotPins = appIt->second;
+            PatchDepotVector(a4, a2, depotPins, "primary");
+            PatchDepotVector(a5, a2, depotPins, "secondary");
+        }
+    }
+
+    return result;
+}
+
 // RecvPkt monitor hook (logging + Approach D injection drain)
 static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
     HookGuard guard;
@@ -2528,6 +2611,42 @@ void Init(const std::string& steamPath) {
             g_syncLuas = cfg["sync_luas"].boolean();
         LOG("[NS] Sync toggles: achievements=%d, playtime=%d, luas=%d",
             g_syncAchievements.load(), g_syncPlaytime.load(), g_syncLuas.load());
+
+        // manifest pinning
+        if (cfg["manifest_pins_enabled"].type == Json::Type::Bool)
+            g_manifestPinsEnabled = cfg["manifest_pins_enabled"].boolean();
+        auto& pinsObj = cfg["manifest_pins"];
+        size_t totalPins = 0;
+        if (g_manifestPinsEnabled.load() && pinsObj.type == Json::Type::Object) {
+            for (auto& [appIdStr, depots] : pinsObj.objVal) {
+                uint32_t appId = (uint32_t)strtoul(appIdStr.c_str(), nullptr, 10);
+                if (appId == 0 || depots.type != Json::Type::Object) continue;
+                if (!IsNamespaceApp(appId)) {
+                    LOG("[ManifestPin] Skipping app %u (not a namespace app)", appId);
+                    continue;
+                }
+                auto& depotMap = g_manifestPins[appId];
+                for (auto& [depotIdStr, manifestVal] : depots.objVal) {
+                    uint32_t depotId = (uint32_t)strtoul(depotIdStr.c_str(), nullptr, 10);
+                    if (depotId == 0) continue;
+                    uint64_t manifestId = 0;
+                    if (manifestVal.type == Json::Type::String)
+                        manifestId = strtoull(manifestVal.str().c_str(), nullptr, 10);
+                    else if (manifestVal.type == Json::Type::Number)
+                        manifestId = (uint64_t)manifestVal.integer();
+                    if (manifestId == 0) continue;
+                    depotMap[depotId] = manifestId;
+                    totalPins++;
+                    LOG("[ManifestPin] Pin: app %u depot %u -> manifest %llu", appId, depotId, manifestId);
+                }
+            }
+            if (totalPins > 0)
+                LOG("[ManifestPin] Loaded %zu pin(s) across %zu app(s)", totalPins, g_manifestPins.size());
+        }
+        if (g_manifestPinsEnabled.load() && totalPins == 0) {
+            LOG("[ManifestPin] Enabled but no valid pins configured");
+            g_manifestPinsEnabled = false;
+        }
     } else {
         LOG("[NS] No config.json at %s — local-only mode", configPath.c_str());
     }
@@ -2571,6 +2690,106 @@ void InstallRecvPktMonitor(void* savedOrigPtrAddr) {
     RecvPktFn readback = *slot;
     LOG("InstallRecvPktMonitor: hooked -> %p (readback=%p, match=%d)",
         RecvPktMonitorHook, readback, readback == RecvPktMonitorHook);
+}
+
+void InstallManifestPinHook() {
+    if (!g_manifestPinsEnabled.load(std::memory_order_relaxed)) {
+        LOG("[ManifestPin] Pins not enabled, skipping hook");
+        return;
+    }
+
+    HMODULE hSteamClient = GetModuleHandleA("steamclient64.dll");
+    if (!hSteamClient) {
+        LOG("[ManifestPin] steamclient64.dll not loaded");
+        return;
+    }
+
+    uintptr_t scBase = reinterpret_cast<uintptr_t>(hSteamClient);
+    g_bddOrigAddr = reinterpret_cast<uint8_t*>(scBase + SC_RVA_BUILD_DEPOT_DEPENDENCY);
+    LOG("[ManifestPin] Target: steamclient64!BuildDepotDependency at %p (base %p + 0x%X)",
+        g_bddOrigAddr, hSteamClient, SC_RVA_BUILD_DEPOT_DEPENDENCY);
+
+    // Verify the prologue bytes match what we expect from IDA:
+    // 48 8B C4             mov rax, rsp
+    // 4C 89 48 20          mov [rax+20h], r9
+    // 89 50 10             mov [rax+10h], edx
+    // 48 89 48 08          mov [rax+8], rcx
+    static const uint8_t expectedPrologue[SC_BDD_STOLEN_BYTES] = {
+        0x48, 0x8B, 0xC4,              // mov rax, rsp
+        0x4C, 0x89, 0x48, 0x20,        // mov [rax+20h], r9
+        0x89, 0x50, 0x10,              // mov [rax+10h], edx
+        0x48, 0x89, 0x48, 0x08         // mov [rax+8], rcx
+    };
+    if (memcmp(g_bddOrigAddr, expectedPrologue, SC_BDD_STOLEN_BYTES) != 0) {
+        LOG("[ManifestPin] Prologue mismatch! Steam may have updated. Aborting hook.");
+        LOG("[ManifestPin] Expected: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+            expectedPrologue[0], expectedPrologue[1], expectedPrologue[2], expectedPrologue[3],
+            expectedPrologue[4], expectedPrologue[5], expectedPrologue[6], expectedPrologue[7],
+            expectedPrologue[8], expectedPrologue[9], expectedPrologue[10], expectedPrologue[11],
+            expectedPrologue[12], expectedPrologue[13]);
+        LOG("[ManifestPin] Got:      %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+            g_bddOrigAddr[0], g_bddOrigAddr[1], g_bddOrigAddr[2], g_bddOrigAddr[3],
+            g_bddOrigAddr[4], g_bddOrigAddr[5], g_bddOrigAddr[6], g_bddOrigAddr[7],
+            g_bddOrigAddr[8], g_bddOrigAddr[9], g_bddOrigAddr[10], g_bddOrigAddr[11],
+            g_bddOrigAddr[12], g_bddOrigAddr[13]);
+        g_bddOrigAddr = nullptr;
+        return;
+    }
+
+    // Allocate executable memory for the trampoline (stolen bytes + jmp back).
+    // Total trampoline size: 14 (stolen) + 14 (jmp [rip+0] + 8-byte addr) = 28 bytes
+    static constexpr size_t TRAMPOLINE_SIZE = SC_BDD_STOLEN_BYTES + 14;
+    g_bddTrampoline = reinterpret_cast<uint8_t*>(
+        VirtualAlloc(nullptr, TRAMPOLINE_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!g_bddTrampoline) {
+        LOG("[ManifestPin] VirtualAlloc for trampoline failed (%u)", GetLastError());
+        g_bddOrigAddr = nullptr;
+        return;
+    }
+
+    // Build trampoline: stolen prologue bytes + absolute jump back to original+14
+    memcpy(g_bddTrampoline, g_bddOrigAddr, SC_BDD_STOLEN_BYTES);
+    uint8_t* jumpBack = g_bddTrampoline + SC_BDD_STOLEN_BYTES;
+    jumpBack[0] = 0xFF;  // jmp [rip+0]
+    jumpBack[1] = 0x25;
+    jumpBack[2] = 0x00;
+    jumpBack[3] = 0x00;
+    jumpBack[4] = 0x00;
+    jumpBack[5] = 0x00;
+    uintptr_t returnAddr = reinterpret_cast<uintptr_t>(g_bddOrigAddr) + SC_BDD_STOLEN_BYTES;
+    memcpy(jumpBack + 6, &returnAddr, 8);
+
+    g_origBuildDepotDependency = reinterpret_cast<BuildDepotDependencyFn>(g_bddTrampoline);
+    LOG("[ManifestPin] Trampoline at %p, returns to %p", g_bddTrampoline, (void*)returnAddr);
+
+    // Overwrite the original function's first 14 bytes with a jump to our hook.
+    // ff 25 00 00 00 00 [8-byte absolute address of BuildDepotDependencyHook]
+    DWORD oldProt;
+    if (!VirtualProtect(g_bddOrigAddr, SC_BDD_STOLEN_BYTES, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        LOG("[ManifestPin] VirtualProtect on target failed (%u)", GetLastError());
+        VirtualFree(g_bddTrampoline, 0, MEM_RELEASE);
+        g_bddTrampoline = nullptr;
+        g_origBuildDepotDependency = nullptr;
+        g_bddOrigAddr = nullptr;
+        return;
+    }
+
+    uint8_t detour[SC_BDD_STOLEN_BYTES];
+    detour[0] = 0xFF;  // jmp [rip+0]
+    detour[1] = 0x25;
+    detour[2] = 0x00;
+    detour[3] = 0x00;
+    detour[4] = 0x00;
+    detour[5] = 0x00;
+    uintptr_t hookAddr = reinterpret_cast<uintptr_t>(&BuildDepotDependencyHook);
+    memcpy(detour + 6, &hookAddr, 8);
+    memcpy(g_bddOrigAddr, detour, SC_BDD_STOLEN_BYTES);
+
+    FlushInstructionCache(GetCurrentProcess(), g_bddOrigAddr, SC_BDD_STOLEN_BYTES);
+    VirtualProtect(g_bddOrigAddr, SC_BDD_STOLEN_BYTES, oldProt, &oldProt);
+
+    LOG("[ManifestPin] Inline detour installed at %p -> BuildDepotDependencyHook %p",
+        g_bddOrigAddr, (void*)hookAddr);
 }
 
 void SetSendPktAddr(void* recvPktGlobalAddr) {
@@ -2782,6 +3001,21 @@ void Shutdown() {
         } else {
             LOG("Shutdown: VirtualProtect failed restoring vtable (%u)", GetLastError());
         }
+    }
+
+    // Restore inline detour on steamclient64 (manifest pinning)
+    if (g_bddOrigAddr && g_bddTrampoline) {
+        DWORD oldProt;
+        if (VirtualProtect(g_bddOrigAddr, SC_BDD_STOLEN_BYTES, PAGE_EXECUTE_READWRITE, &oldProt)) {
+            memcpy(g_bddOrigAddr, g_bddTrampoline, SC_BDD_STOLEN_BYTES);
+            FlushInstructionCache(GetCurrentProcess(), g_bddOrigAddr, SC_BDD_STOLEN_BYTES);
+            VirtualProtect(g_bddOrigAddr, SC_BDD_STOLEN_BYTES, oldProt, &oldProt);
+            LOG("Shutdown: restored BuildDepotDependency prologue");
+        }
+        VirtualFree(g_bddTrampoline, 0, MEM_RELEASE);
+        g_bddTrampoline = nullptr;
+        g_origBuildDepotDependency = nullptr;
+        g_bddOrigAddr = nullptr;
     }
 
     // Join lua sync thread before shutdown proceeds
