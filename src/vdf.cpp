@@ -46,7 +46,7 @@ bool ForEachFieldInSection(const std::string& vdfContent,
                                 if (!cb(fi)) return true;
                             }
                         }
-                    } else if (targetDepth < pathLen && key == sectionPath[targetDepth]) {
+                    } else if (targetDepth < pathLen && depth == targetDepth && key == sectionPath[targetDepth]) {
                         targetDepth++;
                         if (targetDepth == pathLen) {
                             inTarget = true;

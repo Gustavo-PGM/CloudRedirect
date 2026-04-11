@@ -29,7 +29,6 @@ static constexpr uint32_t PROTO_FLAG = 0x80000000;
 static constexpr uint32_t EMSG_MASK = 0x7FFFFFFF;
 static constexpr uint32_t EMSG_SERVICE_METHOD = 151;
 static constexpr uint32_t EMSG_SERVICE_METHOD_RESP = 147;
-static constexpr uint32_t EMSG_SERVICE_METHOD_SEND = 152;
 static constexpr uint64_t JOBID_NONE = 0xFFFFFFFFFFFFFFFFULL;
 
 static constexpr uint32_t HDR_STEAMID = 1;
@@ -201,10 +200,14 @@ static std::atomic<bool> g_shuttingDown{false};
 static std::atomic<bool> g_cmInterfaceFound{false}; // whether we've found the real CCMInterface
 static std::thread g_luaSyncThread;                  // deferred lua sync (waits for accountId)
 
+// Background threads spawned by notification hooks (exit-sync uploads, MessageBox, etc.)
+static std::mutex g_bgThreadsMutex;
+static std::vector<std::thread> g_bgThreads;
+
 // Sync toggles (all default OFF, read from config.json at init)
-static bool g_syncAchievements = false;
-static bool g_syncPlaytime = false;
-static bool g_syncLuas = false;
+static std::atomic<bool> g_syncAchievements{false};
+static std::atomic<bool> g_syncPlaytime{false};
+static std::atomic<bool> g_syncLuas{false};
 
 // BRouteMsgToJob bypass function pointers (resolved once from steamclient64.dll)
 static WrapPacketFn g_wrapPacket = nullptr;
@@ -251,6 +254,25 @@ static bool HasNamespaceApps() {
 static void AddNamespaceApp(uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_namespaceAppsMutex);
     g_namespaceApps.insert(appId);
+}
+
+// per-app launch timestamp for internal playtime tracking
+static std::mutex g_launchTimeMutex;
+static std::unordered_map<uint32_t, time_t> g_launchTimes;
+
+void RecordLaunchTime(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_launchTimeMutex);
+    g_launchTimes[appId] = time(nullptr);
+    LOG("[Playtime] Recorded launch time for app %u", appId);
+}
+
+static time_t PopLaunchTime(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_launchTimeMutex);
+    auto it = g_launchTimes.find(appId);
+    if (it == g_launchTimes.end()) return 0;
+    time_t t = it->second;
+    g_launchTimes.erase(it);
+    return t;
 }
 
 // cave replacement buffer globals (still needed for passthrough SteamTools hook)
@@ -1188,76 +1210,133 @@ static void UploadStatsOnExit(uint32_t appId) {
     std::string statsFile = g_steamPath + "appcache\\stats\\UserGameStats_"
         + std::to_string(accountId) + "_" + std::to_string(appId) + ".bin";
 
-    std::ifstream f(statsFile, std::ios::binary | std::ios::ate);
-    if (!f.is_open()) {
+    HANDLE hFile = CreateFileA(statsFile.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
         LOG("[Stats] No stats file for app %u, skipping upload", appId);
         return;
     }
 
-    auto size = f.tellg();
-    if (size <= 0 || size > 50 * 1024 * 1024) {
-        LOG("[Stats] Stats file empty or too large for app %u (%lld bytes), skipping upload", appId, (long long)size);
+    LARGE_INTEGER fileSize;
+    if (!GetFileSizeEx(hFile, &fileSize) || fileSize.QuadPart <= 0 || fileSize.QuadPart > 50 * 1024 * 1024) {
+        LOG("[Stats] Stats file empty or too large for app %u (%lld bytes), skipping upload",
+            appId, fileSize.QuadPart);
+        CloseHandle(hFile);
         return;
     }
 
-    std::vector<uint8_t> data(static_cast<size_t>(size));
-    f.seekg(0);
-    f.read(reinterpret_cast<char*>(data.data()), size);
-    f.close();
+    std::vector<uint8_t> data(static_cast<size_t>(fileSize.QuadPart));
+    DWORD bytesRead = 0;
+    BOOL readOk = ReadFile(hFile, data.data(), static_cast<DWORD>(data.size()), &bytesRead, nullptr);
+    CloseHandle(hFile);
+
+    if (!readOk || bytesRead != data.size()) {
+        LOG("[Stats] Failed to read stats file for app %u", appId);
+        return;
+    }
 
     bool ok = CloudStorage::StoreBlob(accountId, appId,
         "UserGameStats.bin", data.data(), data.size());
     LOG("[Stats] Uploaded stats for app %u (%zu bytes, ok=%d)", appId, data.size(), ok);
 }
 
-// Extract LastPlayed and Playtime from localconfig.vdf for a specific app.
-// The file is a text VDF with nested sections; we need to navigate:
-// Software > Valve > Steam > Apps > <appId>
-// and read the LastPlayed/Playtime values from that section.
+// Upload playtime to cloud when a namespace app exits.
+// Primary source: internal launch-time tracking (always available).
+// Fallback: localconfig.vdf (Steam often doesn't write entries for lua apps).
+// Merges with existing cloud blob so playtime accumulates across sessions.
 static void UploadPlaytimeOnExit(uint32_t appId) {
     if (!CloudStorage::IsCloudActive()) return;
 
     uint32_t accountId = GetAccountId();
     if (!accountId) return;
 
-    std::string vdfPath = g_steamPath + "userdata\\" + std::to_string(accountId)
-        + "\\config\\localconfig.vdf";
+    time_t launchTime = PopLaunchTime(appId);
+    time_t now = time(nullptr);
 
-    std::ifstream vdfIn(vdfPath);
-    if (!vdfIn.is_open()) {
-        LOG("[Playtime] Cannot open localconfig.vdf for app %u", appId);
-        return;
-    }
-    std::string vdfContent((std::istreambuf_iterator<char>(vdfIn)), {});
-    vdfIn.close();
+    uint64_t trackedMinutes = 0;
+    uint64_t trackedLastPlayed = (uint64_t)now;
 
-    std::string appIdStr = std::to_string(appId);
-    const char* sections[] = { "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
-    std::string lastPlayed, playtime;
-
-    bool found = VdfUtil::ForEachFieldInSection(vdfContent, sections, 5,
-        [&](const VdfUtil::FieldInfo& fi) {
-            if (fi.key == "LastPlayed") lastPlayed = std::string(fi.value);
-            else if (fi.key == "Playtime") playtime = std::string(fi.value);
-            return true;
-        });
-
-    if (!found || (lastPlayed.empty() && playtime.empty())) {
-        LOG("[Playtime] No playtime data found for app %u", appId);
-        return;
+    if (launchTime > 0 && now > launchTime) {
+        trackedMinutes = (uint64_t)(now - launchTime) / 60;
+        LOG("[Playtime] Internal tracking for app %u: %llu minutes", appId, trackedMinutes);
+    } else {
+        LOG("[Playtime] No internal launch time for app %u, relying on VDF fallback", appId);
     }
 
-    // Build a simple text blob
-    std::string blob;
-    if (!lastPlayed.empty())
-        blob += "LastPlayed\t" + lastPlayed + "\n";
-    if (!playtime.empty())
-        blob += "Playtime\t" + playtime + "\n";
+    // Read Steam's cumulative playtime from localconfig.vdf (if available).
+    // Use Win32 API with shared access since Steam may have the file open.
+    uint64_t vdfLastPlayed = 0, vdfPlaytime = 0;
+    {
+        std::string vdfPath = g_steamPath + "userdata\\" + std::to_string(accountId)
+            + "\\config\\localconfig.vdf";
+        HANDLE hFile = CreateFileA(vdfPath.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            DWORD fileSize = GetFileSize(hFile, nullptr);
+            std::string vdfContent;
+            if (fileSize != INVALID_FILE_SIZE && fileSize > 0) {
+                vdfContent.resize(fileSize);
+                DWORD bytesRead = 0;
+                ReadFile(hFile, (LPVOID)vdfContent.data(), fileSize, &bytesRead, nullptr);
+                vdfContent.resize(bytesRead);
+            }
+            CloseHandle(hFile);
+
+            std::string appIdStr = std::to_string(appId);
+            const char* sections[] = { "UserLocalConfigStore", "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
+            VdfUtil::ForEachFieldInSection(vdfContent, sections, 6,
+                [&](const VdfUtil::FieldInfo& fi) {
+                    if (fi.key == "LastPlayed")
+                        vdfLastPlayed = strtoull(std::string(fi.value).c_str(), nullptr, 10);
+                    else if (fi.key == "Playtime")
+                        vdfPlaytime = strtoull(std::string(fi.value).c_str(), nullptr, 10);
+                    return true;
+                });
+            LOG("[Playtime] VDF for app %u: Playtime=%llu LastPlayed=%llu", appId, vdfPlaytime, vdfLastPlayed);
+        } else {
+            LOG("[Playtime] Cannot open localconfig.vdf for app %u (err=%lu, path=%s)",
+                appId, GetLastError(), vdfPath.c_str());
+        }
+    }
+
+    uint64_t lastPlayed = (trackedLastPlayed > vdfLastPlayed) ? trackedLastPlayed : vdfLastPlayed;
+
+    // Merge with existing cloud blob
+    uint64_t cloudLastPlayed = 0, cloudPlaytime = 0;
+    auto ptData = CloudStorage::RetrieveBlob(accountId, appId, "Playtime.bin");
+    if (!ptData.empty()) {
+        std::string blob(reinterpret_cast<const char*>(ptData.data()), ptData.size());
+        auto parsed = Json::Parse(blob);
+        if (parsed.type == Json::Type::Object) {
+            if (parsed.has("LastPlayed"))
+                cloudLastPlayed = strtoull(parsed["LastPlayed"].strVal.c_str(), nullptr, 10);
+            if (parsed.has("Playtime"))
+                cloudPlaytime = strtoull(parsed["Playtime"].strVal.c_str(), nullptr, 10);
+        }
+    }
+
+    // Playtime: take max of (cloud total, VDF total, cloud + session delta)
+    uint64_t mergedPlaytime = cloudPlaytime + trackedMinutes;
+    if (vdfPlaytime > mergedPlaytime)
+        mergedPlaytime = vdfPlaytime;
+    uint64_t mergedLastPlayed = (lastPlayed > cloudLastPlayed) ? lastPlayed : cloudLastPlayed;
+
+    if (mergedPlaytime == 0 && mergedLastPlayed == 0) {
+        LOG("[Playtime] No playtime data for app %u (no tracking, no VDF, no cloud)", appId);
+        return;
+    }
+
+    Json::Value obj = Json::Object();
+    obj.objVal["LastPlayed"] = Json::String(std::to_string(mergedLastPlayed));
+    obj.objVal["Playtime"] = Json::String(std::to_string(mergedPlaytime));
+    std::string blobStr = Json::Stringify(obj);
 
     bool ok = CloudStorage::StoreBlob(accountId, appId,
-        "Playtime.bin", reinterpret_cast<const uint8_t*>(blob.data()), blob.size());
-    LOG("[Playtime] Uploaded playtime for app %u (LastPlayed=%s, Playtime=%s, ok=%d)",
-        appId, lastPlayed.c_str(), playtime.c_str(), ok);
+        "Playtime.bin", reinterpret_cast<const uint8_t*>(blobStr.data()), blobStr.size());
+    LOG("[Playtime] Uploaded playtime for app %u (session=%llu min, vdf=%llu min, cloud=%llu min, total=%llu min, LastPlayed=%llu, ok=%d)",
+        appId, trackedMinutes, vdfPlaytime, cloudPlaytime, mergedPlaytime, mergedLastPlayed, ok);
 }
 
 // Slot 8 hook — Notification wrapper (e.g. SignalAppExitSyncDone)
@@ -1288,10 +1367,12 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
     // On ExitSyncDone, upload stats and playtime to cloud before suppressing
     if (strcmp(methodName, RPC_EXIT_SYNC) == 0) {
         uint32_t capturedAppId = realAppId;
-        std::thread([capturedAppId] {
+        std::thread t([capturedAppId] {
             if (g_syncAchievements) UploadStatsOnExit(capturedAppId);
             if (g_syncPlaytime) UploadPlaytimeOnExit(capturedAppId);
-        }).detach();
+        });
+        std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
+        g_bgThreads.push_back(std::move(t));
     }
 
     // Namespace app — suppress the notification (don't send to Steam servers)
@@ -1325,10 +1406,12 @@ static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodN
     // On ExitSyncDone, upload stats and playtime to cloud before suppressing
     if (strcmp(methodName, RPC_EXIT_SYNC) == 0) {
         uint32_t capturedAppId = realAppId;
-        std::thread([capturedAppId] {
+        std::thread t([capturedAppId] {
             if (g_syncAchievements) UploadStatsOnExit(capturedAppId);
             if (g_syncPlaytime) UploadPlaytimeOnExit(capturedAppId);
-        }).detach();
+        });
+        std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
+        g_bgThreads.push_back(std::move(t));
     }
 
     // Namespace app — suppress the notification
@@ -1667,6 +1750,7 @@ static bool IsValidLuaFilename(const std::string& name) {
     if (name.find('/') != std::string::npos) return false;
     if (name.find('\\') != std::string::npos) return false;
     if (name.find("..") != std::string::npos) return false;
+    if (name.find(':') != std::string::npos) return false;
     if (name.find('\n') != std::string::npos) return false;
     if (name.find('\r') != std::string::npos) return false;
     if (name.size() < 5) return false; // minimum: "X.lua"
@@ -1687,6 +1771,12 @@ static bool IsValidLuaFilename(const std::string& name) {
         }
     }
     return true;
+}
+
+// Reject binary content (NUL bytes in the first 8KB)
+static bool IsValidLuaContent(const uint8_t* data, size_t len) {
+    size_t check = (len < 8192) ? len : 8192;
+    return memchr(data, '\0', check) == nullptr;
 }
 
 static std::vector<LuaFile> ReadLocalLuaFiles() {
@@ -1769,10 +1859,20 @@ static CloudManifest ParseManifest(const std::vector<uint8_t>& data) {
             // Old format: bare number is mod time
             entry.mod = static_cast<uint64_t>(val.numVal);
         } else if (val.type == Json::Type::Object) {
-            if (val.has("mod") && val["mod"].type == Json::Type::Number)
-                entry.mod = static_cast<uint64_t>(val["mod"].numVal);
-            if (val.has("del") && val["del"].type == Json::Type::Number)
-                entry.del = static_cast<uint64_t>(val["del"].numVal);
+            if (val.has("mod")) {
+                auto& m = val["mod"];
+                if (m.type == Json::Type::Number)
+                    entry.mod = static_cast<uint64_t>(m.numVal);
+                else if (m.type == Json::Type::String)
+                    entry.mod = strtoull(m.strVal.c_str(), nullptr, 10);
+            }
+            if (val.has("del")) {
+                auto& d = val["del"];
+                if (d.type == Json::Type::Number)
+                    entry.del = static_cast<uint64_t>(d.numVal);
+                else if (d.type == Json::Type::String)
+                    entry.del = strtoull(d.strVal.c_str(), nullptr, 10);
+            }
         }
         manifest[key] = entry;
     }
@@ -1783,9 +1883,9 @@ static std::string SerializeManifest(const CloudManifest& manifest) {
     Json::Value root = Json::Object();
     for (auto& [filename, entry] : manifest) {
         Json::Value obj = Json::Object();
-        obj.objVal["mod"] = Json::Number(static_cast<double>(entry.mod));
+        obj.objVal["mod"] = Json::String(std::to_string(entry.mod));
         if (entry.del > 0)
-            obj.objVal["del"] = Json::Number(static_cast<double>(entry.del));
+            obj.objVal["del"] = Json::String(std::to_string(entry.del));
         root.objVal[filename] = obj;
     }
     return Json::Stringify(root);
@@ -1841,20 +1941,26 @@ static void SyncLuaFiles() {
                     LOG("[LuaSync] Skipping invalid zip entry: %s", fname);
                     continue;
                 }
+                // Check declared size before allocating
+                mz_zip_archive_file_stat fstat;
+                if (!mz_zip_reader_file_stat(&zip, i, &fstat)) continue;
+                constexpr size_t MAX_LUA_SIZE = 10 * 1024 * 1024; // 10 MB
+                if (fstat.m_uncomp_size > MAX_LUA_SIZE) {
+                    LOG("[LuaSync] Skipping oversized zip entry: %s (%llu bytes)", fname, (unsigned long long)fstat.m_uncomp_size);
+                    continue;
+                }
+                totalExtracted += static_cast<size_t>(fstat.m_uncomp_size);
+                if (totalExtracted > MAX_TOTAL_SIZE) {
+                    LOG("[LuaSync] Total extracted size exceeds %zuMB limit, stopping", MAX_TOTAL_SIZE / (1024*1024));
+                    break;
+                }
                 size_t uncompSize = 0;
                 void* p = mz_zip_reader_extract_to_heap(&zip, i, &uncompSize, 0);
                 if (p) {
-                    constexpr size_t MAX_LUA_SIZE = 10 * 1024 * 1024; // 10 MB
-                    if (uncompSize > MAX_LUA_SIZE) {
-                        LOG("[LuaSync] Skipping oversized zip entry: %s (%zu bytes)", fname, uncompSize);
+                    if (!IsValidLuaContent(static_cast<uint8_t*>(p), uncompSize)) {
+                        LOG("[LuaSync] Skipping binary zip entry: %s", fname);
                         mz_free(p);
                         continue;
-                    }
-                    totalExtracted += uncompSize;
-                    if (totalExtracted > MAX_TOTAL_SIZE) {
-                        LOG("[LuaSync] Total extracted size exceeds %zuMB limit, stopping", MAX_TOTAL_SIZE / (1024*1024));
-                        mz_free(p);
-                        break;
                     }
                     cloudFiles[fname] = std::vector<uint8_t>(
                         static_cast<uint8_t*>(p), static_cast<uint8_t*>(p) + uncompSize);
@@ -2331,14 +2437,16 @@ void Init(const std::string& steamPath) {
                         LOG("[NS] WARNING: %s is configured but not authenticated -- saves will only be stored locally",
                             provider->Name());
                         std::string name = provider->Name();
-                        std::thread([name]() {
+                        std::thread t([name]() {
                             MessageBoxA(nullptr,
                                 (name + " is configured but you haven't signed in yet.\n\n"
                                  "Your saves will be stored locally but will NOT sync to the cloud.\n\n"
                                  "Open the CloudRedirect app and sign in on the Cloud Provider page.").c_str(),
                                 "CloudRedirect - Cloud Provider Not Authenticated",
                                 MB_OK | MB_ICONWARNING | MB_SYSTEMMODAL);
-                        }).detach();
+                        });
+                        std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
+                        g_bgThreads.push_back(std::move(t));
                     }
                 } else {
                     LOG("[NS] WARNING: Cloud provider '%s' init failed (path='%s'), falling back to local-only",
@@ -2368,7 +2476,7 @@ void Init(const std::string& steamPath) {
         if (cfg["sync_luas"].type == Json::Type::Bool)
             g_syncLuas = cfg["sync_luas"].boolean();
         LOG("[NS] Sync toggles: achievements=%d, playtime=%d, luas=%d",
-            g_syncAchievements, g_syncPlaytime, g_syncLuas);
+            g_syncAchievements.load(), g_syncPlaytime.load(), g_syncLuas.load());
     } else {
         LOG("[NS] No config.json at %s — local-only mode", configPath.c_str());
     }
@@ -2627,6 +2735,15 @@ void Shutdown() {
 
     // Join lua sync thread before shutdown proceeds
     if (g_luaSyncThread.joinable()) g_luaSyncThread.join();
+
+    // Join background threads (exit-sync uploads, MessageBox, etc.)
+    {
+        std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
+        for (auto& t : g_bgThreads) {
+            if (t.joinable()) t.join();
+        }
+        g_bgThreads.clear();
+    }
 
     // Upload current lua state before cloud provider shuts down
     if (g_syncLuas) UploadLuaOnShutdown();

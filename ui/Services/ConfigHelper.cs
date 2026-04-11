@@ -10,6 +10,8 @@ namespace CloudRedirect.Services;
 /// </summary>
 public static class ConfigHelper
 {
+    private static readonly object _fileLock = new();
+
     /// <summary>
     /// Read existing config, preserve keys not in <paramref name="skipKeys"/>,
     /// let the caller write its own keys via <paramref name="writeKeys"/>,
@@ -19,44 +21,47 @@ public static class ConfigHelper
                                   string[] skipKeys,
                                   System.Action<Utf8JsonWriter> writeKeys)
     {
-        var dir = Path.GetDirectoryName(configPath)!;
-        if (!Directory.Exists(dir))
-            Directory.CreateDirectory(dir);
-
-        JsonElement existing = default;
-        if (File.Exists(configPath))
+        lock (_fileLock)
         {
-            try
+            var dir = Path.GetDirectoryName(configPath)!;
+            if (!Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            JsonElement existing = default;
+            if (File.Exists(configPath))
             {
-                var oldJson = File.ReadAllText(configPath);
-                using var oldDoc = JsonDocument.Parse(oldJson);
-                existing = oldDoc.RootElement.Clone();
-            }
-            catch { }
-        }
-
-        var skipSet = new System.Collections.Generic.HashSet<string>(skipKeys);
-
-        using var ms = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
-        {
-            writer.WriteStartObject();
-
-            writeKeys(writer);
-
-            if (existing.ValueKind == JsonValueKind.Object)
-            {
-                foreach (var prop in existing.EnumerateObject())
+                try
                 {
-                    if (skipSet.Contains(prop.Name)) continue;
-                    prop.WriteTo(writer);
+                    var oldJson = File.ReadAllText(configPath);
+                    using var oldDoc = JsonDocument.Parse(oldJson);
+                    existing = oldDoc.RootElement.Clone();
                 }
+                catch { }
             }
 
-            writer.WriteEndObject();
-        }
+            var skipSet = new System.Collections.Generic.HashSet<string>(skipKeys);
 
-        var json = System.Text.Encoding.UTF8.GetString(ms.ToArray());
-        FileUtils.AtomicWriteAllText(configPath, json);
+            using var ms = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
+            {
+                writer.WriteStartObject();
+
+                writeKeys(writer);
+
+                if (existing.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var prop in existing.EnumerateObject())
+                    {
+                        if (skipSet.Contains(prop.Name)) continue;
+                        prop.WriteTo(writer);
+                    }
+                }
+
+                writer.WriteEndObject();
+            }
+
+            var json = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+            FileUtils.AtomicWriteAllText(configPath, json);
+        }
     }
 }

@@ -44,6 +44,9 @@ bool SyncAchievementsEnabled();
 bool SyncPlaytimeEnabled();
 bool SyncLuasEnabled();
 
+// record the launch timestamp for internal playtime tracking
+void RecordLaunchTime(uint32_t appId);
+
 // signal shutdown
 void Shutdown();
 

@@ -7,6 +7,7 @@
 #include "file_util.h"
 #include "vdf.h"
 #include "log.h"
+#include "json.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
@@ -498,8 +499,8 @@ static std::vector<BkvNode> MergeStats(
     BkvNode* cloudCache = BkvFind(cloud, "cache");
     if (!localCache || !cloudCache) {
         // If either is missing/malformed, prefer whichever has a cache section
-        if (cloudCache) return cloud;
-        return local;
+        if (cloudCache) return std::move(cloud);
+        return std::move(local);
     }
 
     // Walk cloud stat sections and merge into local
@@ -566,7 +567,7 @@ static std::vector<BkvNode> MergeStats(
     if (crc && crc->type == BKV_INT)
         crc->intVal = 0;
 
-    return local;
+    return std::move(local);
 }
 
 // Merge cloud stats into the local stats file on disk.
@@ -591,12 +592,10 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
         // No local file -- parse and rewrite cloud data to strip junk
         std::vector<uint8_t> outBuf;
         BkvWrite(cloudNodes, outBuf);
-        std::ofstream f(statsPath, std::ios::binary | std::ios::trunc);
-        if (!f.is_open()) {
+        if (!FileUtil::AtomicWriteBinary(statsPath, outBuf.data(), outBuf.size())) {
             LOG("[Stats] Failed to create stats file for app %u", appId);
             return false;
         }
-        f.write(reinterpret_cast<const char*>(outBuf.data()), outBuf.size());
         LOG("[Stats] No local stats, wrote cloud stats for app %u (%zu bytes)", appId, outBuf.size());
         return true;
     }
@@ -606,9 +605,8 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
         localFile.close();
         std::vector<uint8_t> outBuf;
         BkvWrite(cloudNodes, outBuf);
-        std::ofstream f(statsPath, std::ios::binary | std::ios::trunc);
-        if (!f.is_open()) return false;
-        f.write(reinterpret_cast<const char*>(outBuf.data()), outBuf.size());
+        if (!FileUtil::AtomicWriteBinary(statsPath, outBuf.data(), outBuf.size()))
+            return false;
         LOG("[Stats] Local stats empty, wrote cloud stats for app %u (%zu bytes)", appId, outBuf.size());
         return true;
     }
@@ -653,6 +651,7 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
 PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBody) {
     LOG("[NS] SignalAppLaunchIntent app=%u", appId);
 
+    RecordLaunchTime(appId);
     // Pull latest data from cloud provider (if active) before game starts.
     // This downloads CN, root tokens, metadata, and any missing blobs.
     uint32_t accountId = GetAccountId();
@@ -677,15 +676,25 @@ PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqB
                 // Parse the blob: tab-separated key/value pairs, one per line
                 std::string blob(reinterpret_cast<const char*>(ptData.data()), ptData.size());
                 uint64_t cloudLastPlayed = 0, cloudPlaytime = 0;
-                std::istringstream blobStream(blob);
-                std::string blobLine;
-                while (std::getline(blobStream, blobLine)) {
-                    size_t tab = blobLine.find('\t');
-                    if (tab == std::string::npos) continue;
-                    std::string key = blobLine.substr(0, tab);
-                    std::string val = blobLine.substr(tab + 1);
-                    if (key == "LastPlayed") cloudLastPlayed = strtoull(val.c_str(), nullptr, 10);
-                    else if (key == "Playtime") cloudPlaytime = strtoull(val.c_str(), nullptr, 10);
+
+                // Try JSON format first, fall back to legacy tab-separated
+                auto parsed = Json::Parse(blob);
+                if (parsed.type == Json::Type::Object) {
+                    if (parsed.has("LastPlayed"))
+                        cloudLastPlayed = strtoull(parsed["LastPlayed"].strVal.c_str(), nullptr, 10);
+                    if (parsed.has("Playtime"))
+                        cloudPlaytime = strtoull(parsed["Playtime"].strVal.c_str(), nullptr, 10);
+                } else {
+                    std::istringstream blobStream(blob);
+                    std::string blobLine;
+                    while (std::getline(blobStream, blobLine)) {
+                        size_t tab = blobLine.find('\t');
+                        if (tab == std::string::npos) continue;
+                        std::string key = blobLine.substr(0, tab);
+                        std::string val = blobLine.substr(tab + 1);
+                        if (key == "LastPlayed") cloudLastPlayed = strtoull(val.c_str(), nullptr, 10);
+                        else if (key == "Playtime") cloudPlaytime = strtoull(val.c_str(), nullptr, 10);
+                    }
                 }
 
                 if (cloudLastPlayed == 0 && cloudPlaytime == 0) {
@@ -702,13 +711,13 @@ PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqB
 
                         // Find the app section and read current values
                         std::string appIdStr = std::to_string(appId);
-                        const char* sections[] = { "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
+                        const char* sections[] = { "UserLocalConfigStore", "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
                         uint64_t localLastPlayed = 0, localPlaytime = 0;
 
                         struct FieldLoc { size_t valStart; size_t valEnd; };
                         FieldLoc lpLoc = {0, 0}, ptLoc = {0, 0};
 
-                        bool found = VdfUtil::ForEachFieldInSection(vdfContent, sections, 5,
+                        bool found = VdfUtil::ForEachFieldInSection(vdfContent, sections, 6,
                             [&](const VdfUtil::FieldInfo& fi) {
                                 if (fi.key == "LastPlayed") {
                                     localLastPlayed = strtoull(std::string(fi.value).c_str(), nullptr, 10);
@@ -728,26 +737,24 @@ PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqB
 
                             bool needWrite = (mergedLP != localLastPlayed || mergedPT != localPlaytime);
                             if (needWrite) {
-                                // Replace the later field first so earlier offsets stay valid
                                 std::string newLP = std::to_string(mergedLP);
                                 std::string newPT = std::to_string(mergedPT);
                                 bool lpValid = lpLoc.valEnd > lpLoc.valStart;
                                 bool ptValid = ptLoc.valEnd > ptLoc.valStart;
 
-                                if (lpValid && ptValid) {
-                                    if (lpLoc.valStart > ptLoc.valStart) {
-                                        vdfContent.replace(lpLoc.valStart, lpLoc.valEnd - lpLoc.valStart, newLP);
-                                        vdfContent.replace(ptLoc.valStart, ptLoc.valEnd - ptLoc.valStart, newPT);
-                                    } else {
-                                        vdfContent.replace(ptLoc.valStart, ptLoc.valEnd - ptLoc.valStart, newPT);
-                                        vdfContent.replace(lpLoc.valStart, lpLoc.valEnd - lpLoc.valStart, newLP);
-                                    }
-                                } else if (lpValid) {
-                                    vdfContent.replace(lpLoc.valStart, lpLoc.valEnd - lpLoc.valStart, newLP);
-                                } else if (ptValid) {
-                                    vdfContent.replace(ptLoc.valStart, ptLoc.valEnd - ptLoc.valStart, newPT);
-                                } else {
+                                struct Replacement { size_t start; size_t len; std::string text; };
+                                std::vector<Replacement> reps;
+                                if (lpValid) reps.push_back({lpLoc.valStart, lpLoc.valEnd - lpLoc.valStart, newLP});
+                                if (ptValid) reps.push_back({ptLoc.valStart, ptLoc.valEnd - ptLoc.valStart, newPT});
+
+                                if (reps.empty()) {
                                     LOG("[Playtime] App %u section has no LastPlayed/Playtime fields, skipping write", appId);
+                                } else {
+                                    // Apply in reverse offset order so earlier offsets stay valid
+                                    std::sort(reps.begin(), reps.end(),
+                                        [](const Replacement& a, const Replacement& b) { return a.start > b.start; });
+                                    for (auto& r : reps)
+                                        vdfContent.replace(r.start, r.len, r.text);
                                 }
 
                                 if (FileUtil::AtomicWriteText(vdfPath, vdfContent)) {

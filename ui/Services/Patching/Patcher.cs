@@ -295,7 +295,7 @@ namespace CloudRedirect.Services.Patching
 
                     try
                     {
-                        File.WriteAllBytes(destPath, data);
+                        FileUtils.AtomicWriteAllBytes(destPath, data);
                         Log($"  {name}: {data.Length} bytes" + (fromFallback ? " (fallback)" : ""));
                     }
                     catch (IOException ex)
