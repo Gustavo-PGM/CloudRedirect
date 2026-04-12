@@ -22,7 +22,7 @@ public partial class ChoiceModePage : Page
 
     private void RefreshState()
     {
-        _currentMode = ReadModeSetting();
+        _currentMode = SteamDetector.ReadModeSetting();
 
         if (_currentMode != null)
         {
@@ -81,22 +81,6 @@ public partial class ChoiceModePage : Page
         var mw = Window.GetWindow(this) as MainWindow;
         mw?.ApplyMode("cloud_redirect");
         mw?.RootNavigation.Navigate(typeof(SetupPage));
-    }
-
-    private static string? ReadModeSetting()
-    {
-        try
-        {
-            var path = GetSettingsPath();
-            if (!File.Exists(path)) return null;
-
-            var json = File.ReadAllText(path);
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("mode", out var prop))
-                return prop.GetString();
-        }
-        catch { }
-        return null;
     }
 
     private static void SaveModeSetting(string mode)

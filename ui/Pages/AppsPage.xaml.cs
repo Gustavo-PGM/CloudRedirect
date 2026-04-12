@@ -74,6 +74,7 @@ public partial class AppsPage : Page
                     foreach (var appDir in Directory.GetDirectories(accountDir))
                     {
                         var appId = Path.GetFileName(appDir);
+                        if (appId == "0") continue;
                         var info = new AppInfo { AppId = appId, AccountId = accountId };
 
                         var cnPath = Path.Combine(appDir, "cn.dat");

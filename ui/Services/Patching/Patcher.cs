@@ -1012,19 +1012,41 @@ namespace CloudRedirect.Services.Patching
                 return null;
             }
 
-            int caveFileOffset = Signatures.FindCodeCave(payload, sections, CloudRedirectCaveContent.Length);
-            if (caveFileOffset < 0)
+            int sendPktRva = PeSection.FileOffsetToRva(sections, sendPkt);
+            if (sendPktRva < 0)
             {
-                Log("  Payload: could not find code cave in any executable section");
+                Log($"  Payload: RVA resolution failed for SendPkt (file=0x{sendPkt:X})");
                 return null;
             }
 
-            int sendPktRva = PeSection.FileOffsetToRva(sections, sendPkt);
+            int caveFileOffset;
+            if (isAlreadyJmp)
+            {
+                // Decode existing jmp to find where the cave was placed last time
+                int existingDisp = BitConverter.ToInt32(payload, sendPkt + 1);
+                int existingCaveRva = sendPktRva + 5 + existingDisp;
+                caveFileOffset = PeSection.RvaToFileOffset(sections, existingCaveRva);
+                if (caveFileOffset < 0)
+                {
+                    Log($"  Payload: existing jmp target RVA 0x{existingCaveRva:X} does not resolve to a file offset");
+                    return null;
+                }
+            }
+            else
+            {
+                caveFileOffset = Signatures.FindCodeCave(payload, sections, CloudRedirectCaveContent.Length);
+                if (caveFileOffset < 0)
+                {
+                    Log("  Payload: could not find code cave in any executable section");
+                    return null;
+                }
+            }
+
             int caveRva = PeSection.FileOffsetToRva(sections, caveFileOffset);
 
-            if (sendPktRva < 0 || caveRva < 0)
+            if (caveRva < 0)
             {
-                Log($"  Payload: RVA resolution failed (sendPkt={sendPktRva:X}, cave={caveRva:X})");
+                Log($"  Payload: RVA resolution failed for cave (file=0x{caveFileOffset:X})");
                 return null;
             }
 

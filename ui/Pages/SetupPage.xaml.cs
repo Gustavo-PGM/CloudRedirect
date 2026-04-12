@@ -30,6 +30,14 @@ public partial class SetupPage : Page
             {
             _steamPath = await Task.Run(() => SteamDetector.FindSteamPath());
 
+            var mode = SteamDetector.ReadModeSetting();
+            if (mode == "stfixer")
+            {
+                DescriptionText.Text = S.Get("Setup_Description_STFixer");
+                CloudRedirectPatchHeaderText.Text = S.Get("Setup_CloudRedirectPatchHeader_STFixer");
+                CloudRedirectPatchDescriptionText.Text = S.Get("Setup_CloudRedirectPatchDescription_STFixer");
+            }
+
             RefreshStatuses();
             }
             catch { }
@@ -41,22 +49,6 @@ public partial class SetupPage : Page
         var window = Window.GetWindow(this);
         if (window is MainWindow mw)
             return mw.RootNavigation;
-        return null;
-    }
-
-    private static string? ReadModeSetting()
-    {
-        try
-        {
-            var path = Path.Combine(SteamDetector.GetConfigDir(), "settings.json");
-            if (!File.Exists(path)) return null;
-
-            var json = File.ReadAllText(path);
-            using var doc = System.Text.Json.JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("mode", out var prop))
-                return prop.GetString();
-        }
-        catch { }
         return null;
     }
 
@@ -647,8 +639,8 @@ public partial class SetupPage : Page
         }
 
         // Only prompt for cloud provider config in cloud_redirect mode
-        var mode = ReadModeSetting();
-        if (mode != "stfixer")
+        var mode = SteamDetector.ReadModeSetting();
+        if (mode == "cloud_redirect")
         {
             var existingConfig = Services.SteamDetector.ReadConfig();
             var statusText = allSucceeded ? S.Get("Setup_AllPatchesApplied") : S.Get("Setup_PatchingFinishedWithErrors");

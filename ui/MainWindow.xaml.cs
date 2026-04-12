@@ -1,8 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
-using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -28,7 +26,7 @@ public partial class MainWindow : FluentWindow
 
                 _ = CheckForAutoUpdateAsync();
 
-                var mode = await Task.Run(() => ReadModeSetting());
+                var mode = await Task.Run(() => Services.SteamDetector.ReadModeSetting());
                 ApplyMode(mode);
 
                 bool needsSetup = await Task.Run(() => NeedsSetup());
@@ -54,22 +52,8 @@ public partial class MainWindow : FluentWindow
 
         // Hide the mode chooser once fully committed to cloud_redirect
         NavChoiceMode.Visibility = cloudOnly ? Visibility.Collapsed : Visibility.Visible;
-    }
 
-    private static string? ReadModeSetting()
-    {
-        try
-        {
-            var path = Path.Combine(Services.SteamDetector.GetConfigDir(), "settings.json");
-            if (!File.Exists(path)) return null;
-
-            var json = File.ReadAllText(path);
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("mode", out var prop))
-                return prop.GetString();
-        }
-        catch { }
-        return null;
+        RootNavigation.UpdateLayout();
     }
 
     /// <summary>
@@ -180,7 +164,7 @@ public partial class MainWindow : FluentWindow
         Dispatcher.Invoke(() => RestartSteamItem.Visibility = Visibility.Visible);
     }
 
-    private void RestartSteamItem_Click(object sender, RoutedEventArgs e)
+    private async void RestartSteamItem_Click(object sender, RoutedEventArgs e)
     {
         var steamPath = Services.SteamDetector.FindSteamPath();
         if (steamPath == null) return;
@@ -188,9 +172,29 @@ public partial class MainWindow : FluentWindow
         var steamExe = Path.Combine(steamPath, "steam.exe");
         if (!File.Exists(steamExe)) return;
 
-        foreach (var proc in Process.GetProcessesByName("steam"))
+        // Graceful shutdown first
+        var procs = Process.GetProcessesByName("steam");
+        bool wasRunning = procs.Length > 0;
+        foreach (var p in procs) p.Dispose();
+
+        if (wasRunning)
         {
-            try { proc.Kill(); } catch { }
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = steamExe,
+                Arguments = "-shutdown",
+                UseShellExecute = true
+            })?.Dispose();
+
+            // Wait up to 15s for Steam to close
+            for (int i = 0; i < 30; i++)
+            {
+                await Task.Delay(500);
+                var check = Process.GetProcessesByName("steam");
+                bool still = check.Length > 0;
+                foreach (var p in check) p.Dispose();
+                if (!still) break;
+            }
         }
 
         try
@@ -199,7 +203,7 @@ public partial class MainWindow : FluentWindow
             {
                 FileName = steamExe,
                 UseShellExecute = true
-            });
+            })?.Dispose();
         }
         catch { }
 

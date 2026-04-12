@@ -11,7 +11,8 @@
                        FontSize="28" FontWeight="SemiBold"
                        Foreground="{DynamicResource TextFillColorPrimaryBrush}"
                        Margin="0,0,0,4" />
-            <TextBlock Text="{res:Loc Setup_Description}"
+            <TextBlock x:Name="DescriptionText"
+                       Text="{res:Loc Setup_Description}"
                        Foreground="{DynamicResource TextFillColorSecondaryBrush}"
                        Margin="0,0,0,24" />
 
@@ -63,8 +64,9 @@
                                    Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
                     </StackPanel>
                 </ui:CardControl.Header>
-                <ToggleButton x:Name="DiagnosticsToggle"
-                              Click="DiagnosticsToggle_Click" />
+                <ui:ToggleSwitch x:Name="DiagnosticsToggle"
+                                 Checked="DiagnosticsToggle_Click"
+                                 Unchecked="DiagnosticsToggle_Click" />
             </ui:CardControl>
 
             <!-- Collapsible diagnostics panel -->
@@ -171,11 +173,13 @@
                                Click="StExeUnpatch_Click" />
                 </WrapPanel>
 
-                <TextBlock Text="{res:Loc Setup_CloudRedirectPatchHeader}"
+                <TextBlock x:Name="CloudRedirectPatchHeaderText"
+                           Text="{res:Loc Setup_CloudRedirectPatchHeader}"
                            FontSize="20" FontWeight="SemiBold"
                            Foreground="{DynamicResource TextFillColorPrimaryBrush}"
                            Margin="0,0,0,8" />
-                <TextBlock Text="{res:Loc Setup_CloudRedirectPatchDescription}"
+                <TextBlock x:Name="CloudRedirectPatchDescriptionText"
+                           Text="{res:Loc Setup_CloudRedirectPatchDescription}"
                            Foreground="{DynamicResource TextFillColorTertiaryBrush}"
                            TextWrapping="Wrap"
                            Margin="0,0,0,8" />

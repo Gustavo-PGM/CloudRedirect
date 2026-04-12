@@ -2561,8 +2561,9 @@ void Init(const std::string& steamPath) {
                             if (start == std::string::npos) continue;
                             if (line.size() > start + 1 && line[start] == '-' && line[start+1] == '-') continue;
 
-                            size_t pos = line.find("setManifestid(");
-                            if (pos == std::string::npos) pos = line.find("setManifestId(");
+                            std::string lower = line;
+                            for (auto& c : lower) c = (char)tolower((unsigned char)c);
+                            size_t pos = lower.find("setmanifestid(");
                             if (pos == std::string::npos) continue;
                             pos += 14;
 

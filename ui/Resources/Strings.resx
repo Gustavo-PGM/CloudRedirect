@@ -47,7 +47,7 @@
     <value>CloudRedirect</value>
   </data>
   <data name="MainWindow_TitleBar" xml:space="preserve">
-    <value>CloudRedirect - Public Test Version #9</value>
+    <value>CloudRedirect - Public Test Version #10</value>
   </data>
   <data name="Nav_Dashboard" xml:space="preserve">
     <value>Dashboard</value>
@@ -126,6 +126,9 @@
   <data name="Setup_Description" xml:space="preserve">
     <value>Apply patches and deploy CloudRedirect to your Steam installation.</value>
   </data>
+  <data name="Setup_Description_STFixer" xml:space="preserve">
+    <value>Apply patches for the Capcom save fix and manifest pinning.</value>
+  </data>
   <data name="Setup_ShowDiagnostics" xml:space="preserve">
     <value>Show Diagnostics</value>
   </data>
@@ -183,8 +186,14 @@
   <data name="Setup_CloudRedirectPatchHeader" xml:space="preserve">
     <value>Cloud Redirect Patch</value>
   </data>
+  <data name="Setup_CloudRedirectPatchHeader_STFixer" xml:space="preserve">
+    <value>Save Fix and Manifest Pinning Patch</value>
+  </data>
   <data name="Setup_CloudRedirectPatchDescription" xml:space="preserve">
     <value>Patches SteamTools payload so lua app cloud saves are routed through the CloudRedirect system.</value>
+  </data>
+  <data name="Setup_CloudRedirectPatchDescription_STFixer" xml:space="preserve">
+    <value>Patches SteamTools payload to fix Capcom save routing and enable manifest pinning for lua apps.</value>
   </data>
   <data name="Setup_PatchStatus" xml:space="preserve">
     <value>Patch Status</value>
@@ -1165,7 +1174,7 @@ Files can be restored from the Restore tab. Continue?</value>
 
   <!-- SettingsPage code-behind -->
   <data name="Settings_VersionFormat" xml:space="preserve">
-    <value>{0}.{1}.{2} (Public Test Version #9)</value>
+    <value>{0}.{1}.{2} (Public Test Version #10)</value>
   </data>
   <data name="Settings_Checking" xml:space="preserve">
     <value>Checking...</value>
@@ -1221,7 +1230,7 @@ Are you sure?</value>
     <value>WARNING</value>
   </data>
   <data name="Disclaimer_BuildBanner" xml:space="preserve">
-    <value>CloudRedirect - Public Test Version #9</value>
+    <value>CloudRedirect - Public Test Version #10</value>
   </data>
   <data name="Disclaimer_ExperimentalBanner" xml:space="preserve">
     <value>!  EXPERIMENTAL  -  DATA  LOSS  RISK  !</value>

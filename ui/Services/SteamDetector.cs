@@ -226,6 +226,25 @@ public static class SteamDetector
     }
 
     /// <summary>
+    /// Reads the "mode" value from settings.json. Returns null if unset or unreadable.
+    /// </summary>
+    public static string? ReadModeSetting()
+    {
+        try
+        {
+            var path = Path.Combine(GetConfigDir(), "settings.json");
+            if (!File.Exists(path)) return null;
+
+            var json = File.ReadAllText(path);
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("mode", out var prop))
+                return prop.GetString();
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>
     /// Reads and parses config.json. Returns null if file doesn't exist or can't be parsed.
     /// </summary>
     public static CloudConfig? ReadConfig()

@@ -210,6 +210,11 @@ public partial class ManifestPinningPage : Page
             mainWindow.ShowRestartSteam();
     }
 
+    private static readonly HashSet<string> _ownedKeys = new()
+    {
+        "manifest_pinning", "auto_comment", "pinned_apps"
+    };
+
     private void SaveConfig()
     {
         try
@@ -217,19 +222,17 @@ public partial class ManifestPinningPage : Page
             var path = SteamDetector.GetPinConfigPath();
             if (path == null) return;
 
-            // Read existing cloud_redirect value to preserve it
-            bool cloudRedirect = true;
+            JsonElement existing = default;
             if (File.Exists(path))
             {
                 try
                 {
-                    var existing = File.ReadAllText(path);
-                    using var doc = JsonDocument.Parse(existing, new JsonDocumentOptions
+                    var raw = File.ReadAllText(path);
+                    using var doc = JsonDocument.Parse(raw, new JsonDocumentOptions
                     {
                         CommentHandling = JsonCommentHandling.Skip
                     });
-                    if (doc.RootElement.TryGetProperty("cloud_redirect", out var cr))
-                        cloudRedirect = cr.ValueKind == JsonValueKind.True;
+                    existing = doc.RootElement.Clone();
                 }
                 catch { }
             }
@@ -238,7 +241,6 @@ public partial class ManifestPinningPage : Page
             using (var writer = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
             {
                 writer.WriteStartObject();
-                writer.WriteBoolean("cloud_redirect", cloudRedirect);
                 writer.WriteBoolean("manifest_pinning", ManifestPinningToggle.IsChecked == true);
                 writer.WriteBoolean("auto_comment", AutoCommentToggle.IsChecked == true);
 
@@ -246,6 +248,15 @@ public partial class ManifestPinningPage : Page
                 foreach (var appId in _pinnedApps.OrderBy(x => x))
                     writer.WriteNumberValue(appId);
                 writer.WriteEndArray();
+
+                if (existing.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var prop in existing.EnumerateObject())
+                    {
+                        if (_ownedKeys.Contains(prop.Name)) continue;
+                        prop.WriteTo(writer);
+                    }
+                }
 
                 writer.WriteEndObject();
             }

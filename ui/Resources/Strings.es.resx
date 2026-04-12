@@ -44,7 +44,7 @@
     <value>CloudRedirect</value>
   </data>
   <data name="MainWindow_TitleBar" xml:space="preserve">
-    <value>CloudRedirect - Public Test Version #9</value>
+    <value>CloudRedirect - Public Test Version #10</value>
   </data>
   <data name="Nav_Dashboard" xml:space="preserve">
     <value>Panel</value>
@@ -117,6 +117,9 @@
   <data name="Setup_Description" xml:space="preserve">
     <value>Aplica parches y despliega CloudRedirect en tu instalación de Steam.</value>
   </data>
+  <data name="Setup_Description_STFixer" xml:space="preserve">
+    <value>Aplica parches para la corrección de guardado de Capcom y fijación de manifiestos.</value>
+  </data>
   <data name="Setup_ShowDiagnostics" xml:space="preserve">
     <value>Mostrar diagnósticos</value>
   </data>
@@ -174,8 +177,14 @@
   <data name="Setup_CloudRedirectPatchHeader" xml:space="preserve">
     <value>Parche de Cloud Redirect</value>
   </data>
+  <data name="Setup_CloudRedirectPatchHeader_STFixer" xml:space="preserve">
+    <value>Parche de corrección de guardado y fijación de manifiestos</value>
+  </data>
   <data name="Setup_CloudRedirectPatchDescription" xml:space="preserve">
     <value>Parchea el payload de SteamTools para que las partidas guardadas en la nube de lua apps se redirijan a través del sistema CloudRedirect.</value>
+  </data>
+  <data name="Setup_CloudRedirectPatchDescription_STFixer" xml:space="preserve">
+    <value>Parchea el payload de SteamTools para corregir el enrutamiento de guardados de Capcom y habilitar la fijación de manifiestos para lua apps.</value>
   </data>
   <data name="Setup_PatchStatus" xml:space="preserve">
     <value>Estado del parche</value>
@@ -1133,7 +1142,7 @@ Los archivos se pueden restaurar desde la pestaña Restaurar. ¿Continuar?</valu
   </data>
 
   <data name="Settings_VersionFormat" xml:space="preserve">
-    <value>{0}.{1}.{2} (Public Test Version #9)</value>
+    <value>{0}.{1}.{2} (Public Test Version #10)</value>
   </data>
   <data name="Settings_Checking" xml:space="preserve">
     <value>Verificando...</value>
@@ -1186,7 +1195,7 @@ Esto puede causar pérdida de datos en algunos casos.
     <value>ADVERTENCIA</value>
   </data>
   <data name="Disclaimer_BuildBanner" xml:space="preserve">
-    <value>CloudRedirect - Public Test Version #9</value>
+    <value>CloudRedirect - Public Test Version #10</value>
   </data>
   <data name="Disclaimer_ExperimentalBanner" xml:space="preserve">
     <value>!  EXPERIMENTAL  -  RIESGO  DE  PÉRDIDA  DE  DATOS  !</value>

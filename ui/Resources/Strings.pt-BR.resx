@@ -44,7 +44,7 @@
     <value>CloudRedirect</value>
   </data>
   <data name="MainWindow_TitleBar" xml:space="preserve">
-    <value>CloudRedirect - Public Test Version #9</value>
+    <value>CloudRedirect - Public Test Version #10</value>
   </data>
   <data name="Nav_Dashboard" xml:space="preserve">
     <value>Painel</value>
@@ -117,6 +117,9 @@
   <data name="Setup_Description" xml:space="preserve">
     <value>Aplique patches e implante o CloudRedirect na sua instalação do Steam.</value>
   </data>
+  <data name="Setup_Description_STFixer" xml:space="preserve">
+    <value>Aplique patches para a correção de saves da Capcom e fixação de manifestos.</value>
+  </data>
   <data name="Setup_ShowDiagnostics" xml:space="preserve">
     <value>Mostrar diagnósticos</value>
   </data>
@@ -174,8 +177,14 @@
   <data name="Setup_CloudRedirectPatchHeader" xml:space="preserve">
     <value>Patch do Cloud Redirect</value>
   </data>
+  <data name="Setup_CloudRedirectPatchHeader_STFixer" xml:space="preserve">
+    <value>Patch de correção de saves e fixação de manifestos</value>
+  </data>
   <data name="Setup_CloudRedirectPatchDescription" xml:space="preserve">
     <value>Aplica patch no payload do SteamTools para que os saves na nuvem de lua apps sejam redirecionados pelo sistema CloudRedirect.</value>
+  </data>
+  <data name="Setup_CloudRedirectPatchDescription_STFixer" xml:space="preserve">
+    <value>Aplica patch no payload do SteamTools para corrigir o roteamento de saves da Capcom e habilitar a fixação de manifestos para lua apps.</value>
   </data>
   <data name="Setup_PatchStatus" xml:space="preserve">
     <value>Status do Patch</value>
@@ -1133,7 +1142,7 @@ Os arquivos podem ser restaurados pela aba Restaurar. Continuar?</value>
   </data>
 
   <data name="Settings_VersionFormat" xml:space="preserve">
-    <value>{0}.{1}.{2} (Public Test Version #9)</value>
+    <value>{0}.{1}.{2} (Public Test Version #10)</value>
   </data>
   <data name="Settings_Checking" xml:space="preserve">
     <value>Verificando...</value>
@@ -1186,7 +1195,7 @@ Tem certeza?</value>
     <value>AVISO</value>
   </data>
   <data name="Disclaimer_BuildBanner" xml:space="preserve">
-    <value>CloudRedirect - Public Test Version #9</value>
+    <value>CloudRedirect - Public Test Version #10</value>
   </data>
   <data name="Disclaimer_ExperimentalBanner" xml:space="preserve">
     <value>!  EXPERIMENTAL  -  RISCO  DE  PERDA  DE  DADOS  !</value>
