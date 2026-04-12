@@ -64,8 +64,57 @@
   <data name="Nav_Cleanup" xml:space="preserve">
     <value>Cleanup</value>
   </data>
+  <data name="Nav_ManifestPinning" xml:space="preserve">
+    <value>Manifest Pinning</value>
+  </data>
   <data name="Nav_Settings" xml:space="preserve">
     <value>Settings</value>
+  </data>
+  <data name="Nav_RestartSteam" xml:space="preserve">
+    <value>Restart Steam</value>
+  </data>
+  <data name="Nav_ChoiceMode" xml:space="preserve">
+    <value>Mode</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- ChoiceModePage                                                      -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="Choice_Title" xml:space="preserve">
+    <value>Choose Your Mode</value>
+  </data>
+  <data name="Choice_Description" xml:space="preserve">
+    <value>Pick how you want to use CloudRedirect. You can always upgrade from STFixer to Cloud Redirect later.</value>
+  </data>
+  <data name="Choice_STFixer_Title" xml:space="preserve">
+    <value>STFixer Mode</value>
+  </data>
+  <data name="Choice_STFixer_Description" xml:space="preserve">
+    <value>Capcom Save Fix, offline patches, and manifest pinning. No cloud save interception -- just the fixes you need.</value>
+  </data>
+  <data name="Choice_STFixer_Features" xml:space="preserve">
+    <value>Includes: Capcom save fix, SteamTools offline patch, DLL deploy, manifest version pinning</value>
+  </data>
+  <data name="Choice_CloudRedirect_Title" xml:space="preserve">
+    <value>Cloud Redirect Mode</value>
+  </data>
+  <data name="Choice_CloudRedirect_Description" xml:space="preserve">
+    <value>Everything in STFixer, plus cloud save interception. Redirects lua app cloud saves to local storage and optionally syncs to Google Drive or OneDrive.</value>
+  </data>
+  <data name="Choice_CloudRedirect_Features" xml:space="preserve">
+    <value>Includes: All STFixer features + cloud save redirect, cloud provider sync, app management, contamination cleanup</value>
+  </data>
+  <data name="Choice_CurrentMode_STFixer" xml:space="preserve">
+    <value>Current mode: STFixer</value>
+  </data>
+  <data name="Choice_CurrentMode_STFixer_Desc" xml:space="preserve">
+    <value>You can upgrade to Cloud Redirect mode by selecting the option below. This is one-way -- Cloud Redirect includes everything in STFixer plus cloud features.</value>
+  </data>
+  <data name="Choice_CurrentMode_CloudRedirect" xml:space="preserve">
+    <value>Current mode: Cloud Redirect</value>
+  </data>
+  <data name="Choice_CurrentMode_CloudRedirect_Desc" xml:space="preserve">
+    <value>All features are enabled. Cloud save interception is active.</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
@@ -75,7 +124,13 @@
     <value>Setup</value>
   </data>
   <data name="Setup_Description" xml:space="preserve">
-    <value>One-stop shop for patching, deploying, and cleaning up cloud data.</value>
+    <value>Apply patches and deploy CloudRedirect to your Steam installation.</value>
+  </data>
+  <data name="Setup_ShowDiagnostics" xml:space="preserve">
+    <value>Show Diagnostics</value>
+  </data>
+  <data name="Setup_ShowDiagnosticsHint" xml:space="preserve">
+    <value>Steam version, path, and individual patch controls</value>
   </data>
   <data name="Setup_SteamVersion" xml:space="preserve">
     <value>Steam Version</value>
@@ -1401,6 +1456,69 @@ Are you sure?</value>
   </data>
   <data name="Settings_SyncLuasHint" xml:space="preserve">
     <value>Sync lua files themselves between PCs so you don't have to install them again.</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Cloud Redirect Toggle                                               -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="Settings_CloudRedirectEnabled" xml:space="preserve">
+    <value>Enable cloud save redirection</value>
+  </data>
+  <data name="Settings_CloudRedirectEnabledHint" xml:space="preserve">
+    <value>When enabled, cloud saves for lua apps are intercepted and stored locally (and optionally synced to your cloud provider). When disabled, only manifest pinning and patches are active. Changes take effect after restarting Steam.</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Manifest Pinning                                                    -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="Settings_ManifestPinning" xml:space="preserve">
+    <value>Manifest pinning</value>
+  </data>
+  <data name="Settings_ManifestPinningHint" xml:space="preserve">
+    <value>Control whether lua apps can be pinned to specific versions. Per-app pins can be configured in the config file at the Steam folder. Changes take effect after restarting Steam.</value>
+  </data>
+  <data name="Settings_ManifestPinningEnabled" xml:space="preserve">
+    <value>Enable manifest pinning</value>
+  </data>
+  <data name="Settings_ManifestPinningEnabledHint" xml:space="preserve">
+    <value>When enabled, lua apps can be locked to specific versions.</value>
+  </data>
+  <data name="Settings_AutoComment" xml:space="preserve">
+    <value>Auto comment setManifestid</value>
+  </data>
+  <data name="Settings_AutoCommentHint" xml:space="preserve">
+    <value>When enabled, the SetManifestID specified in the lua will be treated as if it were commented out. If disabled, the SetManifestID will be respected, meaning your game will be locked to the version specified in the lua. This setting never modifies lua files on disk.</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Per-app Manifest Pins                                               -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="Pin_PerAppTitle" xml:space="preserve">
+    <value>Lua apps</value>
+  </data>
+  <data name="Pin_PerAppHint" xml:space="preserve">
+    <value>These are your lua games/apps. Enable the app below to pin it to the version specified in the lua. When auto comment is on, only apps enabled here will be pinned. Changes take effect after restarting Steam.</value>
+  </data>
+  <data name="Pin_AppId" xml:space="preserve">
+    <value>App ID</value>
+  </data>
+  <data name="Pin_DepotId" xml:space="preserve">
+    <value>Depot ID</value>
+  </data>
+  <data name="Pin_ManifestId" xml:space="preserve">
+    <value>Manifest ID</value>
+  </data>
+  <data name="Pin_Add" xml:space="preserve">
+    <value>Add</value>
+  </data>
+  <data name="Pin_Remove" xml:space="preserve">
+    <value>Remove</value>
+  </data>
+  <data name="Pin_NoEntries" xml:space="preserve">
+    <value>No lua files with setManifestid found.</value>
+  </data>
+  <data name="Pin_AppFallbackName" xml:space="preserve">
+    <value>App {0}</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->

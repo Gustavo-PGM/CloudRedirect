@@ -40,8 +40,16 @@ struct Parser {
     static constexpr int MAX_DEPTH = 64;
 
     void skipWs() {
-        while (pos < len && (s[pos]==' '||s[pos]=='\t'||s[pos]=='\n'||s[pos]=='\r'))
-            ++pos;
+        while (pos < len) {
+            if (s[pos]==' '||s[pos]=='\t'||s[pos]=='\n'||s[pos]=='\r') {
+                ++pos;
+            } else if (pos + 1 < len && s[pos] == '/' && s[pos+1] == '/') {
+                pos += 2;
+                while (pos < len && s[pos] != '\n') ++pos;
+            } else {
+                break;
+            }
+        }
     }
 
     char peek() { return pos < len ? s[pos] : 0; }

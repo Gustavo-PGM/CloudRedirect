@@ -15,34 +15,6 @@
                        Foreground="{DynamicResource TextFillColorSecondaryBrush}"
                        Margin="0,0,0,24" />
 
-            <ui:CardControl x:Name="VersionCard" Margin="0,0,0,8">
-                <ui:CardControl.Header>
-                    <StackPanel>
-                        <TextBlock Text="{res:Loc Setup_SteamVersion}" FontWeight="SemiBold"
-                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                        <TextBlock x:Name="VersionStatusText"
-                                   Text="{res:Loc Setup_Checking}"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                    </StackPanel>
-                </ui:CardControl.Header>
-                <ui:SymbolIcon x:Name="VersionIcon" Symbol="Info24" FontSize="24" />
-            </ui:CardControl>
-
-            <ui:CardControl Margin="0,0,0,8">
-                <ui:CardControl.Header>
-                    <StackPanel>
-                        <TextBlock Text="{res:Loc Setup_SteamPath}" FontWeight="SemiBold"
-                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                        <TextBlock x:Name="SteamPathText"
-                                   Text="{res:Loc Setup_Detecting}"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                    </StackPanel>
-                </ui:CardControl.Header>
-                <ui:Button Content="{res:Loc Setup_Change}"
-                           Icon="{ui:SymbolIcon FolderOpen24}"
-                           Click="BrowseSteamDir_Click" />
-            </ui:CardControl>
-
             <ui:Button x:Name="RunAllButton"
                        Content="{res:Loc Setup_RunAllPatches}"
                        Icon="{ui:SymbolIcon FlashCheckmark24}"
@@ -53,157 +25,10 @@
                        Margin="0,0,0,24"
                        Click="RunAll_Click" />
 
-            <TextBlock Text="{res:Loc Setup_OfflineSetupHeader}"
-                       FontSize="20" FontWeight="SemiBold"
-                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                       Margin="0,0,0,8" />
-            <TextBlock Text="{res:Loc Setup_OfflineSetupDescription}"
-                       Foreground="{DynamicResource TextFillColorTertiaryBrush}"
-                       TextWrapping="Wrap"
-                       Margin="0,0,0,8" />
-
-            <ui:CardControl Margin="0,0,0,8">
-                <ui:CardControl.Header>
-                    <StackPanel>
-                        <TextBlock Text="{res:Loc Setup_OfflineSetup}" FontWeight="SemiBold"
-                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                        <TextBlock x:Name="OfflineStatusText"
-                                   Text="{res:Loc Setup_NotChecked}"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                    </StackPanel>
-                </ui:CardControl.Header>
-                <ui:SymbolIcon Symbol="WifiOff24" FontSize="24" />
-            </ui:CardControl>
-
-            <WrapPanel Margin="0,0,0,24">
-                <ui:Button x:Name="OfflineSetupButton"
-                           Content="{res:Loc Setup_ApplyOfflineSetup}"
-                           Icon="{ui:SymbolIcon WifiOff24}"
-                           Appearance="Primary"
-                           Margin="0,0,8,0"
-                           Click="OfflineSetup_Click" />
-                <ui:Button x:Name="OfflineRevertButton"
-                           Content="{res:Loc Setup_RevertPatch}"
-                           Icon="{ui:SymbolIcon ArrowUndo24}"
-                           Margin="0,0,8,0"
-                           Visibility="Collapsed"
-                           Click="OfflineRevert_Click" />
-            </WrapPanel>
-
-            <TextBlock Text="{res:Loc Setup_StExeHeader}"
-                       FontSize="20" FontWeight="SemiBold"
-                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                       Margin="0,0,0,8" />
-            <TextBlock Text="{res:Loc Setup_StExeDescription}"
-                       Foreground="{DynamicResource TextFillColorTertiaryBrush}"
-                       TextWrapping="Wrap"
-                       Margin="0,0,0,8" />
-
-            <ui:CardControl Margin="0,0,0,8">
-                <ui:CardControl.Header>
-                    <StackPanel>
-                        <TextBlock Text="{res:Loc Setup_DllDeploy}" FontWeight="SemiBold"
-                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                        <TextBlock x:Name="StExeStatusText"
-                                   Text="{res:Loc Setup_NotChecked}"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                    </StackPanel>
-                </ui:CardControl.Header>
-                <ui:SymbolIcon Symbol="ShieldTask24" FontSize="24" />
-            </ui:CardControl>
-
-            <WrapPanel Margin="0,0,0,24">
-                <ui:Button x:Name="StExePatchButton"
-                           Content="{res:Loc Setup_PatchSteamToolsExe}"
-                           Icon="{ui:SymbolIcon ShieldTask24}"
-                           Margin="0,0,8,0"
-                           Click="StExePatch_Click" />
-                <ui:Button x:Name="StExeUnpatchButton"
-                           Content="{res:Loc Setup_RevertPatch}"
-                           Icon="{ui:SymbolIcon ArrowUndo24}"
-                           Margin="0,0,8,0"
-                           Visibility="Collapsed"
-                           Click="StExeUnpatch_Click" />
-            </WrapPanel>
-
-            <TextBlock Text="{res:Loc Setup_CloudRedirectPatchHeader}"
-                       FontSize="20" FontWeight="SemiBold"
-                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                       Margin="0,0,0,8" />
-            <TextBlock Text="{res:Loc Setup_CloudRedirectPatchDescription}"
-                       Foreground="{DynamicResource TextFillColorTertiaryBrush}"
-                       TextWrapping="Wrap"
-                       Margin="0,0,0,8" />
-
-            <ui:CardControl Margin="0,0,0,8">
-                <ui:CardControl.Header>
-                    <StackPanel>
-                        <TextBlock Text="{res:Loc Setup_PatchStatus}" FontWeight="SemiBold"
-                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                        <TextBlock x:Name="PatchStatusText"
-                                   Text="{res:Loc Setup_NotChecked}"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                    </StackPanel>
-                </ui:CardControl.Header>
-                <ui:SymbolIcon Symbol="Wrench24" FontSize="24" />
-            </ui:CardControl>
-
-            <WrapPanel Margin="0,0,0,24">
-                <ui:Button x:Name="PatchButton"
-                           Content="{res:Loc Setup_ApplyPatch}"
-                           Icon="{ui:SymbolIcon Wrench24}"
-                           Appearance="Primary"
-                           Margin="0,0,8,0"
-                           Click="Patch_Click" />
-                <ui:Button x:Name="PatchRevertButton"
-                           Content="{res:Loc Setup_RevertPatch}"
-                           Icon="{ui:SymbolIcon ArrowUndo24}"
-                           Margin="0,0,8,0"
-                           Visibility="Collapsed"
-                           Click="PatchRevert_Click" />
-            </WrapPanel>
-
-            <TextBlock Text="{res:Loc Setup_DeployHeader}"
-                       FontSize="20" FontWeight="SemiBold"
-                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                       Margin="0,0,0,8" />
-            <TextBlock Text="{res:Loc Setup_DeployDescription}"
-                       Foreground="{DynamicResource TextFillColorTertiaryBrush}"
-                       TextWrapping="Wrap"
-                       Margin="0,0,0,8" />
-
-            <ui:CardControl Margin="0,0,0,8">
-                <ui:CardControl.Header>
-                    <StackPanel>
-                        <TextBlock Text="{res:Loc Setup_DllStatus}" FontWeight="SemiBold"
-                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                        <TextBlock x:Name="DeployStatusText"
-                                   Text="{res:Loc Setup_NotChecked}"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                    </StackPanel>
-                </ui:CardControl.Header>
-                <ui:SymbolIcon Symbol="PlugConnected24" FontSize="24" />
-            </ui:CardControl>
-
-            <WrapPanel Margin="0,0,0,24">
-                <ui:Button x:Name="DeployButton"
-                           Content="{res:Loc Setup_DeployDll}"
-                           Icon="{ui:SymbolIcon ArrowDownload24}"
-                           Appearance="Primary"
-                           Margin="0,0,8,0"
-                           Click="Deploy_Click" />
-                <ui:Button x:Name="UninstallDllButton"
-                           Content="{res:Loc Setup_UninstallDll}"
-                           Icon="{ui:SymbolIcon Delete24}"
-                           Margin="0,0,8,0"
-                           Visibility="Collapsed"
-                           Click="UninstallDll_Click" />
-            </WrapPanel>
-
             <TextBlock Text="{res:Loc Setup_LogOutput}"
                        FontSize="20" FontWeight="SemiBold"
                        Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                       Margin="0,24,0,8" />
+                       Margin="0,0,0,8" />
 
             <Border Background="{DynamicResource ControlFillColorDefaultBrush}"
                     BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
@@ -227,6 +52,200 @@
                              Text="{res:Loc Setup_Ready}" />
                 </ScrollViewer>
             </Border>
+
+            <!-- Diagnostics toggle -->
+            <ui:CardControl Margin="0,0,0,8">
+                <ui:CardControl.Header>
+                    <StackPanel>
+                        <TextBlock Text="{res:Loc Setup_ShowDiagnostics}" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock Text="{res:Loc Setup_ShowDiagnosticsHint}"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ToggleButton x:Name="DiagnosticsToggle"
+                              Click="DiagnosticsToggle_Click" />
+            </ui:CardControl>
+
+            <!-- Collapsible diagnostics panel -->
+            <StackPanel x:Name="DiagnosticsPanel" Visibility="Collapsed">
+
+                <ui:CardControl x:Name="VersionCard" Margin="0,8,0,8">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="{res:Loc Setup_SteamVersion}" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock x:Name="VersionStatusText"
+                                       Text="{res:Loc Setup_Checking}"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:SymbolIcon x:Name="VersionIcon" Symbol="Info24" FontSize="24" />
+                </ui:CardControl>
+
+                <ui:CardControl Margin="0,0,0,16">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="{res:Loc Setup_SteamPath}" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock x:Name="SteamPathText"
+                                       Text="{res:Loc Setup_Detecting}"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:Button Content="{res:Loc Setup_Change}"
+                               Icon="{ui:SymbolIcon FolderOpen24}"
+                               Click="BrowseSteamDir_Click" />
+                </ui:CardControl>
+
+                <TextBlock Text="{res:Loc Setup_OfflineSetupHeader}"
+                           FontSize="20" FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,8" />
+                <TextBlock Text="{res:Loc Setup_OfflineSetupDescription}"
+                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,8" />
+
+                <ui:CardControl Margin="0,0,0,8">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="{res:Loc Setup_OfflineSetup}" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock x:Name="OfflineStatusText"
+                                       Text="{res:Loc Setup_NotChecked}"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:SymbolIcon Symbol="WifiOff24" FontSize="24" />
+                </ui:CardControl>
+
+                <WrapPanel Margin="0,0,0,24">
+                    <ui:Button x:Name="OfflineSetupButton"
+                               Content="{res:Loc Setup_ApplyOfflineSetup}"
+                               Icon="{ui:SymbolIcon WifiOff24}"
+                               Appearance="Primary"
+                               Margin="0,0,8,0"
+                               Click="OfflineSetup_Click" />
+                    <ui:Button x:Name="OfflineRevertButton"
+                               Content="{res:Loc Setup_RevertPatch}"
+                               Icon="{ui:SymbolIcon ArrowUndo24}"
+                               Margin="0,0,8,0"
+                               Visibility="Collapsed"
+                               Click="OfflineRevert_Click" />
+                </WrapPanel>
+
+                <TextBlock Text="{res:Loc Setup_StExeHeader}"
+                           FontSize="20" FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,8" />
+                <TextBlock Text="{res:Loc Setup_StExeDescription}"
+                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,8" />
+
+                <ui:CardControl Margin="0,0,0,8">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="{res:Loc Setup_DllDeploy}" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock x:Name="StExeStatusText"
+                                       Text="{res:Loc Setup_NotChecked}"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:SymbolIcon Symbol="ShieldTask24" FontSize="24" />
+                </ui:CardControl>
+
+                <WrapPanel Margin="0,0,0,24">
+                    <ui:Button x:Name="StExePatchButton"
+                               Content="{res:Loc Setup_PatchSteamToolsExe}"
+                               Icon="{ui:SymbolIcon ShieldTask24}"
+                               Margin="0,0,8,0"
+                               Click="StExePatch_Click" />
+                    <ui:Button x:Name="StExeUnpatchButton"
+                               Content="{res:Loc Setup_RevertPatch}"
+                               Icon="{ui:SymbolIcon ArrowUndo24}"
+                               Margin="0,0,8,0"
+                               Visibility="Collapsed"
+                               Click="StExeUnpatch_Click" />
+                </WrapPanel>
+
+                <TextBlock Text="{res:Loc Setup_CloudRedirectPatchHeader}"
+                           FontSize="20" FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,8" />
+                <TextBlock Text="{res:Loc Setup_CloudRedirectPatchDescription}"
+                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,8" />
+
+                <ui:CardControl Margin="0,0,0,8">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="{res:Loc Setup_PatchStatus}" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock x:Name="PatchStatusText"
+                                       Text="{res:Loc Setup_NotChecked}"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:SymbolIcon Symbol="Wrench24" FontSize="24" />
+                </ui:CardControl>
+
+                <WrapPanel Margin="0,0,0,24">
+                    <ui:Button x:Name="PatchButton"
+                               Content="{res:Loc Setup_ApplyPatch}"
+                               Icon="{ui:SymbolIcon Wrench24}"
+                               Appearance="Primary"
+                               Margin="0,0,8,0"
+                               Click="Patch_Click" />
+                    <ui:Button x:Name="PatchRevertButton"
+                               Content="{res:Loc Setup_RevertPatch}"
+                               Icon="{ui:SymbolIcon ArrowUndo24}"
+                               Margin="0,0,8,0"
+                               Visibility="Collapsed"
+                               Click="PatchRevert_Click" />
+                </WrapPanel>
+
+                <TextBlock Text="{res:Loc Setup_DeployHeader}"
+                           FontSize="20" FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,8" />
+                <TextBlock Text="{res:Loc Setup_DeployDescription}"
+                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,8" />
+
+                <ui:CardControl Margin="0,0,0,8">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="{res:Loc Setup_DllStatus}" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock x:Name="DeployStatusText"
+                                       Text="{res:Loc Setup_NotChecked}"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:SymbolIcon Symbol="PlugConnected24" FontSize="24" />
+                </ui:CardControl>
+
+                <WrapPanel Margin="0,0,0,24">
+                    <ui:Button x:Name="DeployButton"
+                               Content="{res:Loc Setup_DeployDll}"
+                               Icon="{ui:SymbolIcon ArrowDownload24}"
+                               Appearance="Primary"
+                               Margin="0,0,8,0"
+                               Click="Deploy_Click" />
+                    <ui:Button x:Name="UninstallDllButton"
+                               Content="{res:Loc Setup_UninstallDll}"
+                               Icon="{ui:SymbolIcon Delete24}"
+                               Margin="0,0,8,0"
+                               Visibility="Collapsed"
+                               Click="UninstallDll_Click" />
+                </WrapPanel>
+
+            </StackPanel>
 
         </StackPanel>
     </ScrollViewer>

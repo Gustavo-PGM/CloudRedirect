@@ -1,0 +1,176 @@
+<Page x:Class="CloudRedirect.Pages.ManifestPinningPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      xmlns:res="clr-namespace:CloudRedirect.Resources"
+      ScrollViewer.CanContentScroll="False">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
+        <StackPanel MaxWidth="800">
+            <TextBlock Text="{res:Loc Settings_ManifestPinning}"
+                       FontSize="28" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,4" />
+
+            <TextBlock Text="{res:Loc Settings_ManifestPinningHint}"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,24" />
+
+            <ui:CardControl Margin="0,0,0,8">
+                <ui:CardControl.Header>
+                    <StackPanel>
+                        <TextBlock Text="{res:Loc Settings_ManifestPinningEnabled}"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock Text="{res:Loc Settings_ManifestPinningEnabledHint}"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ui:ToggleSwitch x:Name="ManifestPinningToggle"
+                                 Checked="PinToggle_Changed"
+                                 Unchecked="PinToggle_Changed" />
+            </ui:CardControl>
+
+            <ui:CardControl Margin="0,0,0,32">
+                <ui:CardControl.Header>
+                    <StackPanel>
+                        <TextBlock Text="{res:Loc Settings_AutoComment}"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock Text="{res:Loc Settings_AutoCommentHint}"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ui:ToggleSwitch x:Name="AutoCommentToggle"
+                                 Checked="PinToggle_Changed"
+                                 Unchecked="PinToggle_Changed" />
+            </ui:CardControl>
+
+            <!-- Per-app lua pins -->
+            <TextBlock Text="{res:Loc Pin_PerAppTitle}"
+                       FontSize="20" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,4" />
+
+            <TextBlock Text="{res:Loc Pin_PerAppHint}"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,16" />
+
+            <!-- Search -->
+            <ui:TextBox x:Name="SearchBox"
+                        PlaceholderText="{res:Loc Search_Placeholder}"
+                        Width="250"
+                        HorizontalAlignment="Left"
+                        TextChanged="SearchBox_TextChanged"
+                        Margin="0,0,0,16" />
+
+            <!-- Empty state -->
+            <TextBlock x:Name="NoPinsText"
+                       Text="{res:Loc Pin_NoEntries}"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                       Margin="0,0,0,8"
+                       Visibility="Collapsed" />
+
+            <!-- App list -->
+            <ItemsControl x:Name="AppList">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="4"
+                                Padding="12,10"
+                                Margin="0,0,0,8">
+                            <StackPanel>
+                                <!-- Header row: image + name + depot count + toggle -->
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- Expand/collapse button + game image -->
+                                    <StackPanel Grid.Column="0" Orientation="Horizontal">
+                                        <Button Click="ExpandCollapse_Click"
+                                                Tag="{Binding}"
+                                                Background="Transparent"
+                                                BorderBrush="Transparent"
+                                                Padding="4,0"
+                                                VerticalAlignment="Center"
+                                                Margin="0,0,4,0">
+                                            <ui:SymbolIcon Symbol="{Binding ChevronSymbol}"
+                                                           FontSize="14"
+                                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                        </Button>
+                                        <Border Width="92" Height="43"
+                                                CornerRadius="4"
+                                                Margin="0,0,12,0"
+                                                VerticalAlignment="Center"
+                                                ClipToBounds="True">
+                                            <Border.Background>
+                                                <ImageBrush ImageSource="{Binding HeaderUrl}"
+                                                            Stretch="UniformToFill"
+                                                            RenderOptions.BitmapScalingMode="HighQuality" />
+                                            </Border.Background>
+                                        </Border>
+                                    </StackPanel>
+
+                                    <!-- Name + appId + depot count -->
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding DisplayName}"
+                                                   FontSize="15" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding AppId}"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                       FontSize="12" />
+                                            <TextBlock Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                                                       FontSize="12" Margin="8,0,0,0"
+                                                       Text="{Binding DepotSummary}" />
+                                        </StackPanel>
+                                    </StackPanel>
+
+                                    <!-- Pin toggle -->
+                                    <ui:ToggleSwitch Grid.Column="3"
+                                                     VerticalAlignment="Center"
+                                                     Margin="12,0,0,0"
+                                                     IsChecked="{Binding IsPinned}"
+                                                     Checked="AppPin_Changed"
+                                                     Unchecked="AppPin_Changed" />
+                                </Grid>
+
+                                <!-- Collapsible depot list -->
+                                <ItemsControl ItemsSource="{Binding Depots}"
+                                              Visibility="{Binding DepotsVisibility}"
+                                              Margin="36,8,0,0">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,2">
+                                                <TextBlock Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                           FontSize="12" Margin="0,0,8,0">
+                                                    <Run Text="Depot" /><Run Text=" " /><Run Text="{Binding DepotId, Mode=OneWay}" />
+                                                </TextBlock>
+                                                <TextBlock Text="{Binding ManifestId}"
+                                                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                                                           FontSize="12"
+                                                           FontFamily="Consolas" />
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

@@ -1,5 +1,8 @@
 using System;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -23,17 +26,50 @@ public partial class MainWindow : FluentWindow
             {
                 SystemThemeWatcher.Watch(this);
 
-                // Fire-and-forget: auto-update check (non-blocking)
                 _ = CheckForAutoUpdateAsync();
 
+                var mode = await Task.Run(() => ReadModeSetting());
+                ApplyMode(mode);
+
                 bool needsSetup = await Task.Run(() => NeedsSetup());
-                if (needsSetup)
+
+                if (mode == null)
+                    RootNavigation.Navigate(typeof(Pages.ChoiceModePage));
+                else if (needsSetup)
                     RootNavigation.Navigate(typeof(Pages.SetupPage));
                 else
                     RootNavigation.Navigate(typeof(Pages.DashboardPage));
             }
             catch { }
         };
+    }
+
+    public void ApplyMode(string? mode)
+    {
+        var cloudOnly = mode == "cloud_redirect";
+        var vis = cloudOnly ? Visibility.Visible : Visibility.Collapsed;
+        NavCloudProvider.Visibility = vis;
+        NavApps.Visibility = vis;
+        NavCleanup.Visibility = vis;
+
+        // Hide the mode chooser once fully committed to cloud_redirect
+        NavChoiceMode.Visibility = cloudOnly ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private static string? ReadModeSetting()
+    {
+        try
+        {
+            var path = Path.Combine(Services.SteamDetector.GetConfigDir(), "settings.json");
+            if (!File.Exists(path)) return null;
+
+            var json = File.ReadAllText(path);
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("mode", out var prop))
+                return prop.GetString();
+        }
+        catch { }
+        return null;
     }
 
     /// <summary>
@@ -137,5 +173,36 @@ public partial class MainWindow : FluentWindow
     {
         UpdateBanner.Visibility = Visibility.Collapsed;
         _pendingUpdate = null;
+    }
+
+    public void ShowRestartSteam()
+    {
+        Dispatcher.Invoke(() => RestartSteamItem.Visibility = Visibility.Visible);
+    }
+
+    private void RestartSteamItem_Click(object sender, RoutedEventArgs e)
+    {
+        var steamPath = Services.SteamDetector.FindSteamPath();
+        if (steamPath == null) return;
+
+        var steamExe = Path.Combine(steamPath, "steam.exe");
+        if (!File.Exists(steamExe)) return;
+
+        foreach (var proc in Process.GetProcessesByName("steam"))
+        {
+            try { proc.Kill(); } catch { }
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = steamExe,
+                UseShellExecute = true
+            });
+        }
+        catch { }
+
+        RestartSteamItem.Visibility = Visibility.Collapsed;
     }
 }

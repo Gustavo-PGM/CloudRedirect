@@ -229,8 +229,16 @@ static std::atomic<bool> g_syncAchievements{false};
 static std::atomic<bool> g_syncPlaytime{false};
 static std::atomic<bool> g_syncLuas{false};
 
+// Master toggle for cloud save redirection (default ON for backward compat).
+// When false, the DLL still loads for manifest pinning and other patches,
+// but skips HTTP server, local/cloud storage, and packet interception.
+static std::atomic<bool> g_cloudRedirectEnabled{true};
+
 // Manifest pinning (depot -> manifest override)
+// Config lives in Steam folder (per-system), NOT AppData (per-user).
 static std::atomic<bool> g_manifestPinsEnabled{false};
+static std::atomic<bool> g_autoComment{true};  // when true, ignore lua setManifestid lines
+static std::unordered_set<uint32_t> g_pinnedApps;  // per-app overrides: always respect lua pins for these apps
 static std::unordered_map<uint32_t, std::unordered_map<uint32_t, uint64_t>> g_manifestPins;  // appId -> {depotId -> manifestId}
 
 // Inline detour on steamclient64!sub_1384B72B0 (CUserAppManager::BuildDepotDependency)
@@ -2491,6 +2499,116 @@ void Init(const std::string& steamPath) {
         LOG("[NS] No self-unlocking Lua files found (%d total luas) — DLL will only log Cloud RPCs", totalLuas);
     }
 
+    // Steam-side config (per-system, controls DLL feature toggles).
+    // Read this early so we know whether to init cloud features.
+    std::string cloudRoot = g_steamPath + "cloud_redirect\\";
+    {
+        std::string pinConfigPath = cloudRoot + "config.json";
+        std::ifstream pinFile(pinConfigPath);
+        if (pinFile) {
+            std::string pinStr((std::istreambuf_iterator<char>(pinFile)), {});
+            pinFile.close();
+            auto pinCfg = Json::Parse(pinStr);
+
+            // cloud_redirect defaults to true for backward compat with existing users
+            if (pinCfg["cloud_redirect"].type == Json::Type::Bool)
+                g_cloudRedirectEnabled = pinCfg["cloud_redirect"].boolean();
+
+            if (pinCfg["manifest_pinning"].type == Json::Type::Bool)
+                g_manifestPinsEnabled = pinCfg["manifest_pinning"].boolean();
+            if (pinCfg["auto_comment"].type == Json::Type::Bool)
+                g_autoComment = pinCfg["auto_comment"].boolean();
+
+            size_t totalPins = 0;
+
+            // Load pinned_apps list (per-app overrides)
+            auto& pinnedArr = pinCfg["pinned_apps"];
+            if (pinnedArr.type == Json::Type::Array) {
+                for (auto& val : pinnedArr.arrVal) {
+                    uint32_t appId = 0;
+                    if (val.type == Json::Type::Number)
+                        appId = (uint32_t)val.integer();
+                    else if (val.type == Json::Type::String)
+                        appId = (uint32_t)strtoul(val.str().c_str(), nullptr, 10);
+                    if (appId != 0)
+                        g_pinnedApps.insert(appId);
+                }
+                LOG("[ManifestPin] Loaded %zu pinned app(s)", g_pinnedApps.size());
+            }
+
+            // Load lua setManifestid entries for apps that should be pinned.
+            // An app's lua pins are loaded when:
+            //   - auto_comment is false (all luas respected), OR
+            //   - the app is in pinned_apps (per-app override)
+            if (g_manifestPinsEnabled.load()) {
+                std::string luaDir = g_steamPath + "config\\stplug-in\\";
+                WIN32_FIND_DATAA fd;
+                HANDLE hFind = FindFirstFileA((luaDir + "*.lua").c_str(), &fd);
+                if (hFind != INVALID_HANDLE_VALUE) {
+                    do {
+                        uint32_t fileAppId = (uint32_t)strtoul(fd.cFileName, nullptr, 10);
+                        if (fileAppId == 0) continue;
+
+                        bool shouldLoad = !g_autoComment.load() || g_pinnedApps.count(fileAppId);
+                        if (!shouldLoad) continue;
+
+                        std::string luaPath = luaDir + fd.cFileName;
+                        std::ifstream luaFile(luaPath);
+                        if (!luaFile) continue;
+                        std::string line;
+                        while (std::getline(luaFile, line)) {
+                            size_t start = line.find_first_not_of(" \t");
+                            if (start == std::string::npos) continue;
+                            if (line.size() > start + 1 && line[start] == '-' && line[start+1] == '-') continue;
+
+                            size_t pos = line.find("setManifestid(");
+                            if (pos == std::string::npos) pos = line.find("setManifestId(");
+                            if (pos == std::string::npos) continue;
+                            pos += 14;
+
+                            while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t')) pos++;
+                            uint32_t depotId = (uint32_t)strtoul(line.c_str() + pos, nullptr, 10);
+                            if (depotId == 0) continue;
+
+                            size_t q1 = line.find('"', pos);
+                            if (q1 == std::string::npos) continue;
+                            size_t q2 = line.find('"', q1 + 1);
+                            if (q2 == std::string::npos) continue;
+                            std::string manifestStr = line.substr(q1 + 1, q2 - q1 - 1);
+                            uint64_t manifestId = strtoull(manifestStr.c_str(), nullptr, 10);
+                            if (manifestId == 0) continue;
+
+                            g_manifestPins[fileAppId][depotId] = manifestId;
+                            totalPins++;
+                            LOG("[ManifestPin] Lua pin: app %u depot %u -> manifest %llu (from %s)",
+                                fileAppId, depotId, manifestId, fd.cFileName);
+                        }
+                    } while (FindNextFileA(hFind, &fd));
+                    FindClose(hFind);
+                }
+            }
+
+            if (totalPins > 0)
+                LOG("[ManifestPin] Loaded %zu pin(s) across %zu app(s)", totalPins, g_manifestPins.size());
+            if (g_manifestPinsEnabled.load() && totalPins == 0) {
+                LOG("[ManifestPin] Enabled but no valid pins configured");
+                g_manifestPinsEnabled = false;
+            }
+            LOG("[ManifestPin] manifest_pinning=%d, auto_comment=%d",
+                g_manifestPinsEnabled.load(), g_autoComment.load());
+        } else {
+            LOG("[ManifestPin] No pin config at %s", pinConfigPath.c_str());
+        }
+    }
+
+    LOG("cloud_redirect=%d", g_cloudRedirectEnabled.load());
+
+    if (!g_cloudRedirectEnabled.load()) {
+        LOG("Cloud redirection disabled, skipping cloud init");
+        LOG("CloudIntercept initialized (manifest pinning only), steam=%s", g_steamPath.c_str());
+        return;
+    }
+
     // migrate legacy blobs/ directory to storage/ (one-time, introduced build 6-7)
     {
         std::string oldRoot = g_steamPath + "cloud_redirect\\blobs\\";
@@ -2508,7 +2626,6 @@ void Init(const std::string& steamPath) {
                 std::filesystem::rename(entry.path(), dest, ec);
                 if (!ec) migrated++;
             }
-            // remove the old blobs/ tree (now empty or has only dirs left)
             std::filesystem::remove_all(oldRoot, ec);
             if (migrated > 0 || skipped > 0)
                 LOG("[NS] Migrated legacy blobs/ -> storage/: %d files moved, %d already existed (skipped)", migrated, skipped);
@@ -2516,8 +2633,6 @@ void Init(const std::string& steamPath) {
     }
 
     // start local HTTP server for upload/download
-    // Use the same directory as LocalStorage ("storage/") so that changelist metadata
-    // and HTTP-served file bytes always come from the same source of truth.
     std::string blobRoot = g_steamPath + "cloud_redirect\\storage\\";
     if (HttpServer::Start(blobRoot)) {
         LOG("[NS] HTTP server started on port %u, blob root: %s",
@@ -2530,8 +2645,7 @@ void Init(const std::string& steamPath) {
     std::string storageRoot = g_steamPath + "cloud_redirect\\storage\\";
     LocalStorage::Init(storageRoot);
 
-    // init CloudStorage manager — read config to determine cloud provider
-    std::string cloudRoot = g_steamPath + "cloud_redirect\\";
+    // init CloudStorage manager -- read config to determine cloud provider
     std::unique_ptr<ICloudProvider> provider;
 
     // Config lives in %AppData%/CloudRedirect/config.json (per-user)
@@ -2541,7 +2655,6 @@ void Init(const std::string& steamPath) {
         if (SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata) == S_OK) {
             configPath = std::string(appdata) + "\\CloudRedirect\\config.json";
         } else {
-            // Fallback to steam folder if AppData unavailable
             configPath = cloudRoot + "config.json";
             LOG("[NS] WARNING: Could not resolve %%APPDATA%%, falling back to steam folder for config");
         }
@@ -2557,7 +2670,6 @@ void Init(const std::string& steamPath) {
         if (!providerName.empty() && providerName != "local") {
             provider = CreateCloudProvider(providerName);
             if (provider) {
-                // folder provider uses sync_path; oauth providers use token_path
                 std::string initPath = tokenPath;
                 std::string syncPath = cfg["sync_path"].str();
                 if (providerName == "folder" && !syncPath.empty()) {
@@ -2592,17 +2704,15 @@ void Init(const std::string& steamPath) {
                     providerName.c_str());
             }
         } else {
-            LOG("[NS] Config: provider='%s' — local-only mode", providerName.c_str());
+            LOG("[NS] Config: provider='%s' -- local-only mode", providerName.c_str());
         }
 
-        // configurable upload size cap (default 256 MB, 0 = unlimited)
         auto& maxUploadVal = cfg["max_upload_mb"];
         if (maxUploadVal.type == Json::Type::Number) {
             int mb = static_cast<int>(maxUploadVal.integer());
             HttpServer::SetMaxUploadMB(mb);
         }
 
-        // sync toggles (all default OFF)
         if (cfg["sync_achievements"].type == Json::Type::Bool)
             g_syncAchievements = cfg["sync_achievements"].boolean();
         if (cfg["sync_playtime"].type == Json::Type::Bool)
@@ -2611,53 +2721,15 @@ void Init(const std::string& steamPath) {
             g_syncLuas = cfg["sync_luas"].boolean();
         LOG("[NS] Sync toggles: achievements=%d, playtime=%d, luas=%d",
             g_syncAchievements.load(), g_syncPlaytime.load(), g_syncLuas.load());
-
-        // manifest pinning
-        if (cfg["manifest_pins_enabled"].type == Json::Type::Bool)
-            g_manifestPinsEnabled = cfg["manifest_pins_enabled"].boolean();
-        auto& pinsObj = cfg["manifest_pins"];
-        size_t totalPins = 0;
-        if (g_manifestPinsEnabled.load() && pinsObj.type == Json::Type::Object) {
-            for (auto& [appIdStr, depots] : pinsObj.objVal) {
-                uint32_t appId = (uint32_t)strtoul(appIdStr.c_str(), nullptr, 10);
-                if (appId == 0 || depots.type != Json::Type::Object) continue;
-                if (!IsNamespaceApp(appId)) {
-                    LOG("[ManifestPin] Skipping app %u (not a namespace app)", appId);
-                    continue;
-                }
-                auto& depotMap = g_manifestPins[appId];
-                for (auto& [depotIdStr, manifestVal] : depots.objVal) {
-                    uint32_t depotId = (uint32_t)strtoul(depotIdStr.c_str(), nullptr, 10);
-                    if (depotId == 0) continue;
-                    uint64_t manifestId = 0;
-                    if (manifestVal.type == Json::Type::String)
-                        manifestId = strtoull(manifestVal.str().c_str(), nullptr, 10);
-                    else if (manifestVal.type == Json::Type::Number)
-                        manifestId = (uint64_t)manifestVal.integer();
-                    if (manifestId == 0) continue;
-                    depotMap[depotId] = manifestId;
-                    totalPins++;
-                    LOG("[ManifestPin] Pin: app %u depot %u -> manifest %llu", appId, depotId, manifestId);
-                }
-            }
-            if (totalPins > 0)
-                LOG("[ManifestPin] Loaded %zu pin(s) across %zu app(s)", totalPins, g_manifestPins.size());
-        }
-        if (g_manifestPinsEnabled.load() && totalPins == 0) {
-            LOG("[ManifestPin] Enabled but no valid pins configured");
-            g_manifestPinsEnabled = false;
-        }
     } else {
-        LOG("[NS] No config.json at %s — local-only mode", configPath.c_str());
+        LOG("[NS] No config.json at %s -- local-only mode", configPath.c_str());
     }
 
     CloudStorage::Init(cloudRoot, std::move(provider));
 
     // Launch deferred lua sync thread (waits for accountId to be captured).
-    // Runs even when no local luas exist -- a fresh install needs to pull them from cloud.
     if (g_syncLuas) {
         g_luaSyncThread = std::thread([] {
-            // Wait for accountId to be captured (set when first RPC arrives)
             for (int i = 0; i < 300 && !g_shuttingDown.load(); i++) {
                 if (GetAccountId() != 0) break;
                 Sleep(1000);
@@ -2807,6 +2879,7 @@ void SetSendPktAddr(void* recvPktGlobalAddr) {
 // SteamID capture, and logging. Namespace Cloud RPCs are intercepted by the vtable hook.
 // When vtable hook is NOT active: falls back to Approach D (packet injection).
 bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
+    if (!g_cloudRedirectEnabled.load(std::memory_order_relaxed)) return false;
     if (g_proxySending) return false;
 
     // Try to discover the real CCMInterface via CSteamEngine global.

@@ -17,7 +17,6 @@ public partial class SettingsPage : Page
     private string? _latestDownloadUrl;
     private bool _languageLoading;
     private bool _syncLoading;
-
     /// <summary>
     /// Language options: display key -> culture code (or "system").
     /// </summary>

@@ -83,18 +83,33 @@
                 <ui:NavigationViewItem Content="{res:Loc Nav_Setup}"
                                        Icon="{ui:SymbolIcon Wrench24}"
                                        TargetPageType="{x:Type pages:SetupPage}" />
-                <ui:NavigationViewItem Content="{res:Loc Nav_CloudProvider}"
+                <ui:NavigationViewItem x:Name="NavChoiceMode"
+                                       Content="{res:Loc Nav_ChoiceMode}"
+                                       Icon="{ui:SymbolIcon Options24}"
+                                       TargetPageType="{x:Type pages:ChoiceModePage}" />
+                <ui:NavigationViewItem x:Name="NavCloudProvider"
+                                       Content="{res:Loc Nav_CloudProvider}"
                                        Icon="{ui:SymbolIcon Cloud24}"
                                        TargetPageType="{x:Type pages:CloudProviderPage}" />
-                <ui:NavigationViewItem Content="{res:Loc Nav_Apps}"
+                <ui:NavigationViewItem x:Name="NavApps"
                                         Icon="{ui:SymbolIcon Apps24}"
+                                        Content="{res:Loc Nav_Apps}"
                                         TargetPageType="{x:Type pages:AppsPage}" />
-                <ui:NavigationViewItem Content="{res:Loc Nav_Cleanup}"
-                                        Icon="{ui:SymbolIcon Delete24}"
-                                        TargetPageType="{x:Type pages:CleanupPage}" />
+                <ui:NavigationViewItem x:Name="NavCleanup"
+                                         Icon="{ui:SymbolIcon Delete24}"
+                                         Content="{res:Loc Nav_Cleanup}"
+                                         TargetPageType="{x:Type pages:CleanupPage}" />
+                <ui:NavigationViewItem Content="{res:Loc Nav_ManifestPinning}"
+                                         Icon="{ui:SymbolIcon Pin24}"
+                                         TargetPageType="{x:Type pages:ManifestPinningPage}" />
             </ui:NavigationView.MenuItems>
 
             <ui:NavigationView.FooterMenuItems>
+                <ui:NavigationViewItem x:Name="RestartSteamItem"
+                                       Content="{res:Loc Nav_RestartSteam}"
+                                       Icon="{ui:SymbolIcon ArrowSync24}"
+                                       Visibility="Collapsed"
+                                       Click="RestartSteamItem_Click" />
                 <ui:NavigationViewItem Content="{res:Loc Nav_Settings}"
                                        Icon="{ui:SymbolIcon Settings24}"
                                        TargetPageType="{x:Type pages:SettingsPage}" />

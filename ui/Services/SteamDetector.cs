@@ -175,6 +175,17 @@ public static class SteamDetector
     }
 
     /// <summary>
+    /// Returns the path to the manifest pin config in the Steam folder
+    /// (per-system, not per-user). Returns null if Steam isn't found.
+    /// </summary>
+    public static string? GetPinConfigPath()
+    {
+        var steamPath = FindSteamPath();
+        if (steamPath == null) return null;
+        return Path.Combine(steamPath, "cloud_redirect", "config.json");
+    }
+
+    /// <summary>
     /// Returns the log file path, or null if Steam isn't found.
     /// </summary>
     public static string? GetLogPath()

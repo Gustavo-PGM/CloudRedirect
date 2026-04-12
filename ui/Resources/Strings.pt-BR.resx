@@ -61,15 +61,67 @@
   <data name="Nav_Cleanup" xml:space="preserve">
     <value>Limpeza</value>
   </data>
+  <data name="Nav_ManifestPinning" xml:space="preserve">
+    <value>Fixação de manifestos</value>
+  </data>
   <data name="Nav_Settings" xml:space="preserve">
     <value>Configurações</value>
+  </data>
+  <data name="Nav_RestartSteam" xml:space="preserve">
+    <value>Reiniciar Steam</value>
+  </data>
+  <data name="Nav_ChoiceMode" xml:space="preserve">
+    <value>Modo</value>
+  </data>
+
+  <data name="Choice_Title" xml:space="preserve">
+    <value>Escolha seu modo</value>
+  </data>
+  <data name="Choice_Description" xml:space="preserve">
+    <value>Escolha como quer usar o CloudRedirect. Você pode mudar de STFixer para Cloud Redirect depois.</value>
+  </data>
+  <data name="Choice_STFixer_Title" xml:space="preserve">
+    <value>Modo STFixer</value>
+  </data>
+  <data name="Choice_STFixer_Description" xml:space="preserve">
+    <value>Correção de save da Capcom, patches offline e fixação de manifestos. Sem interceptação de saves na nuvem -- apenas as correções que você precisa.</value>
+  </data>
+  <data name="Choice_STFixer_Features" xml:space="preserve">
+    <value>Inclui: Correção de save Capcom, patch offline SteamTools, deploy de DLL, fixação de versão de manifestos</value>
+  </data>
+  <data name="Choice_CloudRedirect_Title" xml:space="preserve">
+    <value>Modo Cloud Redirect</value>
+  </data>
+  <data name="Choice_CloudRedirect_Description" xml:space="preserve">
+    <value>Tudo do STFixer, mais interceptação de saves na nuvem. Redireciona saves na nuvem de apps lua para armazenamento local e opcionalmente sincroniza com Google Drive ou OneDrive.</value>
+  </data>
+  <data name="Choice_CloudRedirect_Features" xml:space="preserve">
+    <value>Inclui: Todos os recursos do STFixer + redirecionamento de saves na nuvem, sincronização com provedor de nuvem, gerenciamento de apps, limpeza de contaminação</value>
+  </data>
+  <data name="Choice_CurrentMode_STFixer" xml:space="preserve">
+    <value>Modo atual: STFixer</value>
+  </data>
+  <data name="Choice_CurrentMode_STFixer_Desc" xml:space="preserve">
+    <value>Você pode mudar para o modo Cloud Redirect selecionando a opção abaixo. É unidirecional -- Cloud Redirect inclui tudo do STFixer mais os recursos de nuvem.</value>
+  </data>
+  <data name="Choice_CurrentMode_CloudRedirect" xml:space="preserve">
+    <value>Modo atual: Cloud Redirect</value>
+  </data>
+  <data name="Choice_CurrentMode_CloudRedirect_Desc" xml:space="preserve">
+    <value>Todos os recursos estão habilitados. A interceptação de saves na nuvem está ativa.</value>
   </data>
 
   <data name="Setup_Title" xml:space="preserve">
     <value>Configuração</value>
   </data>
   <data name="Setup_Description" xml:space="preserve">
-    <value>Tudo em um para aplicar patches, implantar e limpar dados na nuvem.</value>
+    <value>Aplique patches e implante o CloudRedirect na sua instalação do Steam.</value>
+  </data>
+  <data name="Setup_ShowDiagnostics" xml:space="preserve">
+    <value>Mostrar diagnósticos</value>
+  </data>
+  <data name="Setup_ShowDiagnosticsHint" xml:space="preserve">
+    <value>Versão do Steam, caminho e controles de patches individuais</value>
   </data>
   <data name="Setup_SteamVersion" xml:space="preserve">
     <value>Versão do Steam</value>
@@ -1347,6 +1399,60 @@ Tem certeza?</value>
   </data>
   <data name="Settings_SyncLuasHint" xml:space="preserve">
     <value>Sincronizar os arquivos lua entre PCs para não precisar instalá-los novamente.</value>
+  </data>
+
+  <data name="Settings_CloudRedirectEnabled" xml:space="preserve">
+    <value>Ativar redirecionamento de saves na nuvem</value>
+  </data>
+  <data name="Settings_CloudRedirectEnabledHint" xml:space="preserve">
+    <value>Quando ativado, os saves na nuvem dos apps lua são interceptados e armazenados localmente (e opcionalmente sincronizados com seu provedor de nuvem). Quando desativado, apenas a fixação de manifestos e os patches ficam ativos. As alterações são aplicadas ao reiniciar o Steam.</value>
+  </data>
+
+  <data name="Settings_ManifestPinning" xml:space="preserve">
+    <value>Fixação de manifestos</value>
+  </data>
+  <data name="Settings_ManifestPinningHint" xml:space="preserve">
+    <value>Controla se os apps lua podem ser fixados em versões específicas. Os pinos por app são configurados no arquivo de configuração na pasta do Steam. As alterações são aplicadas ao reiniciar o Steam.</value>
+  </data>
+  <data name="Settings_ManifestPinningEnabled" xml:space="preserve">
+    <value>Ativar fixação de manifestos</value>
+  </data>
+  <data name="Settings_ManifestPinningEnabledHint" xml:space="preserve">
+    <value>Quando ativado, os apps lua podem ser travados em versões específicas.</value>
+  </data>
+  <data name="Settings_AutoComment" xml:space="preserve">
+    <value>Auto comment setManifestid</value>
+  </data>
+  <data name="Settings_AutoCommentHint" xml:space="preserve">
+    <value>Quando ativado, o SetManifestID especificado no lua será tratado como se estivesse comentado. Se desativado, o SetManifestID será respeitado, o que significa que seu jogo ficará travado na versão especificada no lua. Esta opção nunca modifica os arquivos lua em disco.</value>
+  </data>
+
+  <data name="Pin_PerAppTitle" xml:space="preserve">
+    <value>Apps lua</value>
+  </data>
+  <data name="Pin_PerAppHint" xml:space="preserve">
+    <value>Estes são seus jogos/apps lua. Ative o app abaixo para travá-lo na versão especificada no lua. Quando auto comment está ativado, apenas os apps habilitados aqui serão travados. As alterações são aplicadas ao reiniciar o Steam.</value>
+  </data>
+  <data name="Pin_AppId" xml:space="preserve">
+    <value>App ID</value>
+  </data>
+  <data name="Pin_DepotId" xml:space="preserve">
+    <value>Depot ID</value>
+  </data>
+  <data name="Pin_ManifestId" xml:space="preserve">
+    <value>Manifest ID</value>
+  </data>
+  <data name="Pin_Add" xml:space="preserve">
+    <value>Adicionar</value>
+  </data>
+  <data name="Pin_Remove" xml:space="preserve">
+    <value>Remover</value>
+  </data>
+  <data name="Pin_NoEntries" xml:space="preserve">
+    <value>Nenhum arquivo lua com setManifestid encontrado.</value>
+  </data>
+  <data name="Pin_AppFallbackName" xml:space="preserve">
+    <value>App {0}</value>
   </data>
 
   <data name="Search_Placeholder" xml:space="preserve">

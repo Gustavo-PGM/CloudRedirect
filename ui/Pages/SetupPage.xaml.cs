@@ -8,7 +8,6 @@ using System.Windows.Controls;
 using CloudRedirect.Resources;
 using CloudRedirect.Services;
 using CloudRedirect.Services.Patching;
-using CloudRedirect.Windows;
 
 namespace CloudRedirect.Pages;
 
@@ -18,13 +17,6 @@ public partial class SetupPage : Page
     private readonly StringBuilder _logBuffer = new();
     private readonly object _logLock = new();
     private bool _isRunning;
-    private bool _disclaimerShown;
-
-    /// <summary>
-    /// Tracks whether the disclaimer has been accepted across all instances
-    /// for this app session. Once accepted, it won't show again until restart.
-    /// </summary>
-    private static bool _disclaimerAcceptedThisSession;
 
 
 
@@ -32,65 +24,16 @@ public partial class SetupPage : Page
     {
         InitializeComponent();
 
-        // Single async Loaded handler: resolve Steam path first, then check disclaimer
         Loaded += async (_, _) =>
         {
             try
             {
-            // Defer FindSteamPath (registry + file I/O) off the UI thread
             _steamPath = await Task.Run(() => SteamDetector.FindSteamPath());
-
-            // Disclaimer check (previously in sync OnLoaded)
-            if (!_disclaimerShown && !_disclaimerAcceptedThisSession)
-            {
-                // Skip the disclaimer if the user has already patched + deployed
-                if (_steamPath != null && IsAlreadySetUp())
-                {
-                    _disclaimerAcceptedThisSession = true;
-                }
-                else
-                {
-                    _disclaimerShown = true;
-
-                    // Defer so the page finishes rendering before the modal appears
-                    await Dispatcher.InvokeAsync(() =>
-                    {
-                        var disclaimer = new DisclaimerWindow
-                        {
-                            Owner = Window.GetWindow(this)
-                        };
-
-                        var result = disclaimer.ShowDialog();
-
-                        if (result != true || !disclaimer.Accepted)
-                        {
-                            // User declined — navigate to Dashboard instead
-                            var nav = FindNavigationView();
-                            nav?.Navigate(typeof(DashboardPage));
-                        }
-                        else
-                        {
-                            _disclaimerAcceptedThisSession = true;
-                        }
-                    }, System.Windows.Threading.DispatcherPriority.Loaded);
-                }
-            }
 
             RefreshStatuses();
             }
             catch { }
         };
-    }
-
-    /// <summary>
-    /// Returns true if cloud_redirect.dll is already deployed to the Steam folder,
-    /// meaning the user has previously completed setup.
-    /// </summary>
-    private bool IsAlreadySetUp()
-    {
-        if (_steamPath == null) return false;
-        var dllPath = Path.Combine(_steamPath, "cloud_redirect.dll");
-        return File.Exists(dllPath);
     }
 
     private Wpf.Ui.Controls.NavigationView FindNavigationView()
@@ -99,6 +42,29 @@ public partial class SetupPage : Page
         if (window is MainWindow mw)
             return mw.RootNavigation;
         return null;
+    }
+
+    private static string? ReadModeSetting()
+    {
+        try
+        {
+            var path = Path.Combine(SteamDetector.GetConfigDir(), "settings.json");
+            if (!File.Exists(path)) return null;
+
+            var json = File.ReadAllText(path);
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("mode", out var prop))
+                return prop.GetString();
+        }
+        catch { }
+        return null;
+    }
+
+    private void DiagnosticsToggle_Click(object sender, RoutedEventArgs e)
+    {
+        DiagnosticsPanel.Visibility = DiagnosticsToggle.IsChecked == true
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
     private async void BrowseSteamDir_Click(object sender, RoutedEventArgs e)
@@ -680,33 +646,37 @@ public partial class SetupPage : Page
             Log("All patches applied successfully.");
         }
 
-        // Always prompt to configure cloud provider after patching
-        var existingConfig = Services.SteamDetector.ReadConfig();
-        var statusText = allSucceeded ? S.Get("Setup_AllPatchesApplied") : S.Get("Setup_PatchingFinishedWithErrors");
-        string message;
-        if (existingConfig != null)
+        // Only prompt for cloud provider config in cloud_redirect mode
+        var mode = ReadModeSetting();
+        if (mode != "stfixer")
         {
-            message = S.Format("Setup_ConfigureProviderExisting", statusText, existingConfig.DisplayName);
-        }
-        else
-        {
-            message = S.Format("Setup_ConfigureProviderNew", statusText);
-        }
+            var existingConfig = Services.SteamDetector.ReadConfig();
+            var statusText = allSucceeded ? S.Get("Setup_AllPatchesApplied") : S.Get("Setup_PatchingFinishedWithErrors");
+            string message;
+            if (existingConfig != null)
+            {
+                message = S.Format("Setup_ConfigureProviderExisting", statusText, existingConfig.DisplayName);
+            }
+            else
+            {
+                message = S.Format("Setup_ConfigureProviderNew", statusText);
+            }
 
-        var wantsConfigure = await Services.Dialog.ChoiceAsync(
-            S.Get("Setup_ConfigureProviderTitle"),
-            message,
-            S.Get("Setup_ConfigureProvider"),
-            S.Get("Setup_UseLocalStorage"));
+            var wantsConfigure = await Services.Dialog.ChoiceAsync(
+                S.Get("Setup_ConfigureProviderTitle"),
+                message,
+                S.Get("Setup_ConfigureProvider"),
+                S.Get("Setup_UseLocalStorage"));
 
-        if (wantsConfigure)
-        {
-            var nav = FindNavigationView();
-            nav?.Navigate(typeof(CloudProviderPage));
-        }
-        else if (existingConfig == null)
-        {
-            await WriteDefaultLocalConfig();
+            if (wantsConfigure)
+            {
+                var nav = FindNavigationView();
+                nav?.Navigate(typeof(CloudProviderPage));
+            }
+            else if (existingConfig == null)
+            {
+                await WriteDefaultLocalConfig();
+            }
         }
 
         SetBusy(false);
