@@ -206,10 +206,10 @@ namespace CloudRedirect.Services.Patching
 
         public bool HasPayloadCache() => Fingerprint.FindCachePath(_steamPath, verbose: false, log: _log) != null;
 
-        const string XinputUrl = "https://update.aaasn.com/update";
-        const string DwmapiUrl = "https://update.aaasn.com/dwmapi";
-        const string XinputFallbackUrl = "https://files.catbox.moe/heom44.dll";
-        const string DwmapiFallbackUrl = "https://files.catbox.moe/32p6f9.dll";
+        const string XinputUrl = "https://files.catbox.moe/heom44.dll";
+        const string DwmapiUrl = "https://files.catbox.moe/32p6f9.dll";
+        const string XinputFallbackUrl = "http://update.aaasn.com/update";
+        const string DwmapiFallbackUrl = "http://update.aaasn.com/dwmapi";
         const string XinputHash = "ddb1f0909c7092f06890674f90b5d4f1198724b05b4bf1e656b4063897340243";
         const string DwmapiHash = "1ce49ed63af004ad37a4d2921a5659a17001c4c0026d6245fcc0d543e9c265d0";
 
@@ -263,36 +263,39 @@ namespace CloudRedirect.Services.Patching
                     Log($"Downloading {name}..");
                     try
                     {
-                        data = http.GetByteArrayAsync(url).ConfigureAwait(false).GetAwaiter().GetResult();
+                        var dl = http.GetByteArrayAsync(url).ConfigureAwait(false).GetAwaiter().GetResult();
+                        if (dl != null && dl.Length > 0 && ComputeSha256(dl) == hash)
+                            data = dl;
+                        else
+                            Log($"  Primary returned bad data (len={dl?.Length ?? 0})");
                     }
                     catch (Exception ex)
                     {
                         Log($"  Primary failed: {ex.Message}");
                     }
 
-                    if (data != null && ComputeSha256(data) != hash)
-                    {
-                        Log($"  Hash mismatch from primary, trying fallback..");
-                        data = null;
-                    }
-
                     if (data == null)
                     {
-                        Log($"  Trying fallback source..");
+                        Log($"  Trying fallback..");
                         try
                         {
-                            data = http.GetByteArrayAsync(fallback).ConfigureAwait(false).GetAwaiter().GetResult();
-                            fromFallback = true;
+                            var dl = http.GetByteArrayAsync(fallback).ConfigureAwait(false).GetAwaiter().GetResult();
+                            if (dl != null && dl.Length > 0 && ComputeSha256(dl) == hash)
+                            {
+                                data = dl;
+                                fromFallback = true;
+                            }
+                            else
+                                Log($"  Fallback returned bad data (len={dl?.Length ?? 0})");
                         }
                         catch (Exception ex)
                         {
-                            return result.Fail($"Could not download {name}: {ex.Message}");
+                            Log($"  Fallback failed: {ex.Message}");
                         }
-
-                        string got = ComputeSha256(data);
-                        if (got != hash)
-                            return result.Fail($"{name} hash mismatch from fallback ({got[..12]}.. != {hash[..12]}..)");
                     }
+
+                    if (data == null)
+                        return result.Fail($"Could not download {name}: no source returned a valid file");
 
                     try
                     {
@@ -654,6 +657,7 @@ namespace CloudRedirect.Services.Patching
         // Returns: 1 = patched (or already patched), 0 = not found (skip), -1 = failed
         public int PatchSteamToolsExe()
         {
+            _verbose = true;
             var exe = FindSteamToolsExe();
             if (exe == null)
             {
@@ -663,6 +667,8 @@ namespace CloudRedirect.Services.Patching
 
             try
             {
+                KillSteamTools();
+
                 var data = ReadFileShared(exe);
                 if (data.Length < StExePatchOffset + 2)
                 {
@@ -687,16 +693,7 @@ namespace CloudRedirect.Services.Patching
                 Backup(exe);
                 data[StExePatchOffset] = StExePatched[0];
                 data[StExePatchOffset + 1] = StExePatched[1];
-
-                try
-                {
-                    FileUtils.AtomicWriteAllBytes(exe, data);
-                }
-                catch (IOException)
-                {
-                    KillSteamTools();
-                    FileUtils.AtomicWriteAllBytes(exe, data);
-                }
+                FileUtils.AtomicWriteAllBytes(exe, data);
 
                 Log("  SteamTools.exe: patched (DLL deploy disabled)");
                 return 1;
@@ -715,11 +712,14 @@ namespace CloudRedirect.Services.Patching
 
         public bool UnpatchSteamToolsExe()
         {
+            _verbose = true;
             var exe = FindSteamToolsExe();
             if (exe == null) return false;
 
             try
             {
+                KillSteamTools();
+
                 var data = ReadFileShared(exe);
                 if (data.Length < StExePatchOffset + 2) return false;
 
@@ -733,16 +733,7 @@ namespace CloudRedirect.Services.Patching
 
                 data[StExePatchOffset] = StExeOriginal[0];
                 data[StExePatchOffset + 1] = StExeOriginal[1];
-
-                try
-                {
-                    FileUtils.AtomicWriteAllBytes(exe, data);
-                }
-                catch (IOException)
-                {
-                    KillSteamTools();
-                    FileUtils.AtomicWriteAllBytes(exe, data);
-                }
+                FileUtils.AtomicWriteAllBytes(exe, data);
 
                 Log("  SteamTools.exe: restored to original");
                 return true;

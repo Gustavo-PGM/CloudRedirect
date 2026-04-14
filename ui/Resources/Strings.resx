@@ -47,7 +47,7 @@
     <value>CloudRedirect</value>
   </data>
   <data name="MainWindow_TitleBar" xml:space="preserve">
-    <value>CloudRedirect - Public Test Version #12</value>
+    <value>CloudRedirect - Public Test Version #14</value>
   </data>
   <data name="Nav_Dashboard" xml:space="preserve">
     <value>Dashboard</value>
@@ -90,7 +90,7 @@
     <value>STFixer Mode</value>
   </data>
   <data name="Choice_STFixer_Description" xml:space="preserve">
-    <value>Capcom Save Fix, offline patches, and manifest pinning. No cloud save interception -- just the fixes you need.</value>
+    <value>Core fixes. Makes Capcom games save, enables SteamTools activation when some SteamTools servers are down, enables manifest pinning. Does not enable Cloud Saves.</value>
   </data>
   <data name="Choice_STFixer_Features" xml:space="preserve">
     <value>Includes: Capcom save fix, SteamTools offline patch, DLL deploy, manifest version pinning</value>
@@ -99,7 +99,7 @@
     <value>Cloud Redirect Mode</value>
   </data>
   <data name="Choice_CloudRedirect_Description" xml:space="preserve">
-    <value>Everything in STFixer, plus cloud save interception. Redirects lua app cloud saves to local storage and optionally syncs to Google Drive or OneDrive.</value>
+    <value>Everything in ST Fixer, plus Cloud Save redirection. Redirects Steam Cloud for lua games to Google Drive/OneDrive/a local folder.</value>
   </data>
   <data name="Choice_CloudRedirect_Features" xml:space="preserve">
     <value>Includes: All STFixer features + cloud save redirect, cloud provider sync, app management, contamination cleanup</value>
@@ -1174,7 +1174,7 @@ Files can be restored from the Restore tab. Continue?</value>
 
   <!-- SettingsPage code-behind -->
   <data name="Settings_VersionFormat" xml:space="preserve">
-    <value>{0}.{1}.{2} (Public Test Version #12)</value>
+    <value>{0}.{1}.{2} (Public Test Version #14)</value>
   </data>
   <data name="Settings_Checking" xml:space="preserve">
     <value>Checking...</value>
@@ -1230,7 +1230,7 @@ Are you sure?</value>
     <value>WARNING</value>
   </data>
   <data name="Disclaimer_BuildBanner" xml:space="preserve">
-    <value>CloudRedirect - Public Test Version #12</value>
+    <value>CloudRedirect - Public Test Version #14</value>
   </data>
   <data name="Disclaimer_ExperimentalBanner" xml:space="preserve">
     <value>!  EXPERIMENTAL  -  DATA  LOSS  RISK  !</value>
