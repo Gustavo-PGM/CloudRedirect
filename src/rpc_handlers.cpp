@@ -217,6 +217,107 @@ static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId) {
     }
 }
 
+static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
+                           const std::vector<uint8_t>& cloudData);
+
+static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const std::vector<uint8_t>& ptData) {
+    if (ptData.empty()) return;
+
+    std::string blob(reinterpret_cast<const char*>(ptData.data()), ptData.size());
+    uint64_t cloudLastPlayed = 0, cloudPlaytime = 0;
+    ParsePlaytimeBlob(blob, cloudLastPlayed, cloudPlaytime);
+
+    if (cloudLastPlayed == 0 && cloudPlaytime == 0) {
+        LOG("[Playtime] Cloud blob empty/invalid for app %u, skipping merge", appId);
+        return;
+    }
+
+    std::string vdfPath = GetSteamPath() + "userdata\\" + std::to_string(accountId)
+        + "\\config\\localconfig.vdf";
+    std::ifstream vdfIn(vdfPath);
+    if (!vdfIn.is_open()) {
+        LOG("[Playtime] Cannot open localconfig.vdf for reading (app %u)", appId);
+        return;
+    }
+
+    std::string vdfContent((std::istreambuf_iterator<char>(vdfIn)), {});
+    vdfIn.close();
+
+    std::string appIdStr = std::to_string(appId);
+    const char* sections[] = { "UserLocalConfigStore", "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
+    uint64_t localLastPlayed = 0, localPlaytime = 0;
+
+    struct FieldLoc { size_t valStart; size_t valEnd; };
+    FieldLoc lpLoc = {0, 0}, ptLoc = {0, 0};
+
+    bool found = VdfUtil::ForEachFieldInSection(vdfContent, sections, 6,
+        [&](const VdfUtil::FieldInfo& fi) {
+            if (fi.key == "LastPlayed") {
+                localLastPlayed = strtoull(std::string(fi.value).c_str(), nullptr, 10);
+                lpLoc = { fi.valStart, fi.valEnd };
+            } else if (fi.key == "Playtime") {
+                localPlaytime = strtoull(std::string(fi.value).c_str(), nullptr, 10);
+                ptLoc = { fi.valStart, fi.valEnd };
+            }
+            return true;
+        });
+
+    if (!found) {
+        LOG("[Playtime] App %u section not found in localconfig.vdf, skipping merge", appId);
+        return;
+    }
+
+    uint64_t mergedLP = (cloudLastPlayed > localLastPlayed) ? cloudLastPlayed : localLastPlayed;
+    uint64_t mergedPT = (cloudPlaytime > localPlaytime) ? cloudPlaytime : localPlaytime;
+    if (mergedLP == localLastPlayed && mergedPT == localPlaytime) {
+        LOG("[Playtime] Local playtime already up-to-date for app %u", appId);
+        return;
+    }
+
+    std::string newLP = std::to_string(mergedLP);
+    std::string newPT = std::to_string(mergedPT);
+    bool lpValid = lpLoc.valEnd > lpLoc.valStart;
+    bool ptValid = ptLoc.valEnd > ptLoc.valStart;
+
+    struct Replacement { size_t start; size_t len; std::string text; };
+    std::vector<Replacement> reps;
+    if (lpValid) reps.push_back({lpLoc.valStart, lpLoc.valEnd - lpLoc.valStart, newLP});
+    if (ptValid) reps.push_back({ptLoc.valStart, ptLoc.valEnd - ptLoc.valStart, newPT});
+
+    if (reps.empty()) {
+        LOG("[Playtime] App %u section has no LastPlayed/Playtime fields, skipping write", appId);
+        return;
+    }
+
+    std::sort(reps.begin(), reps.end(),
+        [](const Replacement& a, const Replacement& b) { return a.start > b.start; });
+    for (auto& r : reps)
+        vdfContent.replace(r.start, r.len, r.text);
+
+    if (FileUtil::AtomicWriteText(vdfPath, vdfContent)) {
+        LOG("[Playtime] Merged playtime for app %u: LastPlayed %llu->%llu, Playtime %llu->%llu",
+            appId, localLastPlayed, mergedLP, localPlaytime, mergedPT);
+    } else {
+        LOG("[Playtime] Failed to write localconfig.vdf for app %u", appId);
+    }
+}
+
+void RestoreAppMetadata(uint32_t accountId, uint32_t appId) {
+    InvalidateTokenCaches(accountId, appId);
+
+    if (SyncAchievementsEnabled()) {
+        auto statsData = CloudStorage::RetrieveBlob(accountId, appId, kStatsMetadataPath);
+        if (!statsData.empty()) {
+            MergeStatsFile(appId, accountId, statsData);
+        }
+    }
+
+    if (SyncPlaytimeEnabled()) {
+        auto ptData = CloudStorage::RetrieveBlob(accountId, appId, kPlaytimeMetadataPath);
+        RestorePlaytimeMetadata(accountId, appId, ptData);
+    }
+}
+
 
 static std::string GetMachineName() {
     char buf[MAX_COMPUTERNAME_LENGTH + 1];
@@ -744,101 +845,8 @@ PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqB
         LOG("[NS] Syncing app %u from cloud (%s) before launch...",
             appId, CloudStorage::ProviderName());
         bool hadNewer = CloudStorage::SyncFromCloud(accountId, appId);
-        InvalidateTokenCaches(accountId, appId);
         LOG("[NS] Cloud sync complete for app %u (hadNewer=%d)", appId, hadNewer);
-
-        // Merge achievement/stats data from cloud with local
-        if (SyncAchievementsEnabled()) {
-            auto statsData = CloudStorage::RetrieveBlob(accountId, appId, kStatsMetadataPath);
-            if (!statsData.empty()) {
-                MergeStatsFile(appId, accountId, statsData);
-            }
-        }
-
-        // Restore playtime from cloud
-        if (SyncPlaytimeEnabled()) {
-            auto ptData = CloudStorage::RetrieveBlob(accountId, appId, kPlaytimeMetadataPath);
-            if (!ptData.empty()) {
-                std::string blob(reinterpret_cast<const char*>(ptData.data()), ptData.size());
-                uint64_t cloudLastPlayed = 0, cloudPlaytime = 0;
-                ParsePlaytimeBlob(blob, cloudLastPlayed, cloudPlaytime);
-
-                if (cloudLastPlayed == 0 && cloudPlaytime == 0) {
-                    LOG("[Playtime] Cloud blob empty/invalid for app %u, skipping merge", appId);
-                } else {
-                    // Read localconfig.vdf and merge playtime (take max)
-                    std::string vdfPath = GetSteamPath() + "userdata\\" + std::to_string(accountId)
-                        + "\\config\\localconfig.vdf";
-
-                    std::ifstream vdfIn(vdfPath);
-                    if (vdfIn.is_open()) {
-                        std::string vdfContent((std::istreambuf_iterator<char>(vdfIn)), {});
-                        vdfIn.close();
-
-                        // Find the app section and read current values
-                        std::string appIdStr = std::to_string(appId);
-                        const char* sections[] = { "UserLocalConfigStore", "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
-                        uint64_t localLastPlayed = 0, localPlaytime = 0;
-
-                        struct FieldLoc { size_t valStart; size_t valEnd; };
-                        FieldLoc lpLoc = {0, 0}, ptLoc = {0, 0};
-
-                        bool found = VdfUtil::ForEachFieldInSection(vdfContent, sections, 6,
-                            [&](const VdfUtil::FieldInfo& fi) {
-                                if (fi.key == "LastPlayed") {
-                                    localLastPlayed = strtoull(std::string(fi.value).c_str(), nullptr, 10);
-                                    lpLoc = { fi.valStart, fi.valEnd };
-                                } else if (fi.key == "Playtime") {
-                                    localPlaytime = strtoull(std::string(fi.value).c_str(), nullptr, 10);
-                                    ptLoc = { fi.valStart, fi.valEnd };
-                                }
-                                return true;
-                            });
-
-                        if (!found) {
-                            LOG("[Playtime] App %u section not found in localconfig.vdf, skipping merge", appId);
-                        } else {
-                            uint64_t mergedLP = (cloudLastPlayed > localLastPlayed) ? cloudLastPlayed : localLastPlayed;
-                            uint64_t mergedPT = (cloudPlaytime > localPlaytime) ? cloudPlaytime : localPlaytime;
-
-                            bool needWrite = (mergedLP != localLastPlayed || mergedPT != localPlaytime);
-                            if (needWrite) {
-                                std::string newLP = std::to_string(mergedLP);
-                                std::string newPT = std::to_string(mergedPT);
-                                bool lpValid = lpLoc.valEnd > lpLoc.valStart;
-                                bool ptValid = ptLoc.valEnd > ptLoc.valStart;
-
-                                struct Replacement { size_t start; size_t len; std::string text; };
-                                std::vector<Replacement> reps;
-                                if (lpValid) reps.push_back({lpLoc.valStart, lpLoc.valEnd - lpLoc.valStart, newLP});
-                                if (ptValid) reps.push_back({ptLoc.valStart, ptLoc.valEnd - ptLoc.valStart, newPT});
-
-                                if (reps.empty()) {
-                                    LOG("[Playtime] App %u section has no LastPlayed/Playtime fields, skipping write", appId);
-                                } else {
-                                    // Apply in reverse offset order so earlier offsets stay valid
-                                    std::sort(reps.begin(), reps.end(),
-                                        [](const Replacement& a, const Replacement& b) { return a.start > b.start; });
-                                    for (auto& r : reps)
-                                        vdfContent.replace(r.start, r.len, r.text);
-                                }
-
-                                if (FileUtil::AtomicWriteText(vdfPath, vdfContent)) {
-                                    LOG("[Playtime] Merged playtime for app %u: LastPlayed %llu->%llu, Playtime %llu->%llu",
-                                        appId, localLastPlayed, mergedLP, localPlaytime, mergedPT);
-                                } else {
-                                    LOG("[Playtime] Failed to write localconfig.vdf for app %u", appId);
-                                }
-                            } else {
-                                LOG("[Playtime] Local playtime already up-to-date for app %u", appId);
-                            }
-                        }
-                    } else {
-                        LOG("[Playtime] Cannot open localconfig.vdf for reading (app %u)", appId);
-                    }
-                }
-            }
-        }
+        RestoreAppMetadata(accountId, appId);
     }
 
     PB::Writer body; // empty = no pending remote operations

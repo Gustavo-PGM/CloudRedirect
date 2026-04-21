@@ -219,10 +219,34 @@ static void* g_cmInterface = nullptr;             // real CCMInterface* (found v
 static std::atomic<bool> g_shuttingDown{false};
 static std::atomic<bool> g_cmInterfaceFound{false}; // whether we've found the real CCMInterface
 static std::thread g_luaSyncThread;                  // deferred lua sync (waits for accountId)
+static std::thread g_startupMetadataThread;          // deferred startup playtime/stats restore
+static std::atomic<bool> g_startupMetadataScheduled{false};
 
 // Background threads spawned by notification hooks (exit-sync uploads, MessageBox, etc.)
 static std::mutex g_bgThreadsMutex;
 static std::vector<std::thread> g_bgThreads;
+
+static void ScheduleStartupMetadataSync() {
+    if (!CloudStorage::IsCloudActive()) return;
+    if (!SyncAchievementsEnabled() && !SyncPlaytimeEnabled()) return;
+
+    bool expected = false;
+    if (!g_startupMetadataScheduled.compare_exchange_strong(expected, true)) return;
+
+    if (g_startupMetadataThread.joinable()) g_startupMetadataThread.join();
+    g_startupMetadataThread = std::thread([] {
+        uint32_t accountId = GetAccountId();
+        if (g_shuttingDown.load() || accountId == 0) return;
+
+        LOG("[StartupSync] Restoring cloud metadata for account %u", accountId);
+        auto appIds = CloudStorage::SyncAllFromCloud(accountId);
+        for (uint32_t appId : appIds) {
+            if (g_shuttingDown.load()) break;
+            RestoreAppMetadata(accountId, appId);
+        }
+        LOG("[StartupSync] Restored metadata for %zu apps", appIds.size());
+    });
+}
 
 // Sync toggles (all default OFF, read from config.json at init)
 static std::atomic<bool> g_syncAchievements{false};
@@ -1159,6 +1183,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
                     g_steamId.store(sidField->varintVal);
                     LOG("[VtHook] Captured SteamID: %llu (accountId=%u)", g_steamId.load(), GetAccountId());
                     HttpServer::SetAccountId(GetAccountId());
+                    ScheduleStartupMetadataSync();
                 }
                 auto* sessField = PB::FindField(hdrFields, HDR_SESSIONID);
                 if (sessField) {
@@ -2742,6 +2767,7 @@ void Init(const std::string& steamPath) {
     }
 
     CloudStorage::Init(cloudRoot, std::move(provider));
+    g_startupMetadataScheduled.store(false);
 
     // Launch deferred lua sync thread (waits for accountId to be captured).
     if (g_syncLuas) {
@@ -2921,6 +2947,7 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
             g_steamId.store(sidField->varintVal);
             LOG("[NS] Captured SteamID: %llu (accountId=%u)", g_steamId.load(), GetAccountId());
             HttpServer::SetAccountId(GetAccountId());
+            ScheduleStartupMetadataSync();
         }
         auto* sessField = PB::FindField(pkt.header, HDR_SESSIONID);
         if (sessField) {
@@ -3109,6 +3136,7 @@ void Shutdown() {
 
     // Join lua sync thread before shutdown proceeds
     if (g_luaSyncThread.joinable()) g_luaSyncThread.join();
+    if (g_startupMetadataThread.joinable()) g_startupMetadataThread.join();
 
     // Join background threads (exit-sync uploads, MessageBox, etc.)
     {

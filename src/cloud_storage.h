@@ -68,7 +68,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId);
 
 // Pull metadata for ALL known apps from cloud.
 // Called once during Init after provider is authenticated.
-void SyncAllFromCloud(uint32_t accountId);
+std::vector<uint32_t> SyncAllFromCloud(uint32_t accountId);
 
 // Block until all pending background operations complete.
 void DrainQueue();

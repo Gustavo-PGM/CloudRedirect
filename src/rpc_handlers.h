@@ -34,4 +34,6 @@ PB::Writer HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& req
 PB::Writer HandleFileDownload(uint32_t appId, const std::vector<PB::Field>& reqBody);
 PB::Writer HandleDeleteFile(uint32_t appId, const std::vector<PB::Field>& reqBody);
 
+void RestoreAppMetadata(uint32_t accountId, uint32_t appId);
+
 } // namespace CloudIntercept

@@ -831,8 +831,9 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     return hadNewer;
 }
 
-void SyncAllFromCloud(uint32_t accountId) {
-    if (!g_provider || !g_provider->IsAuthenticated()) return;
+std::vector<uint32_t> SyncAllFromCloud(uint32_t accountId) {
+    std::vector<uint32_t> syncedApps;
+    if (!g_provider || !g_provider->IsAuthenticated()) return syncedApps;
 
     LOG("[CloudStorage] SyncAllFromCloud: scanning for apps belonging to account %u...", accountId);
 
@@ -857,7 +858,10 @@ void SyncAllFromCloud(uint32_t accountId) {
     LOG("[CloudStorage] SyncAllFromCloud: found %zu apps in cloud", appIds.size());
     for (uint32_t appId : appIds) {
         SyncFromCloud(accountId, appId);
+        syncedApps.push_back(appId);
     }
+
+    return syncedApps;
 }
 
 void DrainQueue() {
