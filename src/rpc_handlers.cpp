@@ -966,8 +966,6 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
 
 // CompleteAppUploadBatchBlocking
 PB::Writer HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqBody) {
-    LOG("[NS] CompleteBatch app=%u", appId);
-
     // Persist file tokens once per batch (deferred from per-file commits/deletes).
     // This replaces N redundant file_tokens.dat cloud uploads with a single one.
     {
@@ -980,6 +978,16 @@ PB::Writer HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& req
             PersistFileTokens(dirty);
         }
     }
+
+    // Increment CN once per batch (not per file) to match real Steam behavior.
+    // This prevents the CN from climbing rapidly and causing conflict dialogs
+    // when Steam restarts with clientCN=0.
+    uint32_t accountId = GetAccountId();
+    uint64_t newCN = LocalStorage::IncrementChangeNumber(accountId, appId);
+    LOG("[NS] CompleteBatch app=%u CN=%llu", appId, newCN);
+
+    // Push updated CN to cloud provider
+    CloudStorage::PushCNToCloud(accountId, appId, newCN);
 
     // Drain cloud sync queue -- ensure all blobs are pushed before we tell Steam "batch done"
     CloudStorage::DrainQueue();

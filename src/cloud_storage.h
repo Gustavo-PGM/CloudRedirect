@@ -73,6 +73,9 @@ void SyncAllFromCloud(uint32_t accountId);
 // Block until all pending background operations complete.
 void DrainQueue();
 
+// Push the change number to the cloud provider (uploads cn.dat).
+void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn);
+
 // Show an immediate error dialog for critical auth failures (e.g. token refresh broken).
 // Called by provider implementations (GDrive, OneDrive) when refresh fails.
 void NotifyAuthFailure(const std::string& providerName);

@@ -236,7 +236,7 @@ static void EnqueueWork(WorkItem item) {
 
 // Enqueue a cloud upload of the current CN value for this app.
 // Dedup in EnqueueWork will coalesce multiple calls during a batch.
-static void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn) {
+void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn) {
     std::string cnStr = std::to_string(cn);
     WorkItem wi;
     wi.type = WorkItem::Upload;
@@ -330,9 +330,7 @@ bool StoreBlob(uint32_t accountId, uint32_t appId,
     }
     LOG("[CloudStorage] StoreBlob: cached locally: %s (%zu bytes)", filename.c_str(), len);
 
-    // Increment change number so Steam sees serverCN > clientCN on next restart
-    // and actually processes the file list instead of short-circuiting.
-    uint64_t newCN = LocalStorage::IncrementChangeNumber(accountId, appId);
+    // CN is incremented once per batch in HandleCompleteBatch, not per file.
 
     // 2. Enqueue async upload to cloud provider
     if (g_provider) {
@@ -341,8 +339,6 @@ bool StoreBlob(uint32_t accountId, uint32_t appId,
         wi.cloudPath = CloudBlobPath(accountId, appId, filename);
         wi.data.assign(data, data + len);
         EnqueueWork(std::move(wi));
-
-        PushCNToCloud(accountId, appId, newCN);
     }
 
     return true;
@@ -396,8 +392,7 @@ bool DeleteBlob(uint32_t accountId, uint32_t appId,
 
     LOG("[CloudStorage] DeleteBlob: removed local cache: %s", filename.c_str());
 
-    // Increment change number so Steam sees serverCN > clientCN on next restart
-    uint64_t newCN = LocalStorage::IncrementChangeNumber(accountId, appId);
+    // CN is incremented once per batch in HandleCompleteBatch, not per file.
 
     // 2. Enqueue cloud delete
     if (g_provider) {
@@ -405,8 +400,6 @@ bool DeleteBlob(uint32_t accountId, uint32_t appId,
         wi.type = WorkItem::Delete;
         wi.cloudPath = CloudBlobPath(accountId, appId, filename);
         EnqueueWork(std::move(wi));
-
-        PushCNToCloud(accountId, appId, newCN);
     }
 
     return true;
