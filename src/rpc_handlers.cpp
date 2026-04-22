@@ -19,6 +19,13 @@
 namespace CloudIntercept {
 
 bool RestorePlaytimeState(uint32_t appId, uint64_t playtime, uint64_t playtime2wks);
+bool RestoreLastPlayedState(uint32_t appId, uint64_t lastPlayed);
+
+static void RestoreInMemoryPlaytimeMetadata(uint32_t appId, uint64_t lastPlayed,
+                                            uint64_t playtime, uint64_t playtime2wks) {
+    RestoreLastPlayedState(appId, lastPlayed);
+    RestorePlaytimeState(appId, playtime, playtime2wks);
+}
 
 
 // per-app upload batch tracking
@@ -426,7 +433,7 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
         }
 
         if (WriteLocalConfigWithRetry(vdfPath, vdfContent)) {
-            RestorePlaytimeState(appId, cloudPlaytime, cloudPlaytime2wks);
+            RestoreInMemoryPlaytimeMetadata(appId, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
             LOG("[Playtime] Created playtime section for app %u: LastPlayed 0->%llu, Playtime 0->%llu, Playtime2wks 0->%llu",
                 appId, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
         } else {
@@ -439,7 +446,7 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
     uint64_t mergedPT = (cloudPlaytime > localPlaytime) ? cloudPlaytime : localPlaytime;
     uint64_t mergedPT2 = (cloudPlaytime2wks > localPlaytime2wks) ? cloudPlaytime2wks : localPlaytime2wks;
     if (mergedLP == localLastPlayed && mergedPT == localPlaytime && mergedPT2 == localPlaytime2wks) {
-        RestorePlaytimeState(appId, mergedPT, mergedPT2);
+        RestoreInMemoryPlaytimeMetadata(appId, mergedLP, mergedPT, mergedPT2);
         LOG("[Playtime] Local playtime already up-to-date for app %u", appId);
         return;
     }
@@ -480,7 +487,7 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
     }
 
     if (WriteLocalConfigWithRetry(vdfPath, vdfContent)) {
-        RestorePlaytimeState(appId, mergedPT, mergedPT2);
+        RestoreInMemoryPlaytimeMetadata(appId, mergedLP, mergedPT, mergedPT2);
         LOG("[Playtime] Merged playtime for app %u: LastPlayed %llu->%llu, Playtime %llu->%llu, Playtime2wks %llu->%llu",
             appId, localLastPlayed, mergedLP, localPlaytime, mergedPT, localPlaytime2wks, mergedPT2);
     } else {

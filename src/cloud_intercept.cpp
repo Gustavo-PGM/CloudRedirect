@@ -92,6 +92,7 @@ static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBD07E0;
 // CUser playtime state helpers
 static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9BF480;
 static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9CF7E0;
+static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9D2640;
 // CSteamEngine layout offsets
 static constexpr uint32_t ENGINE_OFF_JOBMGR          = 592;    // CJobMgr embedded at CSteamEngine+592
 static constexpr uint32_t ENGINE_OFF_GLOBAL_HANDLE   = 3144;  // uint32_t: global user handle
@@ -158,6 +159,7 @@ using ParseFromArrayFn = char(__fastcall*)(void* msgBody, const char* data, int 
 using SerializeToArrayFn = void*(__fastcall*)(void* msgBody, void* outBuf);
 using GetAppMinutesPlayedDataFn = unsigned int*(__fastcall*)(int64_t userPtr, unsigned int appId, char create);
 using FlushAppMinutesPlayedFn = int64_t(__fastcall*)(int64_t userPtr, unsigned int appId, unsigned int* record);
+using SetAppLastPlayedTimeFn = void(__fastcall*)(int64_t userPtr, unsigned int appId, unsigned int lastPlayed);
 
 // Job routing info struct passed as 4th arg to BRouteMsgToJob
 // Layout from RecvPkt assembly (naturally aligned, 24 bytes, no padding needed):
@@ -338,6 +340,29 @@ static uint32_t ClampToUint32(uint64_t value) {
         : static_cast<uint32_t>(value);
 }
 
+static uintptr_t FindCurrentUser();
+
+static uintptr_t ResolveCurrentUserForRestore(const char* featureTag, uint32_t appId) {
+    if (!g_steamClientBase) {
+        HMODULE hSC = GetModuleHandleA("steamclient64.dll");
+        if (!hSC) {
+            LOG("[%s] In-memory restore skipped for app %u: steamclient64.dll not loaded", featureTag, appId);
+            return 0;
+        }
+        g_steamClientBase = (uintptr_t)hSC;
+    }
+
+    uintptr_t userPtr = 0;
+    for (int attempt = 0; attempt < 20 && !userPtr && !g_shuttingDown.load(); ++attempt) {
+        userPtr = FindCurrentUser();
+        if (!userPtr) Sleep(100);
+    }
+    if (!userPtr) {
+        LOG("[%s] In-memory restore skipped for app %u: current CUser not available", featureTag, appId);
+    }
+    return userPtr;
+}
+
 static uintptr_t FindCurrentUser() {
     if (!g_steamClientBase) {
         HMODULE hSC = GetModuleHandleA("steamclient64.dll");
@@ -448,27 +473,11 @@ static LaunchInfo PopLaunchInfo(uint32_t appId) {
 bool RestorePlaytimeState(uint32_t appId, uint64_t playtime, uint64_t playtime2wks) {
     if (!playtime && !playtime2wks) return false;
 
-    if (!g_steamClientBase) {
-        HMODULE hSC = GetModuleHandleA("steamclient64.dll");
-        if (!hSC) {
-            LOG("[Playtime] In-memory restore skipped for app %u: steamclient64.dll not loaded", appId);
-            return false;
-        }
-        g_steamClientBase = (uintptr_t)hSC;
-    }
+    uintptr_t userPtr = ResolveCurrentUserForRestore("Playtime", appId);
+    if (!userPtr) return false;
 
     auto getData = (GetAppMinutesPlayedDataFn)(g_steamClientBase + SC_RVA_GET_APP_MINUTES_PLAYED_DATA);
     auto flushData = (FlushAppMinutesPlayedFn)(g_steamClientBase + SC_RVA_FLUSH_APP_MINUTES_PLAYED);
-
-    uintptr_t userPtr = 0;
-    for (int attempt = 0; attempt < 20 && !userPtr && !g_shuttingDown.load(); ++attempt) {
-        userPtr = FindCurrentUser();
-        if (!userPtr) Sleep(100);
-    }
-    if (!userPtr) {
-        LOG("[Playtime] In-memory restore skipped for app %u: current CUser not available", appId);
-        return false;
-    }
 
     unsigned int* record = nullptr;
     __try {
@@ -506,6 +515,27 @@ bool RestorePlaytimeState(uint32_t appId, uint64_t playtime, uint64_t playtime2w
 
     LOG("[Playtime] Seeded in-memory playtime for app %u: total %u->%u, 2wks %u->%u",
         appId, oldTotal, total32, oldTwoWks, twoWks32);
+    return true;
+}
+
+bool RestoreLastPlayedState(uint32_t appId, uint64_t lastPlayed) {
+    if (!lastPlayed) return false;
+
+    uintptr_t userPtr = ResolveCurrentUserForRestore("Playtime", appId);
+    if (!userPtr) return false;
+
+    auto setLastPlayed = (SetAppLastPlayedTimeFn)(g_steamClientBase + SC_RVA_SET_APP_LAST_PLAYED_TIME);
+
+    uint32_t lastPlayed32 = ClampToUint32(lastPlayed);
+    __try {
+        setLastPlayed((int64_t)userPtr, appId, lastPlayed32);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[Playtime] In-memory LastPlayed restore exception for app %u: code=0x%08lX",
+            appId, GetExceptionCode());
+        return false;
+    }
+
+    LOG("[Playtime] Seeded in-memory LastPlayed for app %u: %u", appId, lastPlayed32);
     return true;
 }
 
