@@ -18,6 +18,8 @@
 
 namespace CloudIntercept {
 
+bool RestorePlaytimeState(uint32_t appId, uint64_t playtime, uint64_t playtime2wks);
+
 
 // per-app upload batch tracking
 static std::atomic<uint64_t> g_nextBatchId{1};
@@ -55,13 +57,18 @@ static uint64_t ParsePlaytimeField(const Json::Value& value) {
     return 0;
 }
 
-static void ParsePlaytimeBlob(const std::string& blob, uint64_t& lastPlayed, uint64_t& playtime) {
+static void ParsePlaytimeBlob(const std::string& blob, uint64_t& lastPlayed,
+                              uint64_t& playtime, uint64_t& playtime2wks) {
     auto parsed = Json::Parse(blob);
     if (parsed.type == Json::Type::Object) {
         if (parsed.has("LastPlayed"))
             lastPlayed = ParsePlaytimeField(parsed["LastPlayed"]);
         if (parsed.has("Playtime"))
             playtime = ParsePlaytimeField(parsed["Playtime"]);
+        if (parsed.has("Playtime2wks"))
+            playtime2wks = ParsePlaytimeField(parsed["Playtime2wks"]);
+        if (playtime2wks == 0 && playtime > 0)
+            playtime2wks = playtime;
         return;
     }
 
@@ -74,7 +81,10 @@ static void ParsePlaytimeBlob(const std::string& blob, uint64_t& lastPlayed, uin
         std::string val = blobLine.substr(tab + 1);
         if (key == "LastPlayed") lastPlayed = strtoull(val.c_str(), nullptr, 10);
         else if (key == "Playtime") playtime = strtoull(val.c_str(), nullptr, 10);
+        else if (key == "Playtime2wks") playtime2wks = strtoull(val.c_str(), nullptr, 10);
     }
+    if (playtime2wks == 0 && playtime > 0)
+        playtime2wks = playtime;
 }
 
 // per-app root tokens extracted from upload filenames (e.g., "%GameInstall%")
@@ -220,14 +230,155 @@ static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId) {
 static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
                            const std::vector<uint8_t>& cloudData);
 
+static bool FindVdfSectionRange(const std::string& vdfContent,
+                                const char* const* sections,
+                                size_t sectionCount,
+                                size_t& sectionStart,
+                                size_t& sectionEnd) {
+    size_t searchPos = 0;
+    for (size_t i = 0; i < sectionCount; ++i) {
+        const std::string needle = std::string("\"") + sections[i] + "\"";
+        size_t namePos = vdfContent.find(needle, searchPos);
+        if (namePos == std::string::npos) return false;
+
+        size_t openBrace = vdfContent.find('{', namePos + needle.size());
+        if (openBrace == std::string::npos) return false;
+
+        searchPos = openBrace + 1;
+        if (i + 1 == sectionCount) {
+            sectionStart = openBrace + 1;
+            int depth = 1;
+            for (size_t p = openBrace + 1; p < vdfContent.size(); ++p) {
+                if (vdfContent[p] == '{') ++depth;
+                else if (vdfContent[p] == '}') {
+                    --depth;
+                    if (depth == 0) {
+                        sectionEnd = p;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+static bool InsertPlaytimeFieldInSection(std::string& vdfContent,
+                                         const char* const* sections,
+                                         size_t sectionCount,
+                                         std::string_view fieldName,
+                                         const std::string& value) {
+    size_t sectionStart = 0;
+    size_t sectionEnd = 0;
+    if (!FindVdfSectionRange(vdfContent, sections, sectionCount, sectionStart, sectionEnd)) {
+        return false;
+    }
+
+    std::string indent = "\t";
+    size_t lineStart = vdfContent.rfind('\n', sectionEnd);
+    if (lineStart != std::string::npos) {
+        ++lineStart;
+        size_t indentEnd = lineStart;
+        while (indentEnd < vdfContent.size() && (vdfContent[indentEnd] == '\t' || vdfContent[indentEnd] == ' ')) {
+            ++indentEnd;
+        }
+        indent.assign(vdfContent.data() + lineStart, indentEnd - lineStart);
+        indent.push_back('\t');
+    }
+
+    std::string insertion = indent + "\"" + std::string(fieldName) + "\"\t\t\"" + value + "\"\n";
+    vdfContent.insert(sectionEnd, insertion);
+    return true;
+}
+
+static bool EnsureVdfSectionPath(std::string& vdfContent,
+                                 const char* const* sections,
+                                 size_t sectionCount) {
+    if (sectionCount == 0) return true;
+
+    size_t sectionStart = 0;
+    size_t sectionEnd = 0;
+    if (FindVdfSectionRange(vdfContent, sections, sectionCount, sectionStart, sectionEnd)) {
+        return true;
+    }
+
+    if (sectionCount == 1) {
+        if (!vdfContent.empty() && vdfContent.back() != '\n') vdfContent.push_back('\n');
+        vdfContent += "\"" + std::string(sections[0]) + "\"\n{\n}\n";
+        return true;
+    }
+
+    if (!EnsureVdfSectionPath(vdfContent, sections, sectionCount - 1)) {
+        return false;
+    }
+
+    size_t parentStart = 0;
+    size_t parentEnd = 0;
+    if (!FindVdfSectionRange(vdfContent, sections, sectionCount - 1, parentStart, parentEnd)) {
+        return false;
+    }
+
+    std::string parentIndent = "\t";
+    size_t lineStart = vdfContent.rfind('\n', parentEnd);
+    if (lineStart != std::string::npos) {
+        ++lineStart;
+        size_t indentEnd = lineStart;
+        while (indentEnd < vdfContent.size() && (vdfContent[indentEnd] == '\t' || vdfContent[indentEnd] == ' ')) {
+            ++indentEnd;
+        }
+        parentIndent.assign(vdfContent.data() + lineStart, indentEnd - lineStart);
+    }
+
+    const std::string childIndent = parentIndent + "\t";
+    std::string insertion;
+    insertion += childIndent + "\"" + std::string(sections[sectionCount - 1]) + "\"\n";
+    insertion += childIndent + "{\n";
+    insertion += childIndent + "}\n";
+    vdfContent.insert(parentEnd, insertion);
+    return true;
+}
+
+static bool InsertPlaytimeAppSection(std::string& vdfContent,
+                                     const char* const* sections,
+                                     size_t sectionCount,
+                                     const std::string& lastPlayed,
+                                     const std::string& playtime,
+                                     const std::string& playtime2wks) {
+    if (!EnsureVdfSectionPath(vdfContent, sections, sectionCount)) {
+        return false;
+    }
+
+    if (!InsertPlaytimeFieldInSection(vdfContent, sections, sectionCount, "LastPlayed", lastPlayed)) {
+        return false;
+    }
+    if (!InsertPlaytimeFieldInSection(vdfContent, sections, sectionCount, "Playtime", playtime)) {
+        return false;
+    }
+    if (!InsertPlaytimeFieldInSection(vdfContent, sections, sectionCount, "Playtime2wks", playtime2wks)) {
+        return false;
+    }
+    return true;
+}
+
+static bool WriteLocalConfigWithRetry(const std::string& vdfPath, const std::string& vdfContent) {
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        if (FileUtil::AtomicWriteText(vdfPath, vdfContent)) {
+            return true;
+        }
+        Sleep(200);
+    }
+    return false;
+}
+
 static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const std::vector<uint8_t>& ptData) {
     if (ptData.empty()) return;
 
     std::string blob(reinterpret_cast<const char*>(ptData.data()), ptData.size());
-    uint64_t cloudLastPlayed = 0, cloudPlaytime = 0;
-    ParsePlaytimeBlob(blob, cloudLastPlayed, cloudPlaytime);
+    uint64_t cloudLastPlayed = 0, cloudPlaytime = 0, cloudPlaytime2wks = 0;
+    ParsePlaytimeBlob(blob, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
 
-    if (cloudLastPlayed == 0 && cloudPlaytime == 0) {
+    if (cloudLastPlayed == 0 && cloudPlaytime == 0 && cloudPlaytime2wks == 0) {
         LOG("[Playtime] Cloud blob empty/invalid for app %u, skipping merge", appId);
         return;
     }
@@ -245,10 +396,10 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
 
     std::string appIdStr = std::to_string(appId);
     const char* sections[] = { "UserLocalConfigStore", "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
-    uint64_t localLastPlayed = 0, localPlaytime = 0;
+    uint64_t localLastPlayed = 0, localPlaytime = 0, localPlaytime2wks = 0;
 
     struct FieldLoc { size_t valStart; size_t valEnd; };
-    FieldLoc lpLoc = {0, 0}, ptLoc = {0, 0};
+    FieldLoc lpLoc = {0, 0}, ptLoc = {0, 0}, pt2Loc = {0, 0};
 
     bool found = VdfUtil::ForEachFieldInSection(vdfContent, sections, 6,
         [&](const VdfUtil::FieldInfo& fi) {
@@ -258,45 +409,80 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
             } else if (fi.key == "Playtime") {
                 localPlaytime = strtoull(std::string(fi.value).c_str(), nullptr, 10);
                 ptLoc = { fi.valStart, fi.valEnd };
+            } else if (fi.key == "Playtime2wks") {
+                localPlaytime2wks = strtoull(std::string(fi.value).c_str(), nullptr, 10);
+                pt2Loc = { fi.valStart, fi.valEnd };
             }
             return true;
         });
 
     if (!found) {
-        LOG("[Playtime] App %u section not found in localconfig.vdf, skipping merge", appId);
+        std::string newLP = std::to_string(cloudLastPlayed);
+        std::string newPT = std::to_string(cloudPlaytime);
+        std::string newPT2 = std::to_string(cloudPlaytime2wks);
+        if (!InsertPlaytimeAppSection(vdfContent, sections, 6, newLP, newPT, newPT2)) {
+            LOG("[Playtime] App %u section not found in localconfig.vdf, skipping merge", appId);
+            return;
+        }
+
+        if (WriteLocalConfigWithRetry(vdfPath, vdfContent)) {
+            RestorePlaytimeState(appId, cloudPlaytime, cloudPlaytime2wks);
+            LOG("[Playtime] Created playtime section for app %u: LastPlayed 0->%llu, Playtime 0->%llu, Playtime2wks 0->%llu",
+                appId, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
+        } else {
+            LOG("[Playtime] Failed to write localconfig.vdf for app %u", appId);
+        }
         return;
     }
 
     uint64_t mergedLP = (cloudLastPlayed > localLastPlayed) ? cloudLastPlayed : localLastPlayed;
     uint64_t mergedPT = (cloudPlaytime > localPlaytime) ? cloudPlaytime : localPlaytime;
-    if (mergedLP == localLastPlayed && mergedPT == localPlaytime) {
+    uint64_t mergedPT2 = (cloudPlaytime2wks > localPlaytime2wks) ? cloudPlaytime2wks : localPlaytime2wks;
+    if (mergedLP == localLastPlayed && mergedPT == localPlaytime && mergedPT2 == localPlaytime2wks) {
+        RestorePlaytimeState(appId, mergedPT, mergedPT2);
         LOG("[Playtime] Local playtime already up-to-date for app %u", appId);
         return;
     }
 
     std::string newLP = std::to_string(mergedLP);
     std::string newPT = std::to_string(mergedPT);
+    std::string newPT2 = std::to_string(mergedPT2);
     bool lpValid = lpLoc.valEnd > lpLoc.valStart;
     bool ptValid = ptLoc.valEnd > ptLoc.valStart;
+    bool pt2Valid = pt2Loc.valEnd > pt2Loc.valStart;
 
     struct Replacement { size_t start; size_t len; std::string text; };
     std::vector<Replacement> reps;
     if (lpValid) reps.push_back({lpLoc.valStart, lpLoc.valEnd - lpLoc.valStart, newLP});
     if (ptValid) reps.push_back({ptLoc.valStart, ptLoc.valEnd - ptLoc.valStart, newPT});
+    if (pt2Valid) reps.push_back({pt2Loc.valStart, pt2Loc.valEnd - pt2Loc.valStart, newPT2});
 
-    if (reps.empty()) {
-        LOG("[Playtime] App %u section has no LastPlayed/Playtime fields, skipping write", appId);
+    if (!reps.empty()) {
+        std::sort(reps.begin(), reps.end(),
+            [](const Replacement& a, const Replacement& b) { return a.start > b.start; });
+        for (auto& r : reps)
+            vdfContent.replace(r.start, r.len, r.text);
+    }
+
+    bool inserted = false;
+    if (!lpValid) {
+        inserted = InsertPlaytimeFieldInSection(vdfContent, sections, 6, "LastPlayed", newLP) || inserted;
+    }
+    if (!ptValid) {
+        inserted = InsertPlaytimeFieldInSection(vdfContent, sections, 6, "Playtime", newPT) || inserted;
+    }
+    if (!pt2Valid) {
+        inserted = InsertPlaytimeFieldInSection(vdfContent, sections, 6, "Playtime2wks", newPT2) || inserted;
+    }
+    if (!lpValid && !ptValid && !pt2Valid && !inserted) {
+        LOG("[Playtime] App %u section has no playtime fields, skipping write", appId);
         return;
     }
 
-    std::sort(reps.begin(), reps.end(),
-        [](const Replacement& a, const Replacement& b) { return a.start > b.start; });
-    for (auto& r : reps)
-        vdfContent.replace(r.start, r.len, r.text);
-
-    if (FileUtil::AtomicWriteText(vdfPath, vdfContent)) {
-        LOG("[Playtime] Merged playtime for app %u: LastPlayed %llu->%llu, Playtime %llu->%llu",
-            appId, localLastPlayed, mergedLP, localPlaytime, mergedPT);
+    if (WriteLocalConfigWithRetry(vdfPath, vdfContent)) {
+        RestorePlaytimeState(appId, mergedPT, mergedPT2);
+        LOG("[Playtime] Merged playtime for app %u: LastPlayed %llu->%llu, Playtime %llu->%llu, Playtime2wks %llu->%llu",
+            appId, localLastPlayed, mergedLP, localPlaytime, mergedPT, localPlaytime2wks, mergedPT2);
     } else {
         LOG("[Playtime] Failed to write localconfig.vdf for app %u", appId);
     }
@@ -305,17 +491,13 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
 void RestoreAppMetadata(uint32_t accountId, uint32_t appId) {
     InvalidateTokenCaches(accountId, appId);
 
-    if (SyncAchievementsEnabled()) {
-        auto statsData = CloudStorage::RetrieveBlob(accountId, appId, kStatsMetadataPath);
-        if (!statsData.empty()) {
-            MergeStatsFile(appId, accountId, statsData);
-        }
+    auto statsData = CloudStorage::RetrieveBlob(accountId, appId, kStatsMetadataPath);
+    if (!statsData.empty()) {
+        MergeStatsFile(appId, accountId, statsData);
     }
 
-    if (SyncPlaytimeEnabled()) {
-        auto ptData = CloudStorage::RetrieveBlob(accountId, appId, kPlaytimeMetadataPath);
-        RestorePlaytimeMetadata(accountId, appId, ptData);
-    }
+    auto ptData = CloudStorage::RetrieveBlob(accountId, appId, kPlaytimeMetadataPath);
+    RestorePlaytimeMetadata(accountId, appId, ptData);
 }
 
 

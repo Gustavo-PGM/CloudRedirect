@@ -142,6 +142,26 @@ static std::string LocalStoragePath(uint32_t accountId, uint32_t appId) {
            std::to_string(appId) + "\\";
 }
 
+static std::unordered_set<uint32_t> EnumerateLocalAppIds(uint32_t accountId) {
+    std::unordered_set<uint32_t> appIds;
+    std::string accountRoot = g_localRoot + "storage\\" + std::to_string(accountId) + "\\";
+    std::error_code ec;
+    if (!std::filesystem::exists(accountRoot, ec) || !std::filesystem::is_directory(accountRoot, ec)) {
+        return appIds;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(accountRoot, ec)) {
+        if (ec) break;
+        if (!entry.is_directory(ec)) continue;
+        const std::string name = entry.path().filename().string();
+        try {
+            appIds.insert(static_cast<uint32_t>(std::stoul(name)));
+        } catch (...) {
+        }
+    }
+    return appIds;
+}
+
 static std::string LocalBlobPath(uint32_t accountId, uint32_t appId,
                                  const std::string& filename) {
     std::string path = g_localRoot + "storage\\" + std::to_string(accountId) +
@@ -853,6 +873,15 @@ std::vector<uint32_t> SyncAllFromCloud(uint32_t accountId) {
         try {
             appIds.insert(std::stoul(appStr));
         } catch (...) {}
+    }
+
+    if (appIds.empty()) {
+        auto localAppIds = EnumerateLocalAppIds(accountId);
+        if (!localAppIds.empty()) {
+            LOG("[CloudStorage] SyncAllFromCloud: provider returned 0 apps, falling back to %zu local app(s)",
+                localAppIds.size());
+            appIds.insert(localAppIds.begin(), localAppIds.end());
+        }
     }
 
     LOG("[CloudStorage] SyncAllFromCloud: found %zu apps in cloud", appIds.size());

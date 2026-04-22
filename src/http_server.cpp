@@ -14,6 +14,7 @@
 #include <mutex>
 #include <memory>
 #include <vector>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 
@@ -368,7 +369,7 @@ static void HandleClient(SOCKET client) {
                 char chunk[65536];
                 size_t sent = 0;
                 while (sent < fileSize) {
-                    size_t toRead = min(fileSize - sent, sizeof(chunk));
+                    size_t toRead = std::min(fileSize - sent, sizeof(chunk));
                     f.read(chunk, toRead);
                     auto got = (size_t)f.gcount();
                     if (got == 0) break;
