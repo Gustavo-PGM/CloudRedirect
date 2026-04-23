@@ -3285,6 +3285,8 @@ void Shutdown() {
     // Upload current lua state before cloud provider shuts down
     if (g_syncLuas) UploadLuaOnShutdown();
 
+    ShutdownRpcHandlers();
+
     // Wait for all pending cloud uploads (including lua) to finish
     CloudStorage::DrainQueue();
 

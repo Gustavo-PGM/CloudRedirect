@@ -18,6 +18,7 @@ public:
     bool Exists(const std::string& path) override;
     ExistsStatus CheckExists(const std::string& path) override;
     std::vector<FileInfo> List(const std::string& prefix) override;
+    bool ListChecked(const std::string& prefix, std::vector<FileInfo>& outFiles) override;
 
 protected:
     // CloudProviderBase hooks
@@ -48,9 +49,9 @@ private:
 
     static constexpr int MAX_RECURSION_DEPTH = 32;
 
-    void ListChildrenById(const std::string& itemId, const std::string& prefix,
-                          std::vector<RemoteFile>& out, int depth = 0);
-    std::vector<RemoteFile> ListAppFiles(uint32_t accountId, uint32_t appId);
+    bool ListChildrenById(const std::string& itemId, const std::string& prefix,
+                           std::vector<RemoteFile>& out, int depth = 0);
+    std::vector<RemoteFile> ListAppFiles(uint32_t accountId, uint32_t appId, bool* ok = nullptr);
     bool HasAppFolder(uint32_t accountId, uint32_t appId);
 
     std::optional<std::vector<uint8_t>> DownloadFileById(const std::string& itemId);

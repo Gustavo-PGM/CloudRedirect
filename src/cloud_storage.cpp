@@ -126,6 +126,41 @@ static bool HasPendingWorkForPrefix(const std::string& prefix) {
 static void EnqueueWork(WorkItem item);
 static std::string LocalStoragePath(uint32_t accountId, uint32_t appId);
 
+static std::string CreateLocalConflictCopy(uint32_t accountId, uint32_t appId,
+                                           const std::string& filename,
+                                           const std::string& localPath) {
+    std::string conflictsRoot = g_localRoot + "conflicts\\";
+    std::string appConflictRoot = conflictsRoot + std::to_string(accountId) + "\\" +
+        std::to_string(appId) + "\\";
+    auto stamp = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    std::string conflictPath = appConflictRoot + filename + "." + std::to_string(stamp) + ".local";
+    for (auto& c : conflictPath) { if (c == '/') c = '\\'; }
+    std::error_code ec;
+    std::filesystem::create_directories(appConflictRoot, ec);
+    if (ec) return {};
+    if (!FileUtil::IsPathWithin(appConflictRoot, conflictPath)) return {};
+
+    std::filesystem::create_directories(std::filesystem::path(conflictPath).parent_path(), ec);
+    if (ec) return {};
+    std::filesystem::copy_file(localPath, conflictPath,
+        std::filesystem::copy_options::none, ec);
+    if (!ec) {
+        LOG("[CloudStorage] Preserved local conflict copy for app %u file %s at %s",
+            appId, filename.c_str(), conflictPath.c_str());
+        return conflictPath;
+    }
+    LOG("[CloudStorage] Failed to preserve local conflict copy for app %u file %s: %s",
+        appId, filename.c_str(), ec.message().c_str());
+    return {};
+}
+
+static bool PreserveLocalConflictCopy(uint32_t accountId, uint32_t appId,
+                                      const std::string& filename,
+                                      const std::string& localPath) {
+    return !CreateLocalConflictCopy(accountId, appId, filename, localPath).empty();
+}
+
 static void RemoveLocalBlobsNotInCloud(uint32_t accountId, uint32_t appId,
                                        const std::unordered_set<std::string>& cloudBlobNames) {
     std::string localBlobDir = LocalStoragePath(accountId, appId);
@@ -143,6 +178,7 @@ static void RemoveLocalBlobsNotInCloud(uint32_t accountId, uint32_t appId,
         if (rel == "cn.dat" || rel == "root_token.dat" || rel == "file_tokens.dat") continue;
         if (cloudBlobNames.count(rel)) continue;
 
+        if (!PreserveLocalConflictCopy(accountId, appId, rel, entry.path().string())) continue;
         std::filesystem::remove(entry.path(), ec);
         if (!ec) ++removed;
     }
@@ -797,7 +833,19 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     constexpr int BLOB_SYNC_TIMEOUT_SEC = 120; // 2 minutes max for blob downloads
     std::string blobPrefix = std::to_string(accountId) + "/" +
                              std::to_string(appId) + "/blobs/";
-    auto cloudBlobs = g_provider->List(blobPrefix);
+    std::vector<ICloudProvider::FileInfo> cloudBlobs;
+    bool cloudListSucceeded = g_provider->ListChecked(blobPrefix, cloudBlobs);
+    if (!cloudListSucceeded) {
+        if (cloudHadNewerCN) {
+            LocalStorage::SetChangeNumber(accountId, appId, localCN);
+            cloudHadNewerCN = false;
+            LOG("[CloudStorage] SyncFromCloud app %u: rolled back newer cloud CN because blob listing failed",
+                appId);
+        }
+        LOG("[CloudStorage] SyncFromCloud app %u: provider blob listing failed; skipping blob download/prune/recovery",
+            appId);
+        cloudBlobs.clear();
+    }
     std::unordered_set<std::string> cloudBlobNames;
     for (auto& fi : cloudBlobs) {
         auto blobsPos = fi.path.find("/blobs/");
@@ -806,7 +854,13 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     }
 
     {
-        int downloaded = 0, skipped = 0;
+        struct StagedBlob {
+            std::string filename;
+            std::vector<uint8_t> data;
+        };
+        std::vector<StagedBlob> stagedNewerBlobs;
+        int downloaded = 0, skipped = 0, failed = 0;
+        bool timedOut = false;
         auto blobStart = std::chrono::steady_clock::now();
         for (auto& fi : cloudBlobs) {
             // Check timeout
@@ -817,6 +871,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                 LOG("[CloudStorage] SyncFromCloud app %u: blob download TIMEOUT after %llds, "
                     "%d downloaded, %d skipped, ~%d remaining",
                     appId, (long long)elapsed, downloaded, skipped, remaining);
+                timedOut = true;
                 break;
             }
 
@@ -827,7 +882,8 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             std::string filename = CanonicalizeInternalMetadataName(fi.path.substr(blobsPos + 7));
 
             std::string localBlobFile = LocalBlobPath(accountId, appId, filename);
-            if (std::filesystem::exists(localBlobFile) && !cloudHadNewerCN) {
+            bool localExists = std::filesystem::exists(localBlobFile);
+            if (localExists && !cloudHadNewerCN) {
                 skipped++;
                 continue; // already cached
             }
@@ -836,12 +892,24 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             LOG("[CloudStorage] SyncFromCloud app %u: downloading blob %s...", appId, filename.c_str());
             std::vector<uint8_t> data;
             if (g_provider->Download(fi.path, data)) {
+                if (cloudHadNewerCN) {
+                    stagedNewerBlobs.push_back({ filename, std::move(data) });
+                    downloaded++;
+                    continue;
+                }
+
                 auto parent = std::filesystem::path(localBlobFile).parent_path();
                 std::filesystem::create_directories(parent);
-                if (FileUtil::AtomicWriteBinary(localBlobFile, data.data(), data.size())) {
+                const uint8_t* writeData = data.empty() ? nullptr : data.data();
+                if (FileUtil::AtomicWriteBinary(localBlobFile, writeData, data.size())) {
                     downloaded++;
                     LOG("[CloudStorage] SyncFromCloud app %u: blob %s downloaded (%zu bytes)",
                         appId, filename.c_str(), data.size());
+                } else {
+                    failed++;
+                    LOG("[CloudStorage] SyncFromCloud app %u: failed to write blob %s",
+                        appId, filename.c_str());
+                    continue;
                 }
 
                 // Also write to LocalStorage so GetFileList() can find the file.
@@ -852,17 +920,76 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                 LocalStorage::WriteFileNoIncrement(accountId, appId, filename,
                                                   localData, data.size());
             } else {
+                failed++;
                 LOG("[CloudStorage] SyncFromCloud app %u: FAILED to download blob %s",
                     appId, filename.c_str());
             }
+        }
+
+        if (cloudHadNewerCN && failed == 0 && !timedOut) {
+            struct PromotedBlob {
+                std::string localPath;
+                std::string backupPath;
+                bool hadOriginal = false;
+            };
+            std::vector<PromotedBlob> promoted;
+            for (auto& staged : stagedNewerBlobs) {
+                std::string localBlobFile = LocalBlobPath(accountId, appId, staged.filename);
+                bool localExists = std::filesystem::exists(localBlobFile);
+                std::string backupPath;
+                if (localExists) {
+                    backupPath = CreateLocalConflictCopy(accountId, appId, staged.filename, localBlobFile);
+                    if (backupPath.empty()) {
+                        failed++;
+                        break;
+                    }
+                }
+
+                auto parent = std::filesystem::path(localBlobFile).parent_path();
+                std::filesystem::create_directories(parent);
+                const uint8_t* writeData = staged.data.empty() ? nullptr : staged.data.data();
+                if (!FileUtil::AtomicWriteBinary(localBlobFile, writeData, staged.data.size())) {
+                    failed++;
+                    LOG("[CloudStorage] SyncFromCloud app %u: failed to promote staged blob %s",
+                        appId, staged.filename.c_str());
+                    break;
+                }
+                promoted.push_back({ localBlobFile, backupPath, localExists });
+                LocalStorage::WriteFileNoIncrement(accountId, appId, staged.filename,
+                                                   writeData, staged.data.size());
+                LOG("[CloudStorage] SyncFromCloud app %u: blob %s downloaded (%zu bytes)",
+                    appId, staged.filename.c_str(), staged.data.size());
+            }
+            if (failed > 0) {
+                for (auto it = promoted.rbegin(); it != promoted.rend(); ++it) {
+                    std::error_code ec;
+                    if (it->hadOriginal) {
+                        std::filesystem::copy_file(it->backupPath, it->localPath,
+                            std::filesystem::copy_options::overwrite_existing, ec);
+                    } else {
+                        std::filesystem::remove(it->localPath, ec);
+                    }
+                }
+            }
+        }
+
+        if (cloudHadNewerCN && (failed > 0 || timedOut)) {
+            LocalStorage::SetChangeNumber(accountId, appId, localCN);
+            cloudHadNewerCN = false;
+            LOG("[CloudStorage] SyncFromCloud app %u: rolled back newer cloud CN after incomplete blob sync (failed=%d, timeout=%d)",
+                appId, failed, timedOut ? 1 : 0);
         }
         if (downloaded > 0) {
             LOG("[CloudStorage] SyncFromCloud app %u: downloaded %d blobs from cloud (skipped %d cached)",
                 appId, downloaded, skipped);
             hadNewer = true;
         }
-        if (cloudHadNewerCN && !cloudBlobNames.empty()) {
+        bool explicitEmptyCloudState = cloudBlobNames.empty() && cloudCNFound && cloudFileTokensFound;
+        if (cloudHadNewerCN && cloudListSucceeded && (!cloudBlobNames.empty() || explicitEmptyCloudState)) {
             RemoveLocalBlobsNotInCloud(accountId, appId, cloudBlobNames);
+        } else if (cloudHadNewerCN && cloudListSucceeded && cloudBlobNames.empty()) {
+            LOG("[CloudStorage] SyncFromCloud app %u: empty blob listing is not explicit enough to prune local blobs",
+                appId);
         }
     }
 
@@ -870,7 +997,9 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     // fill provider gaps from the local CloudRedirect cache. This preserves
     // existing users who link an empty provider or hit a partial provider upload
     // failure, while never overwriting a blob that already exists in cloud.
-    if (localCN > 0 && localCN >= cloudCN) {
+    bool providerLooksUninitialized = cloudListSucceeded && !cloudCNFound && !cloudRootTokensFound &&
+                                      !cloudFileTokensFound && cloudBlobNames.empty();
+    if (providerLooksUninitialized && localCN > 0) {
         std::string localBlobDir = g_localRoot + "storage\\" +
                                    std::to_string(accountId) + "\\" +
                                    std::to_string(appId) + "\\";

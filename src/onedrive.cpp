@@ -71,12 +71,12 @@ std::string OneDriveProvider::BuildFolderPath(uint32_t accountId, uint32_t appId
 }
 
 // list children of a folder by item ID (for recursive listing)
-void OneDriveProvider::ListChildrenById(const std::string& itemId, const std::string& prefix,
-                                         std::vector<RemoteFile>& out, int depth) {
+bool OneDriveProvider::ListChildrenById(const std::string& itemId, const std::string& prefix,
+                                          std::vector<RemoteFile>& out, int depth) {
     if (depth >= MAX_RECURSION_DEPTH) {
         LOG("[OneDrive] ListChildrenById: max depth %d reached at %s, stopping",
             MAX_RECURSION_DEPTH, prefix.c_str());
-        return;
+        return true;
     }
     std::string url = "/v1.0/me/drive/items/" + itemId +
         "/children?$select=id,name,size,fileSystemInfo,folder";
@@ -86,7 +86,7 @@ void OneDriveProvider::ListChildrenById(const std::string& itemId, const std::st
         auto r = ApiGet(url);
         if (r.status != 200) {
             LOG("[OneDrive] ListChildren failed: HTTP %d: %s", r.status, r.body.c_str());
-            return;
+            return false;
         }
         auto j = Json::Parse(r.body);
         auto& items = j["value"];
@@ -96,9 +96,9 @@ void OneDriveProvider::ListChildrenById(const std::string& itemId, const std::st
             std::string name = UrlDecode(item["name"].str());
             std::string path = prefix.empty() ? name : prefix + "/" + name;
 
-            if (!item["folder"].isNull()) {
+        if (!item["folder"].isNull()) {
                 // recurse into subfolder
-                ListChildrenById(item["id"].str(), path, out, depth + 1);
+                if (!ListChildrenById(item["id"].str(), path, out, depth + 1)) return false;
             } else {
                 RemoteFile rf;
                 rf.id = item["id"].str();
@@ -122,12 +122,14 @@ void OneDriveProvider::ListChildrenById(const std::string& itemId, const std::st
             url.clear();
         }
     }
+    return true;
 }
 
 // list all files under an app folder using path-based addressing
 std::vector<OneDriveProvider::RemoteFile>
-OneDriveProvider::ListAppFiles(uint32_t accountId, uint32_t appId) {
+OneDriveProvider::ListAppFiles(uint32_t accountId, uint32_t appId, bool* ok) {
     std::vector<RemoteFile> result;
+    if (ok) *ok = false;
 
     // get the app folder item to find its ID for recursive listing
     auto folderPath = BuildFolderPath(accountId, appId);
@@ -135,6 +137,7 @@ OneDriveProvider::ListAppFiles(uint32_t accountId, uint32_t appId) {
     auto r = ApiGet(folderPath + "?$select=id");
     if (r.status == 404) {
         LOG("[OneDrive] ListAppFiles: folder not found (404)");
+        if (ok) *ok = true;
         return result;
     }
     if (r.status != 200) {
@@ -151,7 +154,8 @@ OneDriveProvider::ListAppFiles(uint32_t accountId, uint32_t appId) {
     }
 
     LOG("[OneDrive] ListAppFiles: folder ID=%s, listing children", folderId.c_str());
-    ListChildrenById(folderId, "", result);
+    if (!ListChildrenById(folderId, "", result)) return result;
+    if (ok) *ok = true;
     return result;
 }
 
@@ -532,14 +536,22 @@ ICloudProvider::ExistsStatus OneDriveProvider::CheckExists(const std::string& pa
 std::vector<ICloudProvider::FileInfo>
 OneDriveProvider::List(const std::string& prefix) {
     std::vector<FileInfo> result;
+    ListChecked(prefix, result);
+    return result;
+}
+
+bool OneDriveProvider::ListChecked(const std::string& prefix, std::vector<FileInfo>& result) {
+    result.clear();
 
     uint32_t accountId, appId;
     std::string relPrefix;
     if (!ParsePath(prefix, accountId, appId, relPrefix))
-        return result;
+        return false;
 
     // List all files under the app folder
-    auto remoteFiles = ListAppFiles(accountId, appId);
+    bool ok = false;
+    auto remoteFiles = ListAppFiles(accountId, appId, &ok);
+    if (!ok) return false;
 
     std::string basePrefix = std::to_string(accountId) + "/" + std::to_string(appId) + "/";
 
@@ -560,5 +572,5 @@ OneDriveProvider::List(const std::string& prefix) {
     }
 
     LOG("[OneDriveProvider] List '%s': %zu files", prefix.c_str(), result.size());
-    return result;
+    return true;
 }

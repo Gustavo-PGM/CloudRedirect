@@ -19,6 +19,7 @@ public:
     bool Exists(const std::string& path) override;
     ExistsStatus CheckExists(const std::string& path) override;
     std::vector<FileInfo> List(const std::string& prefix) override;
+    bool ListChecked(const std::string& prefix, std::vector<FileInfo>& outFiles) override;
 
 protected:
     // CloudProviderBase hooks
@@ -69,8 +70,8 @@ private:
         int64_t size = 0;
     };
 
-    std::vector<DriveFileInfo> ListFolder(const std::string& folderId);
-    void ListRecursive(const std::string& folderId, const std::string& prefix,
+    std::vector<DriveFileInfo> ListFolder(const std::string& folderId, bool* ok = nullptr);
+    bool ListRecursive(const std::string& folderId, const std::string& prefix,
                        std::vector<RemoteFile>& out, int depth = 0);
     std::optional<std::vector<uint8_t>> DownloadFileById(const std::string& fileId);
     LookupStatus FindFileInFolderStatus(const std::string& name, const std::string& folderId,

@@ -60,6 +60,14 @@ public:
     // List all files under a prefix (e.g., "54303850/1229490/blobs/").
     // Returns empty vector if the prefix doesn't exist.
     virtual std::vector<FileInfo> List(const std::string& prefix) = 0;
+
+    // Same as List(), but returns false when the provider could not verify the
+    // listing due to an API/filesystem error. A missing prefix is a successful
+    // empty listing.
+    virtual bool ListChecked(const std::string& prefix, std::vector<FileInfo>& outFiles) {
+        outFiles = List(prefix);
+        return true;
+    }
 };
 
 // Factory: create a provider by name.

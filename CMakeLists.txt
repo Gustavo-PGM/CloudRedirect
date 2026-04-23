@@ -31,6 +31,18 @@ target_include_directories(cloud_redirect PRIVATE src)
 target_compile_definitions(cloud_redirect PRIVATE MINIZ_NO_STDIO)
 target_link_libraries(cloud_redirect PRIVATE Shlwapi Advapi32 ws2_32 winhttp Crypt32 Shell32 Ole32)
 
+enable_testing()
+
+add_executable(autocloud_native_tests
+    tests/autocloud_native_tests.cpp
+    src/local_storage.cpp
+    src/log.cpp
+)
+target_include_directories(autocloud_native_tests PRIVATE src)
+target_compile_definitions(autocloud_native_tests PRIVATE CLOUDREDIRECT_TESTING)
+target_link_libraries(autocloud_native_tests PRIVATE Shlwapi Advapi32 Shell32 Ole32)
+add_test(NAME autocloud_native_tests COMMAND autocloud_native_tests)
+
 # UI (builds DLL first, then publishes the WPF app with the DLL embedded)
 add_custom_target(ui ALL
     COMMAND dotnet publish -c Release -r win-x64 --self-contained false -o bin/publish

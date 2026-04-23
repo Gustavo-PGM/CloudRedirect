@@ -244,8 +244,9 @@ std::string GoogleDriveProvider::EnsureSubfolders(const std::string& parentId,
 }
 
 std::vector<GoogleDriveProvider::DriveFileInfo>
-GoogleDriveProvider::ListFolder(const std::string& folderId) {
+GoogleDriveProvider::ListFolder(const std::string& folderId, bool* ok) {
     std::vector<DriveFileInfo> result;
+    if (ok) *ok = false;
 
     std::string q = "'" + EscapeQuery(folderId) + "' in parents and trashed=false";
     std::string baseUrl = "/drive/v3/files?q=" + UrlEncode(q) +
@@ -260,9 +261,10 @@ GoogleDriveProvider::ListFolder(const std::string& folderId) {
         auto r = ApiGet(url);
         if (r.status == 404) {
             InvalidateFolderById(folderId);
+            if (ok) *ok = true;
             return result;
         }
-        if (r.status != 200) break;
+        if (r.status != 200) return result;
 
         auto j = Json::Parse(r.body);
         auto& files = j["files"];
@@ -280,27 +282,31 @@ GoogleDriveProvider::ListFolder(const std::string& folderId) {
         pageToken = j["nextPageToken"].str();
     } while (!pageToken.empty());
 
+    if (ok) *ok = true;
     return result;
 }
 
 static constexpr int MAX_RECURSION_DEPTH = 32;
 
-void GoogleDriveProvider::ListRecursive(const std::string& folderId, const std::string& prefix,
-                                         std::vector<RemoteFile>& out, int depth) {
+bool GoogleDriveProvider::ListRecursive(const std::string& folderId, const std::string& prefix,
+                                          std::vector<RemoteFile>& out, int depth) {
     if (depth >= MAX_RECURSION_DEPTH) {
         LOG("[GDrive] ListRecursive: max depth %d reached at %s, stopping",
             MAX_RECURSION_DEPTH, prefix.c_str());
-        return;
+        return true;
     }
-    auto items = ListFolder(folderId);
+    bool ok = false;
+    auto items = ListFolder(folderId, &ok);
+    if (!ok) return false;
     for (auto& item : items) {
         std::string path = prefix.empty() ? item.name : prefix + "/" + item.name;
         if (item.isFolder) {
-            ListRecursive(item.id, path, out, depth + 1);
+            if (!ListRecursive(item.id, path, out, depth + 1)) return false;
         } else {
             out.push_back({item.id, path, item.modifiedTime, item.size});
         }
     }
+    return true;
 }
 
 std::optional<std::vector<uint8_t>>
@@ -573,14 +579,42 @@ ICloudProvider::ExistsStatus GoogleDriveProvider::CheckExists(const std::string&
 std::vector<ICloudProvider::FileInfo>
 GoogleDriveProvider::List(const std::string& prefix) {
     std::vector<FileInfo> result;
+    ListChecked(prefix, result);
+    return result;
+}
+
+bool GoogleDriveProvider::ListChecked(const std::string& prefix, std::vector<FileInfo>& result) {
+    result.clear();
 
     uint32_t accountId, appId;
     std::string relPrefix;
     if (!ParsePath(prefix, accountId, appId, relPrefix))
-        return result;
+        return false;
 
-    auto appFolder = GetAppFolder(accountId, appId);
-    if (appFolder.empty()) return result;
+    std::string appFolder;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
+        auto it = m_folders.find("app_" + std::to_string(accountId) + "_" + std::to_string(appId));
+        if (it != m_folders.end()) appFolder = it->second;
+    }
+    if (appFolder.empty()) {
+        std::string rootId;
+        auto rootStatus = FindDriveFolderStatus("CloudRedirect", "", &rootId);
+        if (rootStatus == LookupStatus::Error) return false;
+        if (rootStatus == LookupStatus::Missing) return true;
+
+        std::string accountFolder;
+        auto accountStatus = FindDriveFolderStatus(std::to_string(accountId), rootId, &accountFolder);
+        if (accountStatus == LookupStatus::Error) return false;
+        if (accountStatus == LookupStatus::Missing) return true;
+
+        auto appStatus = FindDriveFolderStatus(std::to_string(appId), accountFolder, &appFolder);
+        if (appStatus == LookupStatus::Error) return false;
+        if (appStatus == LookupStatus::Missing) return true;
+
+        std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
+        m_folders["app_" + std::to_string(accountId) + "_" + std::to_string(appId)] = appFolder;
+    }
 
     // If there's a sub-prefix (e.g., "blobs/"), resolve to that subfolder
     std::string listRoot = appFolder;
@@ -588,14 +622,22 @@ GoogleDriveProvider::List(const std::string& prefix) {
     if (!relPrefix.empty()) {
         std::string dir = relPrefix;
         if (!dir.empty() && dir.back() == '/') dir.pop_back();
-        listRoot = EnsureSubfolders(appFolder, dir, /*create=*/false);
-        if (listRoot.empty()) return result;
+        std::stringstream ss(dir);
+        std::string part;
+        while (std::getline(ss, part, '/')) {
+            if (part.empty()) continue;
+            std::string nextId;
+            auto status = FindDriveFolderStatus(part, listRoot, &nextId);
+            if (status == LookupStatus::Error) return false;
+            if (status == LookupStatus::Missing) return true;
+            listRoot = std::move(nextId);
+        }
         pathPrefix = relPrefix;
         if (!pathPrefix.empty() && pathPrefix.back() != '/') pathPrefix += '/';
     }
 
     std::vector<RemoteFile> remoteFiles;
-    ListRecursive(listRoot, "", remoteFiles);
+    if (!ListRecursive(listRoot, "", remoteFiles)) return false;
 
     std::string basePrefix = std::to_string(accountId) + "/" + std::to_string(appId) + "/";
     if (!pathPrefix.empty()) basePrefix += pathPrefix;
@@ -610,5 +652,5 @@ GoogleDriveProvider::List(const std::string& prefix) {
     }
 
     LOG("[GDriveProvider] List '%s': %zu files", prefix.c_str(), result.size());
-    return result;
+    return true;
 }

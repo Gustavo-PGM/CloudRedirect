@@ -5,8 +5,10 @@
 #include <ShlObj.h>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <shared_mutex>
 #include <sstream>
+#include <stdexcept>
 #pragma comment(lib, "Advapi32.lib")
 #pragma comment(lib, "Shell32.lib")
 
@@ -70,6 +72,12 @@ static std::string NormalizeSlashes(std::string s) {
     for (auto& c : s) { if (c == '\\') c = '/'; }
     return s;
 }
+
+static constexpr uintmax_t kMaxAppInfoBytes = 512ULL * 1024 * 1024;
+static constexpr uint32_t kMaxAppInfoStrings = 200000;
+static constexpr size_t kMaxAutoCloudScanFiles = 20000;
+static constexpr int kMaxAutoCloudScanMillis = 5000;
+static constexpr uint64_t kMaxAutoCloudCandidateBytes = 128ULL * 1024 * 1024;
 
 static void ReplaceAll(std::string& s, const std::string& from, const std::string& to) {
     size_t pos = 0;
@@ -283,9 +291,154 @@ static void ApplyRootOverridesForCurrentOS(AutoCloudRuleNative& rule,
     }
 }
 
+#ifdef CLOUDREDIRECT_TESTING
+bool TestResolveAutoCloudRootOverride(const std::string& root, const std::string& path,
+                                      const std::string& overrideRoot,
+                                      const std::string& useInstead,
+                                      const std::string& addPath,
+                                      const std::string& find,
+                                      const std::string& replace,
+                                      std::string& outRoot,
+                                      std::string& outResolvedPath) {
+    AutoCloudRuleNative rule;
+    rule.root = root;
+    rule.path = path;
+    rule.resolvedPath = path;
+
+    AutoCloudRootOverrideNative overrideRule;
+    overrideRule.root = overrideRoot;
+    overrideRule.os = "Windows";
+    overrideRule.osCompare = "=";
+    overrideRule.useInstead = useInstead;
+    overrideRule.addPath = addPath;
+    if (!find.empty()) overrideRule.pathTransforms.emplace_back(find, replace);
+
+    ApplyRootOverridesForCurrentOS(rule, {overrideRule});
+    outRoot = rule.root;
+    outResolvedPath = rule.resolvedPath;
+    return true;
+}
+
+bool TestIsSafeAutoCloudRelativePath(const std::string& path) {
+    return IsSafeRelativePath(path);
+}
+
+bool TestParseMinimalAutoCloudKVFixture() {
+    std::vector<std::string> strings = {
+        "appinfo", "ufs", "savefiles", "0", "root", "path", "pattern", "recursive",
+        "WinAppDataLocal", "Saves", "*.sav", "rootoverrides", "1", "os", "Windows",
+        "oscompare", "=", "useinstead", "WinSavedGames", "addpath", "Migrated"
+    };
+    std::vector<uint8_t> data;
+    auto u32 = [&](uint32_t v) {
+        data.push_back((uint8_t)(v & 0xFF));
+        data.push_back((uint8_t)((v >> 8) & 0xFF));
+        data.push_back((uint8_t)((v >> 16) & 0xFF));
+        data.push_back((uint8_t)((v >> 24) & 0xFF));
+    };
+    auto section = [&](uint32_t key) { data.push_back(0x00); u32(key); };
+    auto str = [&](uint32_t key, const char* value) {
+        data.push_back(0x01); u32(key);
+        data.insert(data.end(), value, value + strlen(value) + 1);
+    };
+    auto i32 = [&](uint32_t key, int32_t value) {
+        data.push_back(0x02); u32(key); u32((uint32_t)value);
+    };
+    auto end = [&]() { data.push_back(0x08); };
+
+    section(0);      // appinfo
+    section(1);      // ufs
+    section(2);      // savefiles
+    section(3);      // 0
+    str(4, "WinAppDataLocal");
+    str(5, "Saves");
+    str(6, "*.sav");
+    i32(7, 1);
+    end();
+    end();        // savefiles
+    section(11);  // rootoverrides
+    section(12);  // 1
+    str(4, "WinAppDataLocal");
+    str(13, "Windows");
+    str(15, "=");
+    str(17, "WinSavedGames");
+    str(19, "Migrated");
+    end(); end(); end(); end();
+
+    size_t offset = 0;
+    auto tree = ParseAppInfoKV(data, offset, strings);
+    const auto* appInfo = FindChild(tree, "appinfo");
+    const auto* ufs = appInfo ? FindChild(appInfo->children, "ufs") : nullptr;
+    const auto* savefiles = ufs ? FindChild(ufs->children, "savefiles") : nullptr;
+    const auto* entry = savefiles && !savefiles->children.empty() ? &savefiles->children.front() : nullptr;
+    const auto* root = entry ? FindChild(entry->children, "root") : nullptr;
+    const auto* path = entry ? FindChild(entry->children, "path") : nullptr;
+    const auto* pattern = entry ? FindChild(entry->children, "pattern") : nullptr;
+    const auto* recursive = entry ? FindChild(entry->children, "recursive") : nullptr;
+    const auto* rootoverrides = ufs ? FindChild(ufs->children, "rootoverrides") : nullptr;
+    const auto* overrideEntry = rootoverrides && !rootoverrides->children.empty() ? &rootoverrides->children.front() : nullptr;
+    AutoCloudRootOverrideNative overrideRule;
+    if (overrideEntry) {
+        const auto* overrideRoot = FindChild(overrideEntry->children, "root");
+        const auto* os = FindChild(overrideEntry->children, "os");
+        const auto* osCompare = FindChild(overrideEntry->children, "oscompare");
+        const auto* useInstead = FindChild(overrideEntry->children, "useinstead");
+        const auto* addPath = FindChild(overrideEntry->children, "addpath");
+        overrideRule.root = overrideRoot && overrideRoot->hasString ? overrideRoot->stringValue : "";
+        overrideRule.os = os && os->hasString ? os->stringValue : "";
+        overrideRule.osCompare = osCompare && osCompare->hasString ? osCompare->stringValue : "";
+        overrideRule.useInstead = useInstead && useInstead->hasString ? useInstead->stringValue : "";
+        overrideRule.addPath = addPath && addPath->hasString ? addPath->stringValue : "";
+    }
+    AutoCloudRuleNative rule;
+    rule.root = root && root->hasString ? root->stringValue : "";
+    rule.path = path && path->hasString ? path->stringValue : "";
+    rule.resolvedPath = rule.path;
+    ApplyRootOverridesForCurrentOS(rule, {overrideRule});
+    return root && root->stringValue == "WinAppDataLocal" &&
+        path && path->stringValue == "Saves" &&
+        pattern && pattern->stringValue == "*.sav" &&
+        recursive && recursive->hasInt && recursive->intValue == 1 &&
+        rule.root == "WinSavedGames" && rule.resolvedPath == "Migrated/Saves";
+}
+#endif
+
 static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& steamPath, uint32_t appId) {
     std::vector<AutoCloudRuleNative> rules;
     std::filesystem::path appInfoPath = std::filesystem::path(steamPath) / "appcache" / "appinfo.vdf";
+    std::error_code statEc;
+    auto appInfoMtime = std::filesystem::last_write_time(appInfoPath, statEc);
+    auto appInfoSize = std::filesystem::file_size(appInfoPath, statEc);
+    if (statEc) {
+        LOG("GetAutoCloudFileList: failed to stat appinfo.vdf: %s", statEc.message().c_str());
+        return rules;
+    }
+    if (appInfoSize > kMaxAppInfoBytes) {
+        LOG("GetAutoCloudFileList: appinfo.vdf too large: %llu bytes", (unsigned long long)appInfoSize);
+        return rules;
+    }
+
+    struct RulesCacheEntry {
+        std::filesystem::file_time_type mtime;
+        uintmax_t size = 0;
+        std::vector<AutoCloudRuleNative> rules;
+    };
+    static std::mutex cacheMutex;
+    static std::unordered_map<std::string, RulesCacheEntry> cache;
+    std::string cacheKey = appInfoPath.string() + "\n" + std::to_string(appId);
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        auto it = cache.find(cacheKey);
+        if (it != cache.end() && it->second.mtime == appInfoMtime && it->second.size == appInfoSize) {
+            return it->second.rules;
+        }
+    }
+
+    auto cacheRules = [&](const std::vector<AutoCloudRuleNative>& parsedRules) {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        cache[cacheKey] = RulesCacheEntry{appInfoMtime, appInfoSize, parsedRules};
+    };
+
     std::ifstream f(appInfoPath, std::ios::binary | std::ios::ate);
     if (!f) {
         LOG("GetAutoCloudFileList: appinfo.vdf not found: %s", appInfoPath.string().c_str());
@@ -294,6 +447,11 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
 
     auto fileSize = f.tellg();
     if (fileSize < 16) return rules;
+    if (static_cast<uintmax_t>(fileSize) > kMaxAppInfoBytes) {
+        LOG("GetAutoCloudFileList: appinfo.vdf too large after open: %llu bytes",
+            (unsigned long long)fileSize);
+        return rules;
+    }
     f.seekg(0, std::ios::beg);
     std::vector<uint8_t> bytes((size_t)fileSize);
     if (!f.read(reinterpret_cast<char*>(bytes.data()), fileSize)) return rules;
@@ -314,6 +472,11 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
     size_t st = stringTableOffset;
     uint32_t stringCount = 0;
     if (!ReadU32(bytes, st, stringCount)) return rules;
+    size_t remainingStringBytes = bytes.size() - st;
+    if (stringCount > remainingStringBytes || stringCount > kMaxAppInfoStrings) {
+        LOG("GetAutoCloudFileList: invalid appinfo string count: %u", stringCount);
+        return rules;
+    }
 
     std::vector<std::string> strings;
     strings.reserve(stringCount);
@@ -394,9 +557,11 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
             ApplyRootOverridesForCurrentOS(rule, overrides);
             rules.push_back(std::move(rule));
         }
+        cacheRules(rules);
         return rules;
     }
 
+    cacheRules(rules);
     return rules;
 }
 
@@ -831,8 +996,18 @@ std::vector<FileEntry> GetAutoCloudFileList(const std::string& steamPath, uint32
         std::string fileName = fileEntry.path().filename().string();
         if (fileName == "steam_autocloud.vdf") return;
 
+        std::error_code ec;
+        uint64_t rawSize = (uint64_t)fileEntry.file_size(ec);
+        if (ec) return;
+        if (rawSize > kMaxAutoCloudCandidateBytes) {
+            LOG("GetAutoCloudFileList: skipping oversized app %u candidate %s (%llu bytes)",
+                appId, sourcePath.c_str(), (unsigned long long)rawSize);
+            return;
+        }
+
         auto sha = SHA1File(fileEntry.path().string());
-        auto ftime = std::filesystem::last_write_time(fileEntry.path());
+        auto ftime = std::filesystem::last_write_time(fileEntry.path(), ec);
+        if (ec) return;
         uint64_t ts = FileTimeToUnixSeconds(ftime);
 
         FileEntry fe;
@@ -841,7 +1016,7 @@ std::vector<FileEntry> GetAutoCloudFileList(const std::string& steamPath, uint32
         fe.rootToken = rootToken;
         fe.sha = sha;
         fe.timestamp = ts;
-        fe.rawSize = (uint64_t)fileEntry.file_size();
+        fe.rawSize = rawSize;
         fe.deleted = false;
         fe.rootId = rootId;
         result.push_back(std::move(fe));
@@ -922,6 +1097,20 @@ std::vector<FileEntry> GetAutoCloudFileList(const std::string& steamPath, uint32
 
     std::unordered_map<std::string, std::string> seenRootsByCloudPath;
     bool hasRootCollision = false;
+    bool scanLimitHit = false;
+    size_t visitedFiles = 0;
+    auto scanStart = std::chrono::steady_clock::now();
+    auto scanLimitReached = [&]() {
+        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - scanStart).count();
+        if (visitedFiles >= kMaxAutoCloudScanFiles || elapsedMs >= kMaxAutoCloudScanMillis) {
+            scanLimitHit = true;
+            LOG("GetAutoCloudFileList: stopping app %u scan after %zu files and %lld ms",
+                appId, visitedFiles, (long long)elapsedMs);
+            return true;
+        }
+        return false;
+    };
     for (const auto& rule : rules) {
         const RootMapping* mapping = nullptr;
         std::string ruleRootLower = ToLowerAscii(rule.root);
@@ -977,8 +1166,11 @@ std::vector<FileEntry> GetAutoCloudFileList(const std::string& steamPath, uint32
             rule.pattern.c_str(), rule.recursive ? 1 : 0, scanRoot.string().c_str());
 
         auto considerFile = [&](const std::filesystem::directory_entry& entry) {
-            if (!entry.is_regular_file()) return;
-            std::string relFromRoot = NormalizeSlashes(std::filesystem::relative(entry.path(), scanRoot).string());
+            std::error_code fileEc;
+            if (!entry.is_regular_file(fileEc)) return;
+            ++visitedFiles;
+            std::string relFromRoot = NormalizeSlashes(std::filesystem::relative(entry.path(), scanRoot, fileEc).string());
+            if (fileEc) return;
             std::string leaf = entry.path().filename().string();
             if (leaf == "steam_autocloud.vdf") return;
             std::string pattern = NormalizeSlashes(rule.pattern.empty() ? "*" : rule.pattern);
@@ -1001,14 +1193,29 @@ std::vector<FileEntry> GetAutoCloudFileList(const std::string& steamPath, uint32
         };
 
         if (rule.recursive) {
-            for (auto& entry : std::filesystem::recursive_directory_iterator(scanRoot)) {
-                considerFile(entry);
+            std::error_code iterEc;
+            std::filesystem::recursive_directory_iterator it(
+                scanRoot, std::filesystem::directory_options::skip_permission_denied, iterEc);
+            std::filesystem::recursive_directory_iterator end;
+            for (; !iterEc && it != end; it.increment(iterEc)) {
+                if (scanLimitReached()) break;
+                considerFile(*it);
             }
         } else {
-            for (auto& entry : std::filesystem::directory_iterator(scanRoot)) {
-                considerFile(entry);
+            std::error_code iterEc;
+            std::filesystem::directory_iterator it(
+                scanRoot, std::filesystem::directory_options::skip_permission_denied, iterEc);
+            std::filesystem::directory_iterator end;
+            for (; !iterEc && it != end; it.increment(iterEc)) {
+                if (scanLimitReached()) break;
+                considerFile(*it);
             }
         }
+        if (scanLimitReached()) break;
+    }
+
+    if (scanLimitHit) {
+        throw std::runtime_error("AutoCloud scan limit reached before complete enumeration");
     }
 
     if (hasRootCollision) {

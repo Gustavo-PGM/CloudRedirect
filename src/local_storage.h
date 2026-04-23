@@ -41,4 +41,17 @@ void SaveFileTokens(uint32_t accountId, uint32_t appId,
                     const std::unordered_map<std::string, std::string>& fileTokens);
 std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, uint32_t appId);
 
+#ifdef CLOUDREDIRECT_TESTING
+bool TestResolveAutoCloudRootOverride(const std::string& root, const std::string& path,
+                                      const std::string& overrideRoot,
+                                      const std::string& useInstead,
+                                      const std::string& addPath,
+                                      const std::string& find,
+                                      const std::string& replace,
+                                      std::string& outRoot,
+                                      std::string& outResolvedPath);
+bool TestIsSafeAutoCloudRelativePath(const std::string& path);
+bool TestParseMinimalAutoCloudKVFixture();
+#endif
+
 } // namespace LocalStorage

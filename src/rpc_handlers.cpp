@@ -12,9 +12,11 @@
 #include <unordered_set>
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <sstream>
 
 namespace CloudIntercept {
@@ -57,6 +59,88 @@ static bool IsInternalMetadataFile(std::string_view cleanName) {
 }
 
 static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId);
+static bool TryInvalidateTokenCachesForGeneration(uint32_t accountId, uint32_t appId,
+                                                  uint64_t generation,
+                                                  uint64_t& nextGeneration);
+
+static std::mutex g_autoCloudTokenCacheMutex;
+static std::unordered_map<uint64_t, std::unordered_map<std::string, std::string>> g_autoCloudCanonicalTokenCache;
+static std::unordered_map<uint64_t, uint64_t> g_autoCloudCanonicalTokenGeneration;
+static std::mutex g_autoCloudPublishMutex;
+static std::mutex g_autoCloudBootstrapMutex;
+static std::condition_variable g_autoCloudBootstrapCV;
+static std::unordered_set<uint64_t> g_autoCloudBootstrapAttemptedApps;
+static std::unordered_set<uint64_t> g_autoCloudBootstrapActiveApps;
+static std::vector<std::future<void>> g_autoCloudBootstrapFutures;
+static bool g_autoCloudBootstrapShuttingDown = false;
+
+static void CacheAutoCloudCanonicalTokens(uint32_t accountId, uint32_t appId,
+                                          const std::vector<LocalStorage::FileEntry>& candidates,
+                                          uint64_t generation) {
+    std::unordered_map<std::string, std::string> tokens;
+    for (const auto& fe : candidates) {
+        if (!fe.filename.empty()) tokens.emplace(fe.filename, fe.rootToken);
+    }
+    std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+    uint64_t key = MakeAppAccountKey(accountId, appId);
+    if (g_autoCloudCanonicalTokenGeneration[key] != generation) return;
+    g_autoCloudCanonicalTokenCache[key] = std::move(tokens);
+}
+
+static void ClearAutoCloudCanonicalTokens(uint32_t accountId, uint32_t appId,
+                                          uint64_t generation) {
+    std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+    uint64_t key = MakeAppAccountKey(accountId, appId);
+    if (g_autoCloudCanonicalTokenGeneration[key] != generation) return;
+    g_autoCloudCanonicalTokenCache.erase(key);
+}
+
+static uint64_t GetAutoCloudCanonicalTokenGeneration(uint32_t accountId, uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+    return g_autoCloudCanonicalTokenGeneration[MakeAppAccountKey(accountId, appId)];
+}
+
+static bool TryBeginAutoCloudBootstrap(uint32_t accountId, uint32_t appId) {
+    uint64_t appKey = MakeAppAccountKey(accountId, appId);
+    std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+    for (auto it = g_autoCloudBootstrapFutures.begin(); it != g_autoCloudBootstrapFutures.end(); ) {
+        if (it->wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            try { it->get(); } catch (...) {}
+            it = g_autoCloudBootstrapFutures.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (g_autoCloudBootstrapShuttingDown || g_autoCloudBootstrapAttemptedApps.count(appKey) ||
+        g_autoCloudBootstrapActiveApps.count(appKey)) {
+        return false;
+    }
+    g_autoCloudBootstrapActiveApps.insert(appKey);
+    return true;
+}
+
+static void FinishAutoCloudBootstrap(uint32_t accountId, uint32_t appId,
+                                     bool markAttempted, uint64_t generation) {
+    uint64_t appKey = MakeAppAccountKey(accountId, appId);
+    bool generationCurrent = GetAutoCloudCanonicalTokenGeneration(accountId, appId) == generation;
+    std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+    g_autoCloudBootstrapActiveApps.erase(appKey);
+    if (markAttempted && generationCurrent) g_autoCloudBootstrapAttemptedApps.insert(appKey);
+    g_autoCloudBootstrapCV.notify_all();
+}
+
+static void WaitForAutoCloudBootstrap(uint32_t accountId, uint32_t appId) {
+    uint64_t appKey = MakeAppAccountKey(accountId, appId);
+    std::unique_lock<std::mutex> lock(g_autoCloudBootstrapMutex);
+    g_autoCloudBootstrapCV.wait(lock, [&] {
+        return !g_autoCloudBootstrapActiveApps.count(appKey);
+    });
+}
+
+static bool IsAutoCloudBootstrapActive(uint32_t accountId, uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+    return g_autoCloudBootstrapActiveApps.count(MakeAppAccountKey(accountId, appId)) != 0;
+}
 
 static bool LooksLikeForeignAppPollution(const std::string& filename, uint32_t appId) {
     size_t pos = filename.find_first_of("/\\");
@@ -86,12 +170,19 @@ static bool LooksLikeForeignAppPollution(const std::string& filename, uint32_t a
     return false;
 }
 
+static constexpr uint64_t kMaxAutoCloudImportBytes = 128ULL * 1024 * 1024;
+
 static std::vector<uint8_t> ReadWholeFile(const std::string& path, bool& ok) {
     ok = false;
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return {};
     auto size = f.tellg();
     if (size < 0) return {};
+    if (static_cast<uint64_t>(size) > kMaxAutoCloudImportBytes) {
+        LOG("[AutoCloudImport] Skipping oversized source: %s (%llu bytes)",
+            path.c_str(), static_cast<unsigned long long>(size));
+        return {};
+    }
     f.seekg(0, std::ios::beg);
     std::vector<uint8_t> data(static_cast<size_t>(size));
     if (!data.empty() && !f.read(reinterpret_cast<char*>(data.data()), size)) return {};
@@ -103,22 +194,10 @@ static bool HasPersistedLocalCloudHistory(uint32_t accountId, uint32_t appId) {
     return std::filesystem::exists(std::filesystem::path(LocalStorage::GetAppPath(accountId, appId)) / "cn.dat");
 }
 
-static void BootstrapAutoCloudFiles(uint32_t accountId, uint32_t appId) {
-    static std::mutex bootstrapMutex;
-    static std::unordered_set<uint64_t> attemptedApps;
-    static std::unordered_set<uint64_t> activeApps;
-
-    uint64_t appKey = MakeAppAccountKey(accountId, appId);
-    {
-        std::lock_guard<std::mutex> lock(bootstrapMutex);
-        if (attemptedApps.count(appKey) || activeApps.count(appKey)) return;
-        activeApps.insert(appKey);
-    }
-
-    auto finish = [&](bool markAttempted) {
-        std::lock_guard<std::mutex> lock(bootstrapMutex);
-        activeApps.erase(appKey);
-        if (markAttempted) attemptedApps.insert(appKey);
+static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
+                                          uint64_t cacheGeneration) {
+    auto finish = [&](bool markAttempted, uint64_t generation) {
+        FinishAutoCloudBootstrap(accountId, appId, markAttempted, generation);
     };
 
     std::vector<LocalStorage::FileEntry> candidates;
@@ -126,18 +205,20 @@ static void BootstrapAutoCloudFiles(uint32_t accountId, uint32_t appId) {
         candidates = LocalStorage::GetAutoCloudFileList(GetSteamPath(), accountId, appId);
     } catch (const std::exception& ex) {
         LOG("[AutoCloudImport] Scan failed for app %u: %s", appId, ex.what());
-        finish(false);
+        ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+        finish(false, cacheGeneration);
         return;
     } catch (...) {
         LOG("[AutoCloudImport] Scan failed for app %u", appId);
-        finish(false);
+        ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+        finish(false, cacheGeneration);
         return;
     }
     if (candidates.empty()) {
-        finish(true);
+        ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+        finish(true, cacheGeneration);
         return;
     }
-
     size_t definitePollution = 0;
     for (const auto& fe : candidates) {
         if (LooksLikeForeignAppPollution(fe.filename, appId)) {
@@ -148,7 +229,8 @@ static void BootstrapAutoCloudFiles(uint32_t accountId, uint32_t appId) {
     if (definitePollution > 0) {
         LOG("[AutoCloudImport] Aborting import for app %u: %zu obvious pollution file(s) detected",
             appId, definitePollution);
-        finish(true);
+        ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+        finish(true, cacheGeneration);
         return;
     }
 
@@ -191,7 +273,8 @@ static void BootstrapAutoCloudFiles(uint32_t accountId, uint32_t appId) {
         if (blobStatus == ICloudProvider::ExistsStatus::Error) {
             LOG("[AutoCloudImport] Aborting import for app %u: could not verify cloud blob %s",
                 appId, fe.filename.c_str());
-            finish(false);
+            ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+            finish(false, cacheGeneration);
             return;
         }
         if (blobStatus == ICloudProvider::ExistsStatus::Exists) {
@@ -236,20 +319,75 @@ static void BootstrapAutoCloudFiles(uint32_t accountId, uint32_t appId) {
     }
 
     if (imported == 0 && !tokenMetadataChanged) {
-        finish(true);
+        uint64_t publishGeneration = 0;
+        std::lock_guard<std::mutex> publishLock(g_autoCloudPublishMutex);
+        if (!TryInvalidateTokenCachesForGeneration(accountId, appId, cacheGeneration, publishGeneration)) {
+            finish(false, cacheGeneration);
+            return;
+        }
+        CacheAutoCloudCanonicalTokens(accountId, appId, candidates, publishGeneration);
+        finish(true, publishGeneration);
         return;
     }
 
+    uint64_t publishGeneration = 0;
+    std::lock_guard<std::mutex> publishLock(g_autoCloudPublishMutex);
+    if (!TryInvalidateTokenCachesForGeneration(accountId, appId, cacheGeneration, publishGeneration)) {
+        finish(false, cacheGeneration);
+        return;
+    }
     if (!rootTokens.empty()) CloudStorage::SaveRootTokens(accountId, appId, rootTokens);
     if (!fileTokens.empty() || tokenMetadataChanged) CloudStorage::SaveFileTokens(accountId, appId, fileTokens);
-    InvalidateTokenCaches(accountId, appId);
     if (imported > 0) CloudStorage::DrainQueueForApp(accountId, appId);
     uint64_t cn = LocalStorage::IncrementChangeNumber(accountId, appId);
     CloudStorage::PushCNToCloud(accountId, appId, cn);
     CloudStorage::DrainQueueForApp(accountId, appId);
+    CacheAutoCloudCanonicalTokens(accountId, appId, candidates, publishGeneration);
     LOG("[AutoCloudImport] Imported %zu AutoCloud file(s), updatedTokens=%u for app %u, CN=%llu",
         imported, tokenMetadataChanged ? 1 : 0, appId, cn);
-    finish(true);
+    finish(true, publishGeneration);
+}
+
+static void BootstrapAutoCloudFiles(uint32_t accountId, uint32_t appId, bool wait = false) {
+    uint64_t cacheGeneration = GetAutoCloudCanonicalTokenGeneration(accountId, appId);
+    if (!TryBeginAutoCloudBootstrap(accountId, appId)) {
+        if (wait) WaitForAutoCloudBootstrap(accountId, appId);
+        return;
+    }
+    if (wait) {
+        BootstrapAutoCloudFilesWorker(accountId, appId, cacheGeneration);
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+    if (g_autoCloudBootstrapShuttingDown) {
+        g_autoCloudBootstrapActiveApps.erase(MakeAppAccountKey(accountId, appId));
+        g_autoCloudBootstrapCV.notify_all();
+        return;
+    }
+    try {
+        g_autoCloudBootstrapFutures.push_back(std::async(std::launch::async, [accountId, appId, cacheGeneration]() {
+            BootstrapAutoCloudFilesWorker(accountId, appId, cacheGeneration);
+        }));
+    } catch (...) {
+        g_autoCloudBootstrapActiveApps.erase(MakeAppAccountKey(accountId, appId));
+        g_autoCloudBootstrapCV.notify_all();
+    }
+}
+
+void ShutdownRpcHandlers() {
+    std::vector<std::future<void>> futures;
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+        g_autoCloudBootstrapShuttingDown = true;
+        futures.swap(g_autoCloudBootstrapFutures);
+    }
+    for (auto& future : futures) {
+        try { future.get(); } catch (...) {}
+    }
+    std::unique_lock<std::mutex> lock(g_autoCloudBootstrapMutex);
+    g_autoCloudBootstrapCV.wait(lock, [] {
+        return g_autoCloudBootstrapActiveApps.empty();
+    });
 }
 
 static uint64_t ParsePlaytimeField(const Json::Value& value) {
@@ -358,14 +496,24 @@ static void PrepareBatchCanonicalTokens(uint32_t accountId, uint32_t appId) {
     }
 
     std::unordered_map<std::string, std::string> tokens;
-    try {
-        auto candidates = LocalStorage::GetAutoCloudFileList(GetSteamPath(), accountId, appId);
-        for (const auto& fe : candidates) {
-            if (!fe.filename.empty()) {
-                tokens.emplace(fe.filename, fe.rootToken);
-            }
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+        auto it = g_autoCloudCanonicalTokenCache.find(key);
+        if (it != g_autoCloudCanonicalTokenCache.end()) {
+            tokens = it->second;
         }
-    } catch (...) {
+    }
+    if (tokens.empty()) {
+        tokens = CloudStorage::LoadFileTokens(accountId, appId);
+    }
+    if (tokens.empty()) {
+        if (IsAutoCloudBootstrapActive(accountId, appId)) {
+            WaitForAutoCloudBootstrap(accountId, appId);
+            std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+            auto it = g_autoCloudCanonicalTokenCache.find(key);
+            if (it != g_autoCloudCanonicalTokenCache.end()) tokens = it->second;
+        }
+        if (tokens.empty()) return;
     }
 
     std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
@@ -388,6 +536,18 @@ static std::string CanonicalizeUploadRootToken(uint32_t accountId, uint32_t appI
         std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
         auto appIt = g_batchCanonicalTokens.find(MakeAppAccountKey(accountId, appId));
         if (appIt != g_batchCanonicalTokens.end()) {
+            auto tokenIt = appIt->second.find(cleanName);
+            if (tokenIt != appIt->second.end()) {
+                canonical = tokenIt->second;
+                foundCanonical = true;
+            }
+        }
+    }
+
+    if (!foundCanonical) {
+        std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+        auto appIt = g_autoCloudCanonicalTokenCache.find(MakeAppAccountKey(accountId, appId));
+        if (appIt != g_autoCloudCanonicalTokenCache.end()) {
             auto tokenIt = appIt->second.find(cleanName);
             if (tokenIt != appIt->second.end()) {
                 canonical = tokenIt->second;
@@ -481,6 +641,7 @@ static void MarkFileTokensDirty(uint32_t accountId, uint32_t appId) {
 }
 
 static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId) {
+    std::lock_guard<std::mutex> publishLock(g_autoCloudPublishMutex);
     uint64_t key = MakeAppAccountKey(accountId, appId);
     {
         std::lock_guard<std::mutex> lock(g_rootTokenMutex);
@@ -490,6 +651,48 @@ static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId) {
         std::lock_guard<std::mutex> lock(g_fileTokensMutex);
         g_fileTokens.erase(key);
     }
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+        g_autoCloudCanonicalTokenCache.erase(key);
+        ++g_autoCloudCanonicalTokenGeneration[key];
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
+        g_batchCanonicalTokens.erase(key);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+        g_autoCloudBootstrapAttemptedApps.erase(key);
+    }
+}
+
+static bool TryInvalidateTokenCachesForGeneration(uint32_t accountId, uint32_t appId,
+                                                  uint64_t generation,
+                                                  uint64_t& nextGeneration) {
+    uint64_t key = MakeAppAccountKey(accountId, appId);
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+        if (g_autoCloudCanonicalTokenGeneration[key] != generation) return false;
+        g_autoCloudCanonicalTokenCache.erase(key);
+        nextGeneration = ++g_autoCloudCanonicalTokenGeneration[key];
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_rootTokenMutex);
+        g_appRootTokens.erase(key);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_fileTokensMutex);
+        g_fileTokens.erase(key);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
+        g_batchCanonicalTokens.erase(key);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+        g_autoCloudBootstrapAttemptedApps.erase(key);
+    }
+    return true;
 }
 
 static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
@@ -800,7 +1003,7 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     }
     uint64_t appKey = MakeAppAccountKey(accountId, appId);
 
-    BootstrapAutoCloudFiles(accountId, appId);
+    BootstrapAutoCloudFiles(accountId, appId, /*wait=*/true);
 
     // Filenames from GetFileList are generated by filesystem::relative() against a controlled
     // app root directory, so they cannot contain path traversal sequences (e.g. "../").
@@ -1299,6 +1502,7 @@ PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqB
         LOG("[NS] Cloud sync complete for app %u (hadNewer=%d)", appId, hadNewer);
         RestoreAppMetadata(accountId, appId);
     }
+    BootstrapAutoCloudFiles(accountId, appId, /*wait=*/true);
 
     PB::Writer body; // empty = no pending remote operations
     return body;

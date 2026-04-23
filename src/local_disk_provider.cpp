@@ -92,17 +92,34 @@ ICloudProvider::ExistsStatus LocalDiskProvider::CheckExists(const std::string& p
 
 std::vector<ICloudProvider::FileInfo> LocalDiskProvider::List(const std::string& prefix) {
     std::vector<FileInfo> result;
+    ListChecked(prefix, result);
+    return result;
+}
+
+bool LocalDiskProvider::ListChecked(const std::string& prefix, std::vector<FileInfo>& result) {
+    result.clear();
     std::string dir = ToFullPath(prefix);
-    if (dir.empty() || !std::filesystem::exists(dir) || !std::filesystem::is_directory(dir))
-        return result;
+    if (dir.empty()) return false;
+    std::error_code ec;
+    bool exists = std::filesystem::exists(dir, ec);
+    if (ec) return false;
+    if (!exists) return true;
+    bool isDir = std::filesystem::is_directory(dir, ec);
+    if (ec) return false;
+    if (!isDir) return true;
 
     // Capture both clocks once to avoid jitter from calling now() per file
     auto fileClockNow = std::filesystem::file_time_type::clock::now();
     auto sysClockNow = std::chrono::system_clock::now();
 
-    for (auto& entry : std::filesystem::recursive_directory_iterator(dir)) {
-        if (!entry.is_regular_file()) continue;
-        std::string rel = std::filesystem::relative(entry.path(), m_root).string();
+    std::filesystem::recursive_directory_iterator it(
+        dir, std::filesystem::directory_options::skip_permission_denied, ec);
+    std::filesystem::recursive_directory_iterator end;
+    for (; !ec && it != end; it.increment(ec)) {
+        const auto& entry = *it;
+        if (!entry.is_regular_file(ec)) continue;
+        std::string rel = std::filesystem::relative(entry.path(), m_root, ec).string();
+        if (ec) return false;
         // normalize to forward slashes (ICloudProvider convention)
         for (auto& c : rel) {
             if (c == '\\') c = '/';
@@ -110,14 +127,16 @@ std::vector<ICloudProvider::FileInfo> LocalDiskProvider::List(const std::string&
 
         FileInfo fi;
         fi.path = rel;
-        fi.size = entry.file_size();
+        fi.size = entry.file_size(ec);
+        if (ec) return false;
 
-        auto ftime = std::filesystem::last_write_time(entry.path());
+        auto ftime = std::filesystem::last_write_time(entry.path(), ec);
+        if (ec) return false;
         auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(
             ftime - fileClockNow + sysClockNow);
         fi.modifiedTime = (uint64_t)sctp.time_since_epoch().count();
 
         result.push_back(std::move(fi));
     }
-    return result;
+    return !ec;
 }
