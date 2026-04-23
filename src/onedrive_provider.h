@@ -16,6 +16,7 @@ public:
     bool Download(const std::string& path, std::vector<uint8_t>& outData) override;
     bool Remove(const std::string& path) override;
     bool Exists(const std::string& path) override;
+    ExistsStatus CheckExists(const std::string& path) override;
     std::vector<FileInfo> List(const std::string& prefix) override;
 
 protected:

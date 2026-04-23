@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -51,7 +52,204 @@ static bool RequireAccountId(const char* op, uint32_t appId, uint32_t& accountId
 }
 
 static bool IsInternalMetadataFile(std::string_view cleanName) {
-    return cleanName == kPlaytimeMetadataPath || cleanName == kStatsMetadataPath;
+    return cleanName == kPlaytimeMetadataPath || cleanName == kStatsMetadataPath ||
+        cleanName == kLegacyPlaytimeMetadataPath || cleanName == kLegacyStatsMetadataPath;
+}
+
+static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId);
+
+static bool LooksLikeForeignAppPollution(const std::string& filename, uint32_t appId) {
+    size_t pos = filename.find_first_of("/\\");
+    if (pos != std::string::npos && pos >= 3 && pos <= 10) {
+        const std::string prefix = filename.substr(0, pos);
+        if (std::all_of(prefix.begin(), prefix.end(), [](unsigned char c) { return std::isdigit(c); })) {
+            try {
+                uint32_t embeddedAppId = static_cast<uint32_t>(std::stoul(prefix));
+                if (embeddedAppId != 0 && embeddedAppId != appId) return true;
+            } catch (...) {
+            }
+        }
+    }
+
+    size_t underscore = filename.find("_%");
+    if (underscore != std::string::npos && underscore >= 3 && underscore <= 10) {
+        const std::string prefix = filename.substr(0, underscore);
+        if (std::all_of(prefix.begin(), prefix.end(), [](unsigned char c) { return std::isdigit(c); })) {
+            try {
+                uint32_t embeddedAppId = static_cast<uint32_t>(std::stoul(prefix));
+                if (embeddedAppId != 0 && embeddedAppId != appId) return true;
+            } catch (...) {
+            }
+        }
+    }
+
+    return false;
+}
+
+static std::vector<uint8_t> ReadWholeFile(const std::string& path, bool& ok) {
+    ok = false;
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return {};
+    auto size = f.tellg();
+    if (size < 0) return {};
+    f.seekg(0, std::ios::beg);
+    std::vector<uint8_t> data(static_cast<size_t>(size));
+    if (!data.empty() && !f.read(reinterpret_cast<char*>(data.data()), size)) return {};
+    ok = true;
+    return data;
+}
+
+static bool HasPersistedLocalCloudHistory(uint32_t accountId, uint32_t appId) {
+    return std::filesystem::exists(std::filesystem::path(LocalStorage::GetAppPath(accountId, appId)) / "cn.dat");
+}
+
+static void BootstrapAutoCloudFiles(uint32_t accountId, uint32_t appId) {
+    static std::mutex bootstrapMutex;
+    static std::unordered_set<uint64_t> attemptedApps;
+    static std::unordered_set<uint64_t> activeApps;
+
+    uint64_t appKey = MakeAppAccountKey(accountId, appId);
+    {
+        std::lock_guard<std::mutex> lock(bootstrapMutex);
+        if (attemptedApps.count(appKey) || activeApps.count(appKey)) return;
+        activeApps.insert(appKey);
+    }
+
+    auto finish = [&](bool markAttempted) {
+        std::lock_guard<std::mutex> lock(bootstrapMutex);
+        activeApps.erase(appKey);
+        if (markAttempted) attemptedApps.insert(appKey);
+    };
+
+    std::vector<LocalStorage::FileEntry> candidates;
+    try {
+        candidates = LocalStorage::GetAutoCloudFileList(GetSteamPath(), accountId, appId);
+    } catch (const std::exception& ex) {
+        LOG("[AutoCloudImport] Scan failed for app %u: %s", appId, ex.what());
+        finish(false);
+        return;
+    } catch (...) {
+        LOG("[AutoCloudImport] Scan failed for app %u", appId);
+        finish(false);
+        return;
+    }
+    if (candidates.empty()) {
+        finish(true);
+        return;
+    }
+
+    size_t definitePollution = 0;
+    for (const auto& fe : candidates) {
+        if (LooksLikeForeignAppPollution(fe.filename, appId)) {
+            LOG("[AutoCloudImport] Definite pollution candidate for app %u: %s", appId, fe.filename.c_str());
+            ++definitePollution;
+        }
+    }
+    if (definitePollution > 0) {
+        LOG("[AutoCloudImport] Aborting import for app %u: %zu obvious pollution file(s) detected",
+            appId, definitePollution);
+        finish(true);
+        return;
+    }
+
+    std::unordered_map<std::string, LocalStorage::FileEntry> existing;
+    for (const auto& fe : LocalStorage::GetFileList(accountId, appId)) {
+        existing[fe.filename] = fe;
+    }
+
+    auto fileTokens = CloudStorage::LoadFileTokens(accountId, appId);
+    auto rootTokens = CloudStorage::LoadRootTokens(accountId, appId);
+    size_t imported = 0;
+    bool tokenMetadataChanged = false;
+
+    for (const auto& fe : candidates) {
+        if (fe.filename.empty() || fe.sourcePath.empty()) continue;
+        if (IsInternalMetadataFile(fe.filename)) continue;
+
+        auto it = existing.find(fe.filename);
+        if (it != existing.end()) {
+            if (!(it->second.sha == fe.sha && it->second.rawSize == fe.rawSize)) {
+                LOG("[AutoCloudImport] Skipping existing app %u file %s to avoid overwriting cached/cloud data",
+                    appId, fe.filename.c_str());
+                continue;
+            }
+
+            auto existingToken = fileTokens.find(fe.filename);
+            if (existingToken == fileTokens.end() || existingToken->second != fe.rootToken) {
+                fileTokens[fe.filename] = fe.rootToken;
+                tokenMetadataChanged = true;
+                LOG("[AutoCloudImport] Canonical root token for app %u file %s: '%s'",
+                    appId, fe.filename.c_str(), fe.rootToken.c_str());
+            }
+            if (!fe.rootToken.empty() && !rootTokens.count(fe.rootToken)) {
+                rootTokens.insert(fe.rootToken);
+                tokenMetadataChanged = true;
+            }
+            continue;
+        }
+        auto blobStatus = CloudStorage::CheckBlobExists(accountId, appId, fe.filename);
+        if (blobStatus == ICloudProvider::ExistsStatus::Error) {
+            LOG("[AutoCloudImport] Aborting import for app %u: could not verify cloud blob %s",
+                appId, fe.filename.c_str());
+            finish(false);
+            return;
+        }
+        if (blobStatus == ICloudProvider::ExistsStatus::Exists) {
+            LOG("[AutoCloudImport] Skipping app %u file %s because blob already exists in cache/cloud",
+                appId, fe.filename.c_str());
+            continue;
+        }
+        if (HasPersistedLocalCloudHistory(accountId, appId)) {
+            LOG("[AutoCloudImport] Skipping app %u file %s because existing CN may represent cloud deletion",
+                appId, fe.filename.c_str());
+            continue;
+        }
+
+        auto existingToken = fileTokens.find(fe.filename);
+        if (existingToken == fileTokens.end() || existingToken->second != fe.rootToken) {
+            fileTokens[fe.filename] = fe.rootToken;
+            tokenMetadataChanged = true;
+            LOG("[AutoCloudImport] Canonical root token for app %u file %s: '%s'",
+                appId, fe.filename.c_str(), fe.rootToken.c_str());
+        }
+        if (!fe.rootToken.empty() && !rootTokens.count(fe.rootToken)) {
+            rootTokens.insert(fe.rootToken);
+            tokenMetadataChanged = true;
+        }
+
+        bool readOk = false;
+        auto data = ReadWholeFile(fe.sourcePath, readOk);
+        if (!readOk) {
+            LOG("[AutoCloudImport] Failed to read source for app %u: %s", appId, fe.sourcePath.c_str());
+            continue;
+        }
+
+        const uint8_t* ptr = data.empty() ? nullptr : data.data();
+        if (!CloudStorage::StoreBlob(accountId, appId, fe.filename, ptr, data.size())) {
+            LOG("[AutoCloudImport] Failed to cache app %u file %s", appId, fe.filename.c_str());
+            continue;
+        }
+
+        LocalStorage::SetFileTimestamp(accountId, appId, fe.filename, fe.timestamp);
+        ++imported;
+        LOG("[AutoCloudImport] Imported app %u file %s from %s", appId, fe.filename.c_str(), fe.sourcePath.c_str());
+    }
+
+    if (imported == 0 && !tokenMetadataChanged) {
+        finish(true);
+        return;
+    }
+
+    if (!rootTokens.empty()) CloudStorage::SaveRootTokens(accountId, appId, rootTokens);
+    if (!fileTokens.empty() || tokenMetadataChanged) CloudStorage::SaveFileTokens(accountId, appId, fileTokens);
+    InvalidateTokenCaches(accountId, appId);
+    if (imported > 0) CloudStorage::DrainQueueForApp(accountId, appId);
+    uint64_t cn = LocalStorage::IncrementChangeNumber(accountId, appId);
+    CloudStorage::PushCNToCloud(accountId, appId, cn);
+    CloudStorage::DrainQueueForApp(accountId, appId);
+    LOG("[AutoCloudImport] Imported %zu AutoCloud file(s), updatedTokens=%u for app %u, CN=%llu",
+        imported, tokenMetadataChanged ? 1 : 0, appId, cn);
+    finish(true);
 }
 
 static uint64_t ParsePlaytimeField(const Json::Value& value) {
@@ -115,6 +313,12 @@ static std::mutex g_fileTokensMutex;
 static std::unordered_set<uint64_t> g_fileTokensDirtyApps;
 static std::mutex g_fileTokensDirtyMutex;
 
+// Per-batch AutoCloud canonical root map. Steam can upload stale local entries
+// with their old root token even after our changelist advertises the canonical
+// root. Resolve once for the batch and reuse for begin/commit handling.
+static std::unordered_map<uint64_t, std::unordered_map<std::string, std::string>> g_batchCanonicalTokens;
+static std::mutex g_batchCanonicalTokensMutex;
+
 
 // Strip Steam root tokens like "%GameInstall%" from the start of a filename.
 // Steam uses these as path prefixes (e.g. "%GameInstall%Saves/Slot1/file.dat")
@@ -144,6 +348,60 @@ static std::string ExtractRootToken(const std::string& filename) {
         }
     }
     return "";
+}
+
+static void PrepareBatchCanonicalTokens(uint32_t accountId, uint32_t appId) {
+    uint64_t key = MakeAppAccountKey(accountId, appId);
+    {
+        std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
+        if (g_batchCanonicalTokens.find(key) != g_batchCanonicalTokens.end()) return;
+    }
+
+    std::unordered_map<std::string, std::string> tokens;
+    try {
+        auto candidates = LocalStorage::GetAutoCloudFileList(GetSteamPath(), accountId, appId);
+        for (const auto& fe : candidates) {
+            if (!fe.filename.empty()) {
+                tokens.emplace(fe.filename, fe.rootToken);
+            }
+        }
+    } catch (...) {
+    }
+
+    std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
+    g_batchCanonicalTokens.emplace(key, std::move(tokens));
+}
+
+static void ClearBatchCanonicalTokens(uint32_t accountId, uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
+    g_batchCanonicalTokens.erase(MakeAppAccountKey(accountId, appId));
+}
+
+static std::string CanonicalizeUploadRootToken(uint32_t accountId, uint32_t appId,
+                                               const std::string& cleanName,
+                                               const std::string& fallbackToken) {
+    if (cleanName.empty()) return fallbackToken;
+
+    std::string canonical;
+    bool foundCanonical = false;
+    {
+        std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
+        auto appIt = g_batchCanonicalTokens.find(MakeAppAccountKey(accountId, appId));
+        if (appIt != g_batchCanonicalTokens.end()) {
+            auto tokenIt = appIt->second.find(cleanName);
+            if (tokenIt != appIt->second.end()) {
+                canonical = tokenIt->second;
+                foundCanonical = true;
+            }
+        }
+    }
+
+    if (!foundCanonical) return fallbackToken;
+    if (canonical != fallbackToken) {
+        LOG("[NS-TOK] Canonicalized upload token for account %u app %u file %s: %s -> %s",
+            accountId, appId, cleanName.c_str(), fallbackToken.c_str(), canonical.c_str());
+    }
+    return canonical;
 }
 
 // Capture a root token for an app from a filename containing a %Token% prefix.
@@ -176,7 +434,7 @@ static bool TryCaptureRootToken(uint32_t accountId, uint32_t appId, const std::s
 // Record which root token a file was uploaded under.
 // Called from HandleCommitFileUpload after successful commit.
 static void RecordFileToken(uint32_t accountId, uint32_t appId, const std::string& cleanName, const std::string& token) {
-    if (token.empty() || cleanName.empty()) return;
+    if (cleanName.empty()) return;
     std::lock_guard<std::mutex> lock(g_fileTokensMutex);
     g_fileTokens[MakeAppAccountKey(accountId, appId)][cleanName] = token;
     LOG("[NS-FT] Recorded file token: account=%u app=%u file=%s token=%s",
@@ -541,6 +799,9 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
         return body;
     }
     uint64_t appKey = MakeAppAccountKey(accountId, appId);
+
+    BootstrapAutoCloudFiles(accountId, appId);
+
     // Filenames from GetFileList are generated by filesystem::relative() against a controlled
     // app root directory, so they cannot contain path traversal sequences (e.g. "../").
     auto files = LocalStorage::GetFileList(accountId, appId);
@@ -645,8 +906,9 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
         // Uses pre-loop snapshot (H5: avoids per-file mutex acquisition).
         std::string fileToken;
         auto ftIt = fileTokenSnapshot.find(fe.filename);
-        if (ftIt != fileTokenSnapshot.end()) fileToken = ftIt->second;
-        if (fileToken.empty()) {
+        bool hasRecordedFileToken = ftIt != fileTokenSnapshot.end();
+        if (hasRecordedFileToken) fileToken = ftIt->second;
+        if (!hasRecordedFileToken) {
             fileToken = defaultToken;
             LOG("[NS-CL]   file: %s has no recorded token, using default '%s'",
                 fe.filename.c_str(), fileToken.c_str());
@@ -1053,6 +1315,9 @@ PB::Writer HandleQuotaUsage(uint32_t appId, const std::vector<PB::Field>& reqBod
         body.WriteVarint(4, 1073741824ULL);
         return body;
     }
+
+    BootstrapAutoCloudFiles(accountId, appId);
+
     auto files = LocalStorage::GetFileList(accountId, appId);
     files.erase(std::remove_if(files.begin(), files.end(),
         [](const LocalStorage::FileEntry& fe) {
@@ -1082,6 +1347,7 @@ PB::Writer HandleBeginBatch(uint32_t appId, const std::vector<PB::Field>& reqBod
         return body;
     }
     uint64_t changeNumber = LocalStorage::GetChangeNumber(accountId, appId);
+    PrepareBatchCanonicalTokens(accountId, appId);
 
     // log files to upload/delete and capture root tokens from filenames
     int uploadCount = 0, deleteCount = 0;
@@ -1089,13 +1355,15 @@ PB::Writer HandleBeginBatch(uint32_t appId, const std::vector<PB::Field>& reqBod
         if (f.fieldNum == 3 && f.wireType == PB::LengthDelimited) {
             std::string name(reinterpret_cast<const char*>(f.data), f.dataLen);
             LOG("[NS-BATCH]   upload: %s", name.c_str());
-            TryCaptureRootToken(accountId, appId, ExtractRootToken(name));
+            TryCaptureRootToken(accountId, appId,
+                CanonicalizeUploadRootToken(accountId, appId, StripRootToken(name), ExtractRootToken(name)));
             ++uploadCount;
         }
         if (f.fieldNum == 4 && f.wireType == PB::LengthDelimited) {
             std::string name(reinterpret_cast<const char*>(f.data), f.dataLen);
             LOG("[NS-BATCH]   delete: %s", name.c_str());
-            TryCaptureRootToken(accountId, appId, ExtractRootToken(name));
+            TryCaptureRootToken(accountId, appId,
+                CanonicalizeUploadRootToken(accountId, appId, StripRootToken(name), ExtractRootToken(name)));
             ++deleteCount;
         }
     }
@@ -1136,6 +1404,8 @@ PB::Writer HandleBeginFileUpload(uint32_t appId, const std::vector<PB::Field>& r
     std::string urlHost = "127.0.0.1:" + std::to_string(port);
     std::string rootToken = ExtractRootToken(filename);
     std::string cleanName = StripRootToken(filename);
+    PrepareBatchCanonicalTokens(accountId, appId);
+    rootToken = CanonicalizeUploadRootToken(accountId, appId, cleanName, rootToken);
     std::string urlPath = "/upload/" + std::to_string(accountId) + "/" + std::to_string(appId)
         + "/" + HttpUtil::UrlEncode(cleanName, true);
 
@@ -1243,6 +1513,8 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
             // preventing Steam's rootoverrides from seeing cross-platform
             // duplicates and issuing spurious deletes.
             std::string rootToken = ExtractRootToken(filename);
+            PrepareBatchCanonicalTokens(accountId, appId);
+            rootToken = CanonicalizeUploadRootToken(accountId, appId, cleanName, rootToken);
             RecordFileToken(accountId, appId, cleanName, rootToken);
             MarkFileTokensDirty(accountId, appId);
         } else {
@@ -1289,6 +1561,7 @@ PB::Writer HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& req
 
     // Drain cloud sync queue -- ensure all blobs are pushed before we tell Steam "batch done"
     CloudStorage::DrainQueueForApp(accountId, appId);
+    ClearBatchCanonicalTokens(accountId, appId);
     PB::Writer body; // empty response
     return body;
 }

@@ -8,6 +8,8 @@ namespace LocalStorage {
 
 struct FileEntry {
     std::string filename;
+    std::string sourcePath;          // Real filesystem source for AutoCloud bootstrap only
+    std::string rootToken;           // Cloud root token captured/resolved for this file
     std::vector<uint8_t> sha;     // 20-byte SHA1
     uint64_t timestamp = 0;
     uint64_t rawSize = 0;
@@ -29,7 +31,7 @@ void SetChangeNumber(uint32_t accountId, uint32_t appId, uint64_t cn);
 uint64_t IncrementChangeNumber(uint32_t accountId, uint32_t appId);
 std::vector<uint8_t> SHA1(const uint8_t* data, size_t len);
 std::string GetAppPath(uint32_t accountId, uint32_t appId);
-std::vector<FileEntry> GetAutoCloudFileList(const std::string& steamPath, uint32_t appId);
+std::vector<FileEntry> GetAutoCloudFileList(const std::string& steamPath, uint32_t accountId, uint32_t appId);
 void SaveRootTokens(uint32_t accountId, uint32_t appId, const std::unordered_set<std::string>& tokens);
 std::unordered_set<std::string> LoadRootTokens(uint32_t accountId, uint32_t appId);
 

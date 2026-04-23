@@ -75,9 +75,19 @@ bool LocalDiskProvider::Remove(const std::string& path) {
 }
 
 bool LocalDiskProvider::Exists(const std::string& path) {
+    return CheckExists(path) == ExistsStatus::Exists;
+}
+
+ICloudProvider::ExistsStatus LocalDiskProvider::CheckExists(const std::string& path) {
     std::string full = ToFullPath(path);
-    if (full.empty()) return false;
-    return std::filesystem::exists(full) && std::filesystem::is_regular_file(full);
+    if (full.empty()) return ExistsStatus::Error;
+    std::error_code ec;
+    bool exists = std::filesystem::exists(full, ec);
+    if (ec) return ExistsStatus::Error;
+    if (!exists) return ExistsStatus::Missing;
+    bool regular = std::filesystem::is_regular_file(full, ec);
+    if (ec) return ExistsStatus::Error;
+    return regular ? ExistsStatus::Exists : ExistsStatus::Missing;
 }
 
 std::vector<ICloudProvider::FileInfo> LocalDiskProvider::List(const std::string& prefix) {

@@ -10,6 +10,8 @@
 
 class ICloudProvider {
 public:
+    enum class ExistsStatus { Missing, Exists, Error };
+
     virtual ~ICloudProvider() = default;
 
     // Human-readable name ("Google Drive", "OneDrive", "Local Disk").
@@ -43,6 +45,9 @@ public:
 
     // Check if a file exists.
     virtual bool Exists(const std::string& path) = 0;
+
+    // Check if a file exists, preserving provider/API errors when available.
+    virtual ExistsStatus CheckExists(const std::string& path) = 0;
 
     // Listing
 

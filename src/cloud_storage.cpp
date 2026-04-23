@@ -11,6 +11,7 @@
 #include <sstream>
 #include <chrono>
 #include <list>
+#include <algorithm>
 #include <Windows.h>
 
 namespace CloudStorage {
@@ -95,6 +96,8 @@ struct WorkItem {
     Type        type;
     std::string cloudPath;          // relative path for provider
     std::vector<uint8_t> data;      // only for Upload
+    bool        skipIfExists = false;
+    int         existsCheckRetries = 0;
 };
 
 static std::list<WorkItem>               g_workQueue;
@@ -118,6 +121,35 @@ static bool HasPendingWorkForPrefix(const std::string& prefix) {
         if (count > 0 && path.rfind(prefix, 0) == 0) return true;
     }
     return false;
+}
+
+static void EnqueueWork(WorkItem item);
+static std::string LocalStoragePath(uint32_t accountId, uint32_t appId);
+
+static void RemoveLocalBlobsNotInCloud(uint32_t accountId, uint32_t appId,
+                                       const std::unordered_set<std::string>& cloudBlobNames) {
+    std::string localBlobDir = LocalStoragePath(accountId, appId);
+    std::error_code ec;
+    if (!std::filesystem::exists(localBlobDir, ec) || !std::filesystem::is_directory(localBlobDir, ec)) return;
+
+    int removed = 0;
+    for (auto& entry : std::filesystem::recursive_directory_iterator(localBlobDir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+
+        std::string rel = std::filesystem::relative(entry.path(), localBlobDir, ec).string();
+        if (ec) continue;
+        for (auto& c : rel) { if (c == '\\') c = '/'; }
+        if (rel == "cn.dat" || rel == "root_token.dat" || rel == "file_tokens.dat") continue;
+        if (cloudBlobNames.count(rel)) continue;
+
+        std::filesystem::remove(entry.path(), ec);
+        if (!ec) ++removed;
+    }
+    if (removed > 0) {
+        LOG("[CloudStorage] SyncFromCloud app %u: removed %d stale local blob(s) absent from newer cloud CN",
+            appId, removed);
+    }
 }
 
 
@@ -187,16 +219,26 @@ static void WorkerLoop(int threadId) {
         {
             std::unique_lock<std::mutex> lock(g_queueMutex);
             g_queueCV.wait(lock, [] {
-                return !g_workQueue.empty() || !g_workerRunning;
+                if (!g_workerRunning) return true;
+                for (const auto& queued : g_workQueue) {
+                    if (!g_activePaths.count(queued.cloudPath)) return true;
+                }
+                return false;
             });
             if (!g_workerRunning && g_workQueue.empty()) break;
-            if (g_workQueue.empty()) continue;
-            item = std::move(g_workQueue.front());
+
+            auto workIt = std::find_if(g_workQueue.begin(), g_workQueue.end(),
+                [](const WorkItem& queued) {
+                    return !g_activePaths.count(queued.cloudPath);
+                });
+            if (workIt == g_workQueue.end()) continue;
+
+            item = std::move(*workIt);
             // Remove from dedup index before popping (H8)
             if (item.type == WorkItem::Upload) {
                 g_uploadIndex.erase(item.cloudPath);
             }
-            g_workQueue.pop_front();
+            g_workQueue.erase(workIt);
             ++g_activeWorkers;
             ++g_activePaths[item.cloudPath];
         }
@@ -212,9 +254,33 @@ static void WorkerLoop(int threadId) {
             std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
         }
 
+        std::string activePath = item.cloudPath;
         bool success = false;
         switch (item.type) {
         case WorkItem::Upload:
+            if (item.skipIfExists) {
+                auto exists = g_provider->CheckExists(item.cloudPath);
+                if (exists == ICloudProvider::ExistsStatus::Exists) {
+                    LOG("[CloudStorage] BG upload skipped existing [%d]: %s",
+                        threadId, item.cloudPath.c_str());
+                    OnCloudSuccess();
+                    success = true;
+                    break;
+                }
+                if (exists == ICloudProvider::ExistsStatus::Error && item.existsCheckRetries++ < 3) {
+                    LOG("[CloudStorage] BG upload deferred after existence check failure [%d]: %s",
+                        threadId, item.cloudPath.c_str());
+                    OnCloudFailure("Exists", item.cloudPath);
+                    EnqueueWork(std::move(item));
+                    break;
+                }
+                if (exists == ICloudProvider::ExistsStatus::Error) {
+                    LOG("[CloudStorage] BG upload abandoned after repeated existence check failures [%d]: %s",
+                        threadId, item.cloudPath.c_str());
+                    OnCloudFailure("Exists", item.cloudPath);
+                    break;
+                }
+            }
             if (g_provider->Upload(item.cloudPath, item.data.data(), item.data.size())) {
                 LOG("[CloudStorage] BG upload OK [%d]: %s (%zu bytes)",
                     threadId, item.cloudPath.c_str(), item.data.size());
@@ -244,13 +310,14 @@ static void WorkerLoop(int threadId) {
 
         {
             std::lock_guard<std::mutex> lock(g_queueMutex);
-            auto it = g_activePaths.find(item.cloudPath);
+            auto it = g_activePaths.find(activePath);
             if (it != g_activePaths.end()) {
                 if (--it->second <= 0) g_activePaths.erase(it);
             }
             --g_activeWorkers;
         }
         g_drainCV.notify_all();
+        g_queueCV.notify_all();
     }
     LOG("[CloudStorage] Background worker %d stopped", threadId);
 }
@@ -268,9 +335,16 @@ static void EnqueueWork(WorkItem item) {
             auto indexIt = g_uploadIndex.find(item.cloudPath);
             if (indexIt != g_uploadIndex.end()) {
                 auto& existing = *indexIt->second;
+                if (item.skipIfExists && !existing.skipIfExists) {
+                    LOG("[CloudStorage] Dedup: keeping queued authoritative upload for %s",
+                        item.cloudPath.c_str());
+                    return;
+                }
                 LOG("[CloudStorage] Dedup: replacing queued upload for %s (%zu -> %zu bytes)",
                     item.cloudPath.c_str(), existing.data.size(), item.data.size());
                 existing.data = std::move(item.data);
+                existing.skipIfExists = item.skipIfExists;
+                existing.existsCheckRetries = item.existsCheckRetries;
                 return; // replaced in-place, no need to notify
             }
         }
@@ -459,19 +533,24 @@ bool DeleteBlob(uint32_t accountId, uint32_t appId,
 
 bool BlobExists(uint32_t accountId, uint32_t appId,
                 const std::string& filename) {
+    return CheckBlobExists(accountId, appId, filename) == ICloudProvider::ExistsStatus::Exists;
+}
+
+ICloudProvider::ExistsStatus CheckBlobExists(uint32_t accountId, uint32_t appId,
+                                             const std::string& filename) {
     // Check local cache first
     std::string localPath = LocalBlobPath(accountId, appId, filename);
-    if (localPath.empty()) return false;  // path traversal rejected
+    if (localPath.empty()) return ICloudProvider::ExistsStatus::Error;  // path traversal rejected
     if (std::filesystem::exists(localPath) && std::filesystem::is_regular_file(localPath))
-        return true;
+        return ICloudProvider::ExistsStatus::Exists;
 
     // Check cloud
     if (g_provider) {
         std::string cloudPath = CloudBlobPath(accountId, appId, filename);
-        return g_provider->Exists(cloudPath);
+        return g_provider->CheckExists(cloudPath);
     }
 
-    return false;
+    return ICloudProvider::ExistsStatus::Missing;
 }
 
 
@@ -561,6 +640,12 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
 
     auto syncStart = std::chrono::steady_clock::now();
     bool hadNewer = false;
+    bool cloudHadNewerCN = false;
+    bool cloudCNFound = false;
+    bool cloudRootTokensFound = false;
+    bool cloudFileTokensFound = false;
+    uint64_t localCN = 0;
+    uint64_t cloudCN = 0;
     std::string storagePath = LocalStoragePath(accountId, appId);
     std::filesystem::create_directories(storagePath);
 
@@ -568,12 +653,12 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     //    Read from LocalStorage's in-memory cache (matches Steam behavior where
     //    CN is read from an in-memory structure, not from disk).
     {
-        uint64_t localCN = LocalStorage::GetChangeNumber(accountId, appId);
+        localCN = LocalStorage::GetChangeNumber(accountId, appId);
 
         std::string cloudCNPath = CloudMetadataPath(accountId, appId, "cn.dat");
         std::vector<uint8_t> cloudData;
-        uint64_t cloudCN = 0;
         if (g_provider->Download(cloudCNPath, cloudData)) {
+            cloudCNFound = true;
             std::string s(cloudData.begin(), cloudData.end());
             try { cloudCN = std::stoull(s); } catch (...) {}
         }
@@ -583,10 +668,10 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                 appId, cloudCN, localCN);
             LocalStorage::SetChangeNumber(accountId, appId, cloudCN);
             hadNewer = true;
-        } else if (localCN > cloudCN && cloudCN > 0) {
-            LOG("[CloudStorage] SyncFromCloud app %u: local CN=%llu > cloud CN=%llu, pushing local to cloud",
+            cloudHadNewerCN = true;
+        } else if (localCN > cloudCN) {
+            LOG("[CloudStorage] SyncFromCloud app %u: local CN=%llu > cloud CN=%llu, leaving provider unchanged until Steam uploads",
                 appId, localCN, cloudCN);
-            PushCNToCloud(accountId, appId, localCN);
         } else {
             LOG("[CloudStorage] SyncFromCloud app %u: CN in sync (local=%llu, cloud=%llu)",
                 appId, localCN, cloudCN);
@@ -598,6 +683,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         std::string cloudTokenPath = CloudMetadataPath(accountId, appId, "root_token.dat");
         std::vector<uint8_t> cloudData;
         if (g_provider->Download(cloudTokenPath, cloudData)) {
+            cloudRootTokensFound = true;
             std::unordered_set<std::string> cloudTokens;
             bool cloudHadCorruption = false;
             std::istringstream iss(std::string(cloudData.begin(), cloudData.end()));
@@ -658,36 +744,43 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     {
         std::string cloudPath = CloudMetadataPath(accountId, appId, "file_tokens.dat");
         std::vector<uint8_t> cloudData;
-        if (g_provider->Download(cloudPath, cloudData) && !cloudData.empty()) {
-            // Parse cloud file_tokens.dat
-            std::unordered_map<std::string, std::string> cloudFileTokens;
-            std::istringstream iss(std::string(cloudData.begin(), cloudData.end()));
-            std::string line;
-            while (std::getline(iss, line)) {
-                while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
-                    line.pop_back();
-                if (line.empty()) continue;
-                auto tab = line.find('\t');
-                if (tab == std::string::npos) continue;
-                std::string cleanName = line.substr(0, tab);
-                std::string token = line.substr(tab + 1);
-                if (!cleanName.empty() && !token.empty())
-                    cloudFileTokens[cleanName] = token;
-            }
-
-            // Merge: cloud entries fill in any gaps in local
-            auto localFileTokens = LocalStorage::LoadFileTokens(accountId, appId);
-            size_t beforeSize = localFileTokens.size();
-            for (auto& [name, token] : cloudFileTokens) {
-                if (localFileTokens.find(name) == localFileTokens.end()) {
-                    localFileTokens[name] = token;
+        if (g_provider->Download(cloudPath, cloudData)) {
+            cloudFileTokensFound = true;
+            if (!cloudData.empty()) {
+                // Parse cloud file_tokens.dat
+                std::unordered_map<std::string, std::string> cloudFileTokens;
+                std::istringstream iss(std::string(cloudData.begin(), cloudData.end()));
+                std::string line;
+                while (std::getline(iss, line)) {
+                    while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+                        line.pop_back();
+                    if (line.empty()) continue;
+                    auto tab = line.find('\t');
+                    if (tab == std::string::npos) continue;
+                    std::string cleanName = line.substr(0, tab);
+                    std::string token = line.substr(tab + 1);
+                    if (!cleanName.empty())
+                        cloudFileTokens[cleanName] = token;
                 }
-            }
-            if (localFileTokens.size() > beforeSize) {
-                LOG("[CloudStorage] SyncFromCloud app %u: merged %zu new file-token mappings from cloud",
-                    appId, localFileTokens.size() - beforeSize);
-                LocalStorage::SaveFileTokens(accountId, appId, localFileTokens);
-                hadNewer = true;
+
+                // Merge: cloud entries fill in any gaps in local
+                auto localFileTokens = LocalStorage::LoadFileTokens(accountId, appId);
+                size_t beforeSize = localFileTokens.size();
+                bool changed = false;
+                for (auto& [name, token] : cloudFileTokens) {
+                    auto localIt = localFileTokens.find(name);
+                    if (localIt == localFileTokens.end() ||
+                        (cloudHadNewerCN && localIt->second != token)) {
+                        localFileTokens[name] = token;
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    LOG("[CloudStorage] SyncFromCloud app %u: merged/updated file-token mappings from cloud (local %zu -> %zu)",
+                        appId, beforeSize, localFileTokens.size());
+                    LocalStorage::SaveFileTokens(accountId, appId, localFileTokens);
+                    hadNewer = true;
+                }
             }
         }
     }
@@ -698,11 +791,19 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
 
     // 4. Pre-populate blob cache: list cloud blobs, download any we don't have locally.
     //    Bounded by BLOB_SYNC_TIMEOUT_SEC to prevent blocking game launch indefinitely.
-    //    Also reused in step 5 (seed upload) to avoid a redundant List() call.
+    //    Launch-time sync is download-only. Uploads are driven by Steam's
+    //    BeginAppUploadBatch/CommitFileUpload flow after it classifies local
+    //    files as changed, matching Steam's conflict-aware sync model.
     constexpr int BLOB_SYNC_TIMEOUT_SEC = 120; // 2 minutes max for blob downloads
     std::string blobPrefix = std::to_string(accountId) + "/" +
                              std::to_string(appId) + "/blobs/";
     auto cloudBlobs = g_provider->List(blobPrefix);
+    std::unordered_set<std::string> cloudBlobNames;
+    for (auto& fi : cloudBlobs) {
+        auto blobsPos = fi.path.find("/blobs/");
+        if (blobsPos == std::string::npos) continue;
+        cloudBlobNames.insert(CanonicalizeInternalMetadataName(fi.path.substr(blobsPos + 7)));
+    }
 
     {
         int downloaded = 0, skipped = 0;
@@ -726,7 +827,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             std::string filename = CanonicalizeInternalMetadataName(fi.path.substr(blobsPos + 7));
 
             std::string localBlobFile = LocalBlobPath(accountId, appId, filename);
-            if (std::filesystem::exists(localBlobFile)) {
+            if (std::filesystem::exists(localBlobFile) && !cloudHadNewerCN) {
                 skipped++;
                 continue; // already cached
             }
@@ -760,22 +861,16 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                 appId, downloaded, skipped);
             hadNewer = true;
         }
+        if (cloudHadNewerCN && !cloudBlobNames.empty()) {
+            RemoveLocalBlobsNotInCloud(accountId, appId, cloudBlobNames);
+        }
     }
 
-    // 5. Seed upload: push local blobs to cloud if cloud is empty/missing them.
-    //    This handles the case where files exist locally (from previous sessions)
-    //    but have never been uploaded to the cloud provider.
-    {
-        // Build set of cloud blob filenames for quick lookup (reuses cloudBlobs from step 4)
-        std::unordered_set<std::string> cloudBlobNames;
-        for (auto& fi : cloudBlobs) {
-            auto blobsPos = fi.path.find("/blobs/");
-            if (blobsPos == std::string::npos) continue;
-            cloudBlobNames.insert(CanonicalizeInternalMetadataName(fi.path.substr(blobsPos + 7)));
-        }
-
-        // Scan local storage directory for files to seed to cloud.
-        // Skip internal metadata files (cn.dat, root_token.dat, file_tokens.dat).
+    // Recovery-only repair: when local is at least as current as the provider,
+    // fill provider gaps from the local CloudRedirect cache. This preserves
+    // existing users who link an empty provider or hit a partial provider upload
+    // failure, while never overwriting a blob that already exists in cloud.
+    if (localCN > 0 && localCN >= cloudCN) {
         std::string localBlobDir = g_localRoot + "storage\\" +
                                    std::to_string(accountId) + "\\" +
                                    std::to_string(appId) + "\\";
@@ -784,16 +879,11 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             for (auto& entry : std::filesystem::recursive_directory_iterator(localBlobDir)) {
                 if (!entry.is_regular_file()) continue;
 
-                // Get relative path with forward slashes
                 std::string rel = std::filesystem::relative(entry.path(), localBlobDir).string();
                 for (auto& c : rel) { if (c == '\\') c = '/'; }
-
-                // Skip internal metadata files
                 if (rel == "cn.dat" || rel == "root_token.dat" || rel == "file_tokens.dat") continue;
+                if (cloudBlobNames.count(rel)) continue;
 
-                if (cloudBlobNames.count(rel)) continue; // already on cloud
-
-                // Read local file and enqueue upload
                 std::ifstream f(entry.path(), std::ios::binary);
                 if (!f) continue;
                 std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
@@ -802,24 +892,16 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                 wi.type = WorkItem::Upload;
                 wi.cloudPath = CloudBlobPath(accountId, appId, rel);
                 wi.data = std::move(data);
+                wi.skipIfExists = true;
                 EnqueueWork(std::move(wi));
                 seeded++;
             }
         }
 
-        // Also seed metadata files if cloud didn't have them
         auto seedMeta = [&](const std::string& filename) {
             std::string localFile = storagePath + filename;
             if (!std::filesystem::exists(localFile)) return;
 
-            // Check if cloud already has it (we already tried downloading above,
-            // so just check via the provider)
-            std::string cloudPath = CloudMetadataPath(accountId, appId, filename);
-            std::vector<uint8_t> probe;
-            if (g_provider->Download(cloudPath, probe) && !probe.empty()) return;
-
-            // Read local and push (empty files are valid — e.g. file_tokens.dat
-            // for ISteamRemoteStorage games with no root tokens)
             std::ifstream f(localFile, std::ios::binary);
             if (!f) return;
             std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
@@ -827,18 +909,19 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
 
             WorkItem wi;
             wi.type = WorkItem::Upload;
-            wi.cloudPath = cloudPath;
+            wi.cloudPath = CloudMetadataPath(accountId, appId, filename);
             wi.data = std::move(data);
+            wi.skipIfExists = true;
             EnqueueWork(std::move(wi));
             seeded++;
         };
 
-        seedMeta("cn.dat");
-        seedMeta("root_token.dat");
-        seedMeta("file_tokens.dat");
+        if (!cloudRootTokensFound) seedMeta("root_token.dat");
+        if (!cloudFileTokensFound) seedMeta("file_tokens.dat");
+        if (!cloudCNFound) seedMeta("cn.dat");
 
         if (seeded > 0) {
-            LOG("[CloudStorage] SyncFromCloud app %u: seeding %d local files to cloud (%s)",
+            LOG("[CloudStorage] SyncFromCloud app %u: recovered %d missing local cache file(s) to provider (%s)",
                 appId, seeded, g_provider->Name());
         }
     }

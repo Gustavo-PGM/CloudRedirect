@@ -29,7 +29,7 @@ add_library(cloud_redirect SHARED
 
 target_include_directories(cloud_redirect PRIVATE src)
 target_compile_definitions(cloud_redirect PRIVATE MINIZ_NO_STDIO)
-target_link_libraries(cloud_redirect PRIVATE Shlwapi Advapi32 ws2_32 winhttp Crypt32)
+target_link_libraries(cloud_redirect PRIVATE Shlwapi Advapi32 ws2_32 winhttp Crypt32 Shell32 Ole32)
 
 # UI (builds DLL first, then publishes the WPF app with the DLL embedded)
 add_custom_target(ui ALL

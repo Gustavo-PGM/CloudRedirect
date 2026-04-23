@@ -17,6 +17,7 @@ public:
     bool Download(const std::string& path, std::vector<uint8_t>& outData) override;
     bool Remove(const std::string& path) override;
     bool Exists(const std::string& path) override;
+    ExistsStatus CheckExists(const std::string& path) override;
     std::vector<FileInfo> List(const std::string& prefix) override;
 
 protected:
@@ -36,9 +37,13 @@ private:
     std::recursive_mutex m_folderMtx;
     std::recursive_mutex m_folderCreateMtx;  // serializes find-or-create to prevent duplicate folders
 
+    enum class LookupStatus { Missing, Exists, Error };
+
     // Folder management (Drive is ID-based, not path-based)
     std::string EscapeQuery(const std::string& s) const;
     void InvalidateFolderById(const std::string& folderId);
+    LookupStatus FindDriveFolderStatus(const std::string& name, const std::string& parentId,
+                                       std::string* outId = nullptr);
     std::string FindDriveFolder(const std::string& name, const std::string& parentId);
     std::string CreateDriveFolder(const std::string& name, const std::string& parentId);
     std::string GetRootFolder();
@@ -68,6 +73,8 @@ private:
     void ListRecursive(const std::string& folderId, const std::string& prefix,
                        std::vector<RemoteFile>& out, int depth = 0);
     std::optional<std::vector<uint8_t>> DownloadFileById(const std::string& fileId);
+    LookupStatus FindFileInFolderStatus(const std::string& name, const std::string& folderId,
+                                        std::string* outId = nullptr);
     std::string FindFileInFolder(const std::string& name, const std::string& folderId);
     bool UploadOrUpdate(const std::string& name, const std::string& folderId,
                         const uint8_t* data, size_t len, int64_t timestamp,

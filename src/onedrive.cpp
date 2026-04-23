@@ -513,14 +513,20 @@ bool OneDriveProvider::Remove(const std::string& path) {
 }
 
 bool OneDriveProvider::Exists(const std::string& path) {
+    return CheckExists(path) == ExistsStatus::Exists;
+}
+
+ICloudProvider::ExistsStatus OneDriveProvider::CheckExists(const std::string& path) {
     uint32_t accountId, appId;
     std::string relFilename;
     if (!ParsePath(path, accountId, appId, relFilename) || relFilename.empty())
-        return false;
+        return ExistsStatus::Error;
 
     auto itemPath = BuildItemPath(accountId, appId, relFilename);
     auto r = ApiGet(itemPath + "?$select=id");
-    return r.status == 200;
+    if (r.status == 200) return ExistsStatus::Exists;
+    if (r.status == 404) return ExistsStatus::Missing;
+    return ExistsStatus::Error;
 }
 
 std::vector<ICloudProvider::FileInfo>

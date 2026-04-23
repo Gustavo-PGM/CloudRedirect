@@ -46,6 +46,8 @@ bool DeleteBlob(uint32_t accountId, uint32_t appId,
 // Check if a blob exists (local cache or cloud).
 bool BlobExists(uint32_t accountId, uint32_t appId,
                 const std::string& filename);
+ICloudProvider::ExistsStatus CheckBlobExists(uint32_t accountId, uint32_t appId,
+                                             const std::string& filename);
 
 // Get the authoritative change number (max of local and cloud).
 uint64_t GetChangeNumber(uint32_t accountId, uint32_t appId);
