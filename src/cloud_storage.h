@@ -68,10 +68,16 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId);
 
 // Pull metadata for ALL known apps from cloud.
 // Called once during Init after provider is authenticated.
-void SyncAllFromCloud(uint32_t accountId);
+std::vector<uint32_t> SyncAllFromCloud(uint32_t accountId);
 
 // Block until all pending background operations complete.
 void DrainQueue();
+
+// Block until pending background operations for one app complete.
+void DrainQueueForApp(uint32_t accountId, uint32_t appId);
+
+// Push the change number to the cloud provider (uploads cn.dat).
+void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn);
 
 // Show an immediate error dialog for critical auth failures (e.g. token refresh broken).
 // Called by provider implementations (GDrive, OneDrive) when refresh fails.

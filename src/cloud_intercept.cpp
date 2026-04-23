@@ -22,6 +22,7 @@
 #include <fstream>
 #include <optional>
 #include <chrono>
+#include <limits>
 
 namespace CloudIntercept {
 
@@ -88,6 +89,10 @@ static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_SLOT8 = 0x124F950;
 static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBD0210;
 // sub_138BD07E0 = protobuf SerializeToArray (writes body to raw bytes)
 static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBD07E0;
+// CUser playtime state helpers
+static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9BF480;
+static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9CF7E0;
+static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9D2640;
 // CSteamEngine layout offsets
 static constexpr uint32_t ENGINE_OFF_JOBMGR          = 592;    // CJobMgr embedded at CSteamEngine+592
 static constexpr uint32_t ENGINE_OFF_GLOBAL_HANDLE   = 3144;  // uint32_t: global user handle
@@ -152,6 +157,9 @@ using ParseFromArrayFn = char(__fastcall*)(void* msgBody, const char* data, int 
 //   rdx = output buffer pointer
 //   returns pointer past last written byte
 using SerializeToArrayFn = void*(__fastcall*)(void* msgBody, void* outBuf);
+using GetAppMinutesPlayedDataFn = unsigned int*(__fastcall*)(int64_t userPtr, unsigned int appId, char create);
+using FlushAppMinutesPlayedFn = int64_t(__fastcall*)(int64_t userPtr, unsigned int appId, unsigned int* record);
+using SetAppLastPlayedTimeFn = void(__fastcall*)(int64_t userPtr, unsigned int appId, unsigned int lastPlayed);
 
 // Job routing info struct passed as 4th arg to BRouteMsgToJob
 // Layout from RecvPkt assembly (naturally aligned, 24 bytes, no padding needed):
@@ -219,10 +227,33 @@ static void* g_cmInterface = nullptr;             // real CCMInterface* (found v
 static std::atomic<bool> g_shuttingDown{false};
 static std::atomic<bool> g_cmInterfaceFound{false}; // whether we've found the real CCMInterface
 static std::thread g_luaSyncThread;                  // deferred lua sync (waits for accountId)
+static std::thread g_startupMetadataThread;          // deferred startup playtime/stats restore
+static std::atomic<bool> g_startupMetadataScheduled{false};
 
 // Background threads spawned by notification hooks (exit-sync uploads, MessageBox, etc.)
 static std::mutex g_bgThreadsMutex;
 static std::vector<std::thread> g_bgThreads;
+
+static void ScheduleStartupMetadataSync() {
+    if (!CloudStorage::IsCloudActive()) return;
+
+    bool expected = false;
+    if (!g_startupMetadataScheduled.compare_exchange_strong(expected, true)) return;
+
+    if (g_startupMetadataThread.joinable()) g_startupMetadataThread.join();
+    g_startupMetadataThread = std::thread([] {
+        uint32_t accountId = GetAccountId();
+        if (g_shuttingDown.load() || accountId == 0) return;
+
+        LOG("[StartupSync] Restoring cloud metadata for account %u", accountId);
+        auto appIds = CloudStorage::SyncAllFromCloud(accountId);
+        for (uint32_t appId : appIds) {
+            if (g_shuttingDown.load()) break;
+            RestoreAppMetadata(accountId, appId);
+        }
+        LOG("[StartupSync] Restored metadata for %zu apps", appIds.size());
+    });
+}
 
 // Sync toggles (all default OFF, read from config.json at init)
 static std::atomic<bool> g_syncAchievements{false};
@@ -301,6 +332,78 @@ static void AddNamespaceApp(uint32_t appId) {
 static std::mutex g_launchTimeMutex;
 static std::unordered_map<uint32_t, time_t> g_launchTimes;
 static std::unordered_map<uint32_t, uint64_t> g_launchVdfPlaytime;
+static std::unordered_map<uint32_t, uint64_t> g_launchVdfPlaytime2wks;
+
+static uint32_t ClampToUint32(uint64_t value) {
+    return value > (std::numeric_limits<uint32_t>::max)()
+        ? (std::numeric_limits<uint32_t>::max)()
+        : static_cast<uint32_t>(value);
+}
+
+static uintptr_t FindCurrentUser();
+
+static uintptr_t ResolveCurrentUserForRestore(const char* featureTag, uint32_t appId) {
+    if (!g_steamClientBase) {
+        HMODULE hSC = GetModuleHandleA("steamclient64.dll");
+        if (!hSC) {
+            LOG("[%s] In-memory restore skipped for app %u: steamclient64.dll not loaded", featureTag, appId);
+            return 0;
+        }
+        g_steamClientBase = (uintptr_t)hSC;
+    }
+
+    uintptr_t userPtr = 0;
+    for (int attempt = 0; attempt < 20 && !userPtr && !g_shuttingDown.load(); ++attempt) {
+        userPtr = FindCurrentUser();
+        if (!userPtr) Sleep(100);
+    }
+    if (!userPtr) {
+        LOG("[%s] In-memory restore skipped for app %u: current CUser not available", featureTag, appId);
+    }
+    return userPtr;
+}
+
+static uintptr_t FindCurrentUser() {
+    if (!g_steamClientBase) {
+        HMODULE hSC = GetModuleHandleA("steamclient64.dll");
+        if (!hSC) return 0;
+        g_steamClientBase = (uintptr_t)hSC;
+    }
+
+    uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
+    uintptr_t engine = 0;
+    __try { engine = *pEngineGlobal; } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    if (!engine) return 0;
+
+    uint32_t globalHandle = 0;
+    __try { globalHandle = *(uint32_t*)(engine + ENGINE_OFF_GLOBAL_HANDLE); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    if (globalHandle == 0) return 0;
+
+    uintptr_t userMapBase = engine + ENGINE_OFF_USER_MAP;
+    uintptr_t arrayPtr = 0;
+    int32_t count = 0;
+    __try {
+        arrayPtr = *(uintptr_t*)(userMapBase);
+        count = *(int32_t*)(userMapBase + 16);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+
+    if (!arrayPtr || count <= 0 || count > 64) return 0;
+
+    uintptr_t userPtr = 0;
+    __try {
+        for (int32_t i = 0; i < count; i++) {
+            uintptr_t entry = arrayPtr + (uintptr_t)i * 16;
+            uint32_t handle = *(uint32_t*)entry;
+            if (handle == globalHandle) {
+                userPtr = *(uintptr_t*)(entry + 8);
+                break;
+            }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+
+    return userPtr;
+}
 
 void RecordLaunchTime(uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_launchTimeMutex);
@@ -308,6 +411,7 @@ void RecordLaunchTime(uint32_t appId) {
 
     // Snapshot VDF playtime at launch while the file is stable
     uint64_t vdfPT = 0;
+    uint64_t vdfPT2wks = 0;
     uint32_t accountId = GetAccountId();
     if (accountId) {
         std::string vdfPath = g_steamPath + "userdata\\" + std::to_string(accountId)
@@ -332,18 +436,22 @@ void RecordLaunchTime(uint32_t appId) {
                 [&](const VdfUtil::FieldInfo& fi) {
                     if (fi.key == "Playtime")
                         vdfPT = strtoull(std::string(fi.value).c_str(), nullptr, 10);
+                    else if (fi.key == "Playtime2wks")
+                        vdfPT2wks = strtoull(std::string(fi.value).c_str(), nullptr, 10);
                     return true;
                 });
         }
     }
     g_launchVdfPlaytime[appId] = vdfPT;
-    LOG("[Playtime] Recorded launch time for app %u (vdfBaseline=%llu min)", appId, vdfPT);
+    g_launchVdfPlaytime2wks[appId] = vdfPT2wks;
+    LOG("[Playtime] Recorded launch time for app %u (vdfBaseline=%llu min, vdf2wks=%llu min)",
+        appId, vdfPT, vdfPT2wks);
 }
 
-struct LaunchInfo { time_t launchTime; uint64_t vdfBaseline; };
+struct LaunchInfo { time_t launchTime; uint64_t vdfBaseline; uint64_t vdfBaseline2wks; };
 static LaunchInfo PopLaunchInfo(uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_launchTimeMutex);
-    LaunchInfo info = {0, 0};
+    LaunchInfo info = {0, 0, 0};
     auto it = g_launchTimes.find(appId);
     if (it != g_launchTimes.end()) {
         info.launchTime = it->second;
@@ -354,7 +462,81 @@ static LaunchInfo PopLaunchInfo(uint32_t appId) {
         info.vdfBaseline = it2->second;
         g_launchVdfPlaytime.erase(it2);
     }
+    auto it3 = g_launchVdfPlaytime2wks.find(appId);
+    if (it3 != g_launchVdfPlaytime2wks.end()) {
+        info.vdfBaseline2wks = it3->second;
+        g_launchVdfPlaytime2wks.erase(it3);
+    }
     return info;
+}
+
+bool RestorePlaytimeState(uint32_t appId, uint64_t playtime, uint64_t playtime2wks) {
+    if (!playtime && !playtime2wks) return false;
+
+    uintptr_t userPtr = ResolveCurrentUserForRestore("Playtime", appId);
+    if (!userPtr) return false;
+
+    auto getData = (GetAppMinutesPlayedDataFn)(g_steamClientBase + SC_RVA_GET_APP_MINUTES_PLAYED_DATA);
+    auto flushData = (FlushAppMinutesPlayedFn)(g_steamClientBase + SC_RVA_FLUSH_APP_MINUTES_PLAYED);
+
+    unsigned int* record = nullptr;
+    __try {
+        record = getData((int64_t)userPtr, appId, 1);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[Playtime] In-memory restore exception creating record for app %u: code=0x%08lX",
+            appId, GetExceptionCode());
+        return false;
+    }
+    if (!record) {
+        LOG("[Playtime] In-memory restore failed for app %u: no playtime record", appId);
+        return false;
+    }
+
+    uint32_t total32 = ClampToUint32(playtime);
+    uint32_t twoWks32 = ClampToUint32(playtime2wks ? playtime2wks : playtime);
+    uint32_t oldTotal = 0;
+    uint32_t oldTwoWks = 0;
+
+    __try {
+        oldTotal = record[1];
+        oldTwoWks = record[2];
+        record[1] = total32;
+        record[2] = twoWks32;
+        record[3] = 0;
+        record[4] = 0;
+        record[5] = 0;
+        record[6] = 0;
+        flushData((int64_t)userPtr, appId, record);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[Playtime] In-memory restore exception applying record for app %u: code=0x%08lX",
+            appId, GetExceptionCode());
+        return false;
+    }
+
+    LOG("[Playtime] Seeded in-memory playtime for app %u: total %u->%u, 2wks %u->%u",
+        appId, oldTotal, total32, oldTwoWks, twoWks32);
+    return true;
+}
+
+bool RestoreLastPlayedState(uint32_t appId, uint64_t lastPlayed) {
+    if (!lastPlayed) return false;
+
+    uintptr_t userPtr = ResolveCurrentUserForRestore("Playtime", appId);
+    if (!userPtr) return false;
+
+    auto setLastPlayed = (SetAppLastPlayedTimeFn)(g_steamClientBase + SC_RVA_SET_APP_LAST_PLAYED_TIME);
+
+    uint32_t lastPlayed32 = ClampToUint32(lastPlayed);
+    __try {
+        setLastPlayed((int64_t)userPtr, appId, lastPlayed32);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[Playtime] In-memory LastPlayed restore exception for app %u: code=0x%08lX",
+            appId, GetExceptionCode());
+        return false;
+    }
+
+    LOG("[Playtime] Seeded in-memory LastPlayed for app %u: %u", appId, lastPlayed32);
+    return true;
 }
 
 // cave replacement buffer globals (still needed for passthrough SteamTools hook)
@@ -476,50 +658,7 @@ static std::vector<uint8_t> BuildPacket(uint32_t emsg, const PB::Writer& header,
 //     → array[i] where handle matches → CUser*
 //   → CUser+72 (CCMInterface embedded in CBaseUser)
 static void* FindCCMInterface() {
-    if (!g_steamClientBase) {
-        HMODULE hSC = GetModuleHandleA("steamclient64.dll");
-        if (!hSC) return nullptr;
-        g_steamClientBase = (uintptr_t)hSC;
-    }
-
-    // Read global CSteamEngine* from qword_139781D38
-    uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
-    uintptr_t engine = 0;
-    __try { engine = *pEngineGlobal; } __except(EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
-    if (!engine) return nullptr;
-
-    // Read global user handle (uint32) from engine+3144
-    uint32_t globalHandle = 0;
-    __try { globalHandle = *(uint32_t*)(engine + ENGINE_OFF_GLOBAL_HANDLE); }
-    __except(EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
-    if (globalHandle == 0) return nullptr;
-
-    // Read user map at engine+3296
-    // CUtlSortedVector layout: +0 = QWORD array_base, +16 = DWORD count
-    uintptr_t userMapBase = engine + ENGINE_OFF_USER_MAP;
-    uintptr_t arrayPtr = 0;
-    int32_t count = 0;
-    __try {
-        arrayPtr = *(uintptr_t*)(userMapBase);
-        count = *(int32_t*)(userMapBase + 16);
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
-
-    if (!arrayPtr || count <= 0 || count > 64) return nullptr;  // sanity check
-
-    // Linear scan for the matching handle (usually 1-2 entries)
-    // Each entry: 16 bytes = { uint32_t handle, uint32_t pad, uint64_t userPtr }
-    uintptr_t userPtr = 0;
-    __try {
-        for (int32_t i = 0; i < count; i++) {
-            uintptr_t entry = arrayPtr + (uintptr_t)i * 16;
-            uint32_t handle = *(uint32_t*)entry;
-            if (handle == globalHandle) {
-                userPtr = *(uintptr_t*)(entry + 8);
-                break;
-            }
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
-
+    uintptr_t userPtr = FindCurrentUser();
     if (!userPtr) return nullptr;
 
     // CCMInterface is embedded at CBaseUser+72 (0x48)
@@ -1159,6 +1298,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
                     g_steamId.store(sidField->varintVal);
                     LOG("[VtHook] Captured SteamID: %llu (accountId=%u)", g_steamId.load(), GetAccountId());
                     HttpServer::SetAccountId(GetAccountId());
+                    ScheduleStartupMetadataSync();
                 }
                 auto* sessField = PB::FindField(hdrFields, HDR_SESSIONID);
                 if (sessField) {
@@ -1319,7 +1459,7 @@ static void UploadStatsOnExit(uint32_t appId) {
     }
 
     bool ok = CloudStorage::StoreBlob(accountId, appId,
-        "UserGameStats.bin", data.data(), data.size());
+        kStatsMetadataPath, data.data(), data.size());
     LOG("[Stats] Uploaded stats for app %u (%zu bytes, ok=%d)", appId, data.size(), ok);
 }
 
@@ -1348,7 +1488,7 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
 
     // Read Steam's cumulative playtime from localconfig.vdf (if available).
     // Use Win32 API with shared access since Steam may have the file open.
-    uint64_t vdfLastPlayed = 0, vdfPlaytime = 0;
+    uint64_t vdfLastPlayed = 0, vdfPlaytime = 0, vdfPlaytime2wks = 0;
     {
         std::string vdfPath = g_steamPath + "userdata\\" + std::to_string(accountId)
             + "\\config\\localconfig.vdf";
@@ -1374,10 +1514,12 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
                         vdfLastPlayed = strtoull(std::string(fi.value).c_str(), nullptr, 10);
                     else if (fi.key == "Playtime")
                         vdfPlaytime = strtoull(std::string(fi.value).c_str(), nullptr, 10);
+                    else if (fi.key == "Playtime2wks")
+                        vdfPlaytime2wks = strtoull(std::string(fi.value).c_str(), nullptr, 10);
                     return true;
                 });
-            LOG("[Playtime] VDF for app %u: found=%d Playtime=%llu LastPlayed=%llu (read %lu bytes)",
-                appId, sectionFound, vdfPlaytime, vdfLastPlayed, (unsigned long)vdfContent.size());
+            LOG("[Playtime] VDF for app %u: found=%d Playtime=%llu Playtime2wks=%llu LastPlayed=%llu (read %lu bytes)",
+                appId, sectionFound, vdfPlaytime, vdfPlaytime2wks, vdfLastPlayed, (unsigned long)vdfContent.size());
         } else {
             LOG("[Playtime] Cannot open localconfig.vdf for app %u (err=%lu, path=%s)",
                 appId, GetLastError(), vdfPath.c_str());
@@ -1390,22 +1532,48 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
         vdfPlaytime = info.vdfBaseline;
         LOG("[Playtime] Using launch-time VDF baseline for app %u: %llu min", appId, vdfPlaytime);
     }
+    if (vdfPlaytime2wks == 0 && info.vdfBaseline2wks > 0) {
+        vdfPlaytime2wks = info.vdfBaseline2wks;
+        LOG("[Playtime] Using launch-time 2wks VDF baseline for app %u: %llu min", appId, vdfPlaytime2wks);
+    }
 
     uint64_t lastPlayed = (trackedLastPlayed > vdfLastPlayed) ? trackedLastPlayed : vdfLastPlayed;
 
     // Merge with existing cloud blob
-    uint64_t cloudLastPlayed = 0, cloudPlaytime = 0;
-    auto ptData = CloudStorage::RetrieveBlob(accountId, appId, "Playtime.bin");
+    uint64_t cloudLastPlayed = 0, cloudPlaytime = 0, cloudPlaytime2wks = 0;
+    auto ptData = CloudStorage::RetrieveBlob(accountId, appId, kPlaytimeMetadataPath);
     if (!ptData.empty()) {
         std::string blob(reinterpret_cast<const char*>(ptData.data()), ptData.size());
         auto parsed = Json::Parse(blob);
         if (parsed.type == Json::Type::Object) {
             if (parsed.has("LastPlayed"))
-                cloudLastPlayed = strtoull(parsed["LastPlayed"].strVal.c_str(), nullptr, 10);
+                cloudLastPlayed = (parsed["LastPlayed"].type == Json::Type::Number)
+                    ? (parsed["LastPlayed"].number() > 0 ? (uint64_t)parsed["LastPlayed"].number() : 0)
+                    : strtoull(parsed["LastPlayed"].str().c_str(), nullptr, 10);
             if (parsed.has("Playtime"))
-                cloudPlaytime = strtoull(parsed["Playtime"].strVal.c_str(), nullptr, 10);
+                cloudPlaytime = (parsed["Playtime"].type == Json::Type::Number)
+                    ? (parsed["Playtime"].number() > 0 ? (uint64_t)parsed["Playtime"].number() : 0)
+                    : strtoull(parsed["Playtime"].str().c_str(), nullptr, 10);
+            if (parsed.has("Playtime2wks"))
+                cloudPlaytime2wks = (parsed["Playtime2wks"].type == Json::Type::Number)
+                    ? (parsed["Playtime2wks"].number() > 0 ? (uint64_t)parsed["Playtime2wks"].number() : 0)
+                    : strtoull(parsed["Playtime2wks"].str().c_str(), nullptr, 10);
+        } else {
+            std::istringstream blobStream(blob);
+            std::string blobLine;
+            while (std::getline(blobStream, blobLine)) {
+                size_t tab = blobLine.find('\t');
+                if (tab == std::string::npos) continue;
+                std::string key = blobLine.substr(0, tab);
+                std::string val = blobLine.substr(tab + 1);
+                if (key == "LastPlayed") cloudLastPlayed = strtoull(val.c_str(), nullptr, 10);
+                else if (key == "Playtime") cloudPlaytime = strtoull(val.c_str(), nullptr, 10);
+                else if (key == "Playtime2wks") cloudPlaytime2wks = strtoull(val.c_str(), nullptr, 10);
+            }
         }
     }
+    if (cloudPlaytime2wks == 0 && cloudPlaytime > 0)
+        cloudPlaytime2wks = cloudPlaytime;
 
     // Playtime merge: baseline + session, but never less than VDF or cloud
     uint64_t mergedPlaytime = cloudPlaytime + trackedMinutes;
@@ -1413,9 +1581,14 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
         mergedPlaytime = vdfPlaytime;
     if (info.vdfBaseline + trackedMinutes > mergedPlaytime)
         mergedPlaytime = info.vdfBaseline + trackedMinutes;
+    uint64_t mergedPlaytime2wks = cloudPlaytime2wks + trackedMinutes;
+    if (vdfPlaytime2wks > mergedPlaytime2wks)
+        mergedPlaytime2wks = vdfPlaytime2wks;
+    if (info.vdfBaseline2wks + trackedMinutes > mergedPlaytime2wks)
+        mergedPlaytime2wks = info.vdfBaseline2wks + trackedMinutes;
     uint64_t mergedLastPlayed = (lastPlayed > cloudLastPlayed) ? lastPlayed : cloudLastPlayed;
 
-    if (mergedPlaytime == 0 && mergedLastPlayed == 0) {
+    if (mergedPlaytime == 0 && mergedPlaytime2wks == 0 && mergedLastPlayed == 0) {
         LOG("[Playtime] No playtime data for app %u (no tracking, no VDF, no cloud)", appId);
         return;
     }
@@ -1423,12 +1596,14 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
     Json::Value obj = Json::Object();
     obj.objVal["LastPlayed"] = Json::String(std::to_string(mergedLastPlayed));
     obj.objVal["Playtime"] = Json::String(std::to_string(mergedPlaytime));
+    obj.objVal["Playtime2wks"] = Json::String(std::to_string(mergedPlaytime2wks));
     std::string blobStr = Json::Stringify(obj);
 
     bool ok = CloudStorage::StoreBlob(accountId, appId,
-        "Playtime.bin", reinterpret_cast<const uint8_t*>(blobStr.data()), blobStr.size());
-    LOG("[Playtime] Uploaded playtime for app %u (session=%llu min, baseline=%llu min, vdf=%llu min, cloud=%llu min, total=%llu min, LastPlayed=%llu, ok=%d)",
-        appId, trackedMinutes, info.vdfBaseline, vdfPlaytime, cloudPlaytime, mergedPlaytime, mergedLastPlayed, ok);
+        kPlaytimeMetadataPath, reinterpret_cast<const uint8_t*>(blobStr.data()), blobStr.size());
+    LOG("[Playtime] Uploaded playtime for app %u (session=%llu min, baseline=%llu min, baseline2wks=%llu min, vdf=%llu min, vdf2wks=%llu min, cloud=%llu min, cloud2wks=%llu min, total=%llu min, 2wks=%llu min, LastPlayed=%llu, ok=%d)",
+        appId, trackedMinutes, info.vdfBaseline, info.vdfBaseline2wks, vdfPlaytime, vdfPlaytime2wks,
+        cloudPlaytime, cloudPlaytime2wks, mergedPlaytime, mergedPlaytime2wks, mergedLastPlayed, ok);
 }
 
 // Slot 8 hook — Notification wrapper (e.g. SignalAppExitSyncDone)
@@ -2727,6 +2902,7 @@ void Init(const std::string& steamPath) {
     }
 
     CloudStorage::Init(cloudRoot, std::move(provider));
+    g_startupMetadataScheduled.store(false);
 
     // Launch deferred lua sync thread (waits for accountId to be captured).
     if (g_syncLuas) {
@@ -2906,6 +3082,7 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
             g_steamId.store(sidField->varintVal);
             LOG("[NS] Captured SteamID: %llu (accountId=%u)", g_steamId.load(), GetAccountId());
             HttpServer::SetAccountId(GetAccountId());
+            ScheduleStartupMetadataSync();
         }
         auto* sessField = PB::FindField(pkt.header, HDR_SESSIONID);
         if (sessField) {
@@ -3094,6 +3271,7 @@ void Shutdown() {
 
     // Join lua sync thread before shutdown proceeds
     if (g_luaSyncThread.joinable()) g_luaSyncThread.join();
+    if (g_startupMetadataThread.joinable()) g_startupMetadataThread.join();
 
     // Join background threads (exit-sync uploads, MessageBox, etc.)
     {

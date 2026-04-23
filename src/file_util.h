@@ -5,6 +5,13 @@
 #include <fstream>
 #include <filesystem>
 #include <cstdint>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 namespace FileUtil {
 
@@ -31,7 +38,9 @@ inline bool AtomicWriteBinary(const std::string& path, const void* data, size_t 
     std::string tmpPath = path + ".tmp";
     std::ofstream f(tmpPath, std::ios::binary);
     if (!f) return false;
-    f.write(static_cast<const char*>(data), len);
+    if (len != 0) {
+        f.write(static_cast<const char*>(data), len);
+    }
     if (!f.good()) {
         f.close();
         std::error_code ec;
@@ -39,9 +48,8 @@ inline bool AtomicWriteBinary(const std::string& path, const void* data, size_t 
         return false;
     }
     f.close();
-    std::error_code ec;
-    std::filesystem::rename(tmpPath, path, ec);
-    if (ec) {
+    if (!MoveFileExA(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::error_code ec;
         std::filesystem::remove(tmpPath, ec);
         return false;
     }
@@ -60,9 +68,8 @@ inline bool AtomicWriteText(const std::string& path, const std::string& content)
         return false;
     }
     f.close();
-    std::error_code ec;
-    std::filesystem::rename(tmpPath, path, ec);
-    if (ec) {
+    if (!MoveFileExA(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::error_code ec;
         std::filesystem::remove(tmpPath, ec);
         return false;
     }

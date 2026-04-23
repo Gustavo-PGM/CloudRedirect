@@ -18,29 +18,101 @@
 
 namespace CloudIntercept {
 
+bool RestorePlaytimeState(uint32_t appId, uint64_t playtime, uint64_t playtime2wks);
+bool RestoreLastPlayedState(uint32_t appId, uint64_t lastPlayed);
+
+static void RestoreInMemoryPlaytimeMetadata(uint32_t appId, uint64_t lastPlayed,
+                                            uint64_t playtime, uint64_t playtime2wks) {
+    RestoreLastPlayedState(appId, lastPlayed);
+    RestorePlaytimeState(appId, playtime, playtime2wks);
+}
+
 
 // per-app upload batch tracking
 static std::atomic<uint64_t> g_nextBatchId{1};
+
+static uint64_t MakeAppAccountKey(uint32_t accountId, uint32_t appId) {
+    return (static_cast<uint64_t>(accountId) << 32) | appId;
+}
+
+static bool RequireAccountId(const char* op, uint32_t appId, uint32_t& accountId) {
+    constexpr ULONGLONG timeoutMs = 5000;
+    constexpr DWORD sleepMs = 10;
+
+    ULONGLONG deadline = GetTickCount64() + timeoutMs;
+    do {
+        accountId = GetAccountId();
+        if (accountId != 0) return true;
+        Sleep(sleepMs);
+    } while (GetTickCount64() < deadline);
+
+    LOG("[NS] %s app=%u timed out waiting for Steam account ID", op, appId);
+    return false;
+}
+
+static bool IsInternalMetadataFile(std::string_view cleanName) {
+    return cleanName == kPlaytimeMetadataPath || cleanName == kStatsMetadataPath;
+}
+
+static uint64_t ParsePlaytimeField(const Json::Value& value) {
+    if (value.type == Json::Type::Number) {
+        return value.number() > 0 ? static_cast<uint64_t>(value.number()) : 0;
+    }
+    if (value.type == Json::Type::String) {
+        return strtoull(value.str().c_str(), nullptr, 10);
+    }
+    return 0;
+}
+
+static void ParsePlaytimeBlob(const std::string& blob, uint64_t& lastPlayed,
+                              uint64_t& playtime, uint64_t& playtime2wks) {
+    auto parsed = Json::Parse(blob);
+    if (parsed.type == Json::Type::Object) {
+        if (parsed.has("LastPlayed"))
+            lastPlayed = ParsePlaytimeField(parsed["LastPlayed"]);
+        if (parsed.has("Playtime"))
+            playtime = ParsePlaytimeField(parsed["Playtime"]);
+        if (parsed.has("Playtime2wks"))
+            playtime2wks = ParsePlaytimeField(parsed["Playtime2wks"]);
+        if (playtime2wks == 0 && playtime > 0)
+            playtime2wks = playtime;
+        return;
+    }
+
+    std::istringstream blobStream(blob);
+    std::string blobLine;
+    while (std::getline(blobStream, blobLine)) {
+        size_t tab = blobLine.find('\t');
+        if (tab == std::string::npos) continue;
+        std::string key = blobLine.substr(0, tab);
+        std::string val = blobLine.substr(tab + 1);
+        if (key == "LastPlayed") lastPlayed = strtoull(val.c_str(), nullptr, 10);
+        else if (key == "Playtime") playtime = strtoull(val.c_str(), nullptr, 10);
+        else if (key == "Playtime2wks") playtime2wks = strtoull(val.c_str(), nullptr, 10);
+    }
+    if (playtime2wks == 0 && playtime > 0)
+        playtime2wks = playtime;
+}
 
 // per-app root tokens extracted from upload filenames (e.g., "%GameInstall%")
 // populated when HandleBeginBatch or HandleBeginFileUpload sees a %Token% prefix.
 // Used to know which tokens exist for an app; the changelist only presents each
 // file under the specific token it was uploaded with (tracked in g_fileTokens).
-static std::unordered_map<uint32_t, std::unordered_set<std::string>> g_appRootTokens;
+static std::unordered_map<uint64_t, std::unordered_set<std::string>> g_appRootTokens;
 static std::mutex g_rootTokenMutex;
 
 // per-app file-to-token mapping: which root token each file was uploaded under.
-// Key: appId -> { cleanName -> rootToken }
+// Key: (accountId, appId) -> { cleanName -> rootToken }
 // This prevents the changelist from duplicating files across ALL tokens, which
 // caused Steam's rootoverrides to see the cross-platform copy as stale and
 // issue spurious deletes (killing the only actual blob).
-static std::unordered_map<uint32_t, std::unordered_map<std::string, std::string>> g_fileTokens;
+static std::unordered_map<uint64_t, std::unordered_map<std::string, std::string>> g_fileTokens;
 static std::mutex g_fileTokensMutex;
 
 // Track which apps had file-token changes during the current batch.
 // PersistFileTokens is deferred to HandleCompleteBatch instead of being
 // called per-file, eliminating redundant file_tokens.dat cloud uploads.
-static std::unordered_set<uint32_t> g_fileTokensDirtyApps;
+static std::unordered_set<uint64_t> g_fileTokensDirtyApps;
 static std::mutex g_fileTokensDirtyMutex;
 
 
@@ -77,25 +149,25 @@ static std::string ExtractRootToken(const std::string& filename) {
 // Capture a root token for an app from a filename containing a %Token% prefix.
 // Tracked at two levels: g_appRootTokens (all tokens per app) and g_fileTokens
 // (per-file -> token mapping for changelist). Returns true if new token added.
-static bool TryCaptureRootToken(uint32_t appId, const std::string& token) {
+static bool TryCaptureRootToken(uint32_t accountId, uint32_t appId, const std::string& token) {
     if (token.empty()) return false;
 
     bool isNew = false;
     std::unordered_set<std::string> tokensCopy;
+    uint64_t key = MakeAppAccountKey(accountId, appId);
     {
         std::lock_guard<std::mutex> lock(g_rootTokenMutex);
-        auto& tokenSet = g_appRootTokens[appId];
+        auto& tokenSet = g_appRootTokens[key];
         auto result = tokenSet.insert(token);
         isNew = result.second;
         if (isNew) {
-            LOG("[NS-TOK] Captured root token for app %u: %s (now %zu tokens)",
-                appId, token.c_str(), tokenSet.size());
+            LOG("[NS-TOK] Captured root token for account %u app %u: %s (now %zu tokens)",
+                accountId, appId, token.c_str(), tokenSet.size());
             tokensCopy = tokenSet;  // copy under lock
         }
     }
     // Perform disk I/O + cloud upload outside the lock
     if (isNew) {
-        uint32_t accountId = GetAccountId();
         CloudStorage::SaveRootTokens(accountId, appId, tokensCopy);
     }
     return isNew;
@@ -103,17 +175,18 @@ static bool TryCaptureRootToken(uint32_t appId, const std::string& token) {
 
 // Record which root token a file was uploaded under.
 // Called from HandleCommitFileUpload after successful commit.
-static void RecordFileToken(uint32_t appId, const std::string& cleanName, const std::string& token) {
+static void RecordFileToken(uint32_t accountId, uint32_t appId, const std::string& cleanName, const std::string& token) {
     if (token.empty() || cleanName.empty()) return;
     std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-    g_fileTokens[appId][cleanName] = token;
-    LOG("[NS-FT] Recorded file token: app=%u file=%s token=%s", appId, cleanName.c_str(), token.c_str());
+    g_fileTokens[MakeAppAccountKey(accountId, appId)][cleanName] = token;
+    LOG("[NS-FT] Recorded file token: account=%u app=%u file=%s token=%s",
+        accountId, appId, cleanName.c_str(), token.c_str());
 }
 
 // Get the root token a file was uploaded under (empty if unknown).
-static std::string GetFileToken(uint32_t appId, const std::string& cleanName) {
+static std::string GetFileToken(uint32_t accountId, uint32_t appId, const std::string& cleanName) {
     std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-    auto appIt = g_fileTokens.find(appId);
+    auto appIt = g_fileTokens.find(MakeAppAccountKey(accountId, appId));
     if (appIt == g_fileTokens.end()) return "";
     auto fileIt = appIt->second.find(cleanName);
     if (fileIt == appIt->second.end()) return "";
@@ -121,22 +194,21 @@ static std::string GetFileToken(uint32_t appId, const std::string& cleanName) {
 }
 
 // Remove a file's token mapping (called on delete).
-static void RemoveFileToken(uint32_t appId, const std::string& cleanName) {
+static void RemoveFileToken(uint32_t accountId, uint32_t appId, const std::string& cleanName) {
     std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-    auto appIt = g_fileTokens.find(appId);
+    auto appIt = g_fileTokens.find(MakeAppAccountKey(accountId, appId));
     if (appIt != g_fileTokens.end()) {
         appIt->second.erase(cleanName);
-        LOG("[NS-FT] Removed file token: app=%u file=%s", appId, cleanName.c_str());
+        LOG("[NS-FT] Removed file token: account=%u app=%u file=%s", accountId, appId, cleanName.c_str());
     }
 }
 
 // Save in-memory file token map to disk and cloud for a given app.
-static void PersistFileTokens(uint32_t appId) {
-    uint32_t accountId = GetAccountId();
+static void PersistFileTokens(uint32_t accountId, uint32_t appId) {
     std::unordered_map<std::string, std::string> snapshot;
     {
         std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-        auto it = g_fileTokens.find(appId);
+        auto it = g_fileTokens.find(MakeAppAccountKey(accountId, appId));
         if (it != g_fileTokens.end()) snapshot = it->second;
     }
     CloudStorage::SaveFileTokens(accountId, appId, snapshot);
@@ -145,9 +217,294 @@ static void PersistFileTokens(uint32_t appId) {
 // Mark an app's file tokens as needing persistence.
 // Actual persist is deferred to HandleCompleteBatch to avoid
 // redundant file_tokens.dat cloud uploads (one per file).
-static void MarkFileTokensDirty(uint32_t appId) {
+static void MarkFileTokensDirty(uint32_t accountId, uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_fileTokensDirtyMutex);
-    g_fileTokensDirtyApps.insert(appId);
+    g_fileTokensDirtyApps.insert(MakeAppAccountKey(accountId, appId));
+}
+
+static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId) {
+    uint64_t key = MakeAppAccountKey(accountId, appId);
+    {
+        std::lock_guard<std::mutex> lock(g_rootTokenMutex);
+        g_appRootTokens.erase(key);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_fileTokensMutex);
+        g_fileTokens.erase(key);
+    }
+}
+
+static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
+                           const std::vector<uint8_t>& cloudData);
+
+static bool FindVdfSectionRange(const std::string& vdfContent,
+                                const char* const* sections,
+                                size_t sectionCount,
+                                size_t& sectionStart,
+                                size_t& sectionEnd) {
+    size_t searchPos = 0;
+    for (size_t i = 0; i < sectionCount; ++i) {
+        const std::string needle = std::string("\"") + sections[i] + "\"";
+        size_t namePos = vdfContent.find(needle, searchPos);
+        if (namePos == std::string::npos) return false;
+
+        size_t openBrace = vdfContent.find('{', namePos + needle.size());
+        if (openBrace == std::string::npos) return false;
+
+        searchPos = openBrace + 1;
+        if (i + 1 == sectionCount) {
+            sectionStart = openBrace + 1;
+            int depth = 1;
+            for (size_t p = openBrace + 1; p < vdfContent.size(); ++p) {
+                if (vdfContent[p] == '{') ++depth;
+                else if (vdfContent[p] == '}') {
+                    --depth;
+                    if (depth == 0) {
+                        sectionEnd = p;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+static bool InsertPlaytimeFieldInSection(std::string& vdfContent,
+                                         const char* const* sections,
+                                         size_t sectionCount,
+                                         std::string_view fieldName,
+                                         const std::string& value) {
+    size_t sectionStart = 0;
+    size_t sectionEnd = 0;
+    if (!FindVdfSectionRange(vdfContent, sections, sectionCount, sectionStart, sectionEnd)) {
+        return false;
+    }
+
+    std::string indent = "\t";
+    size_t lineStart = vdfContent.rfind('\n', sectionEnd);
+    if (lineStart != std::string::npos) {
+        ++lineStart;
+        size_t indentEnd = lineStart;
+        while (indentEnd < vdfContent.size() && (vdfContent[indentEnd] == '\t' || vdfContent[indentEnd] == ' ')) {
+            ++indentEnd;
+        }
+        indent.assign(vdfContent.data() + lineStart, indentEnd - lineStart);
+        indent.push_back('\t');
+    }
+
+    std::string insertion = indent + "\"" + std::string(fieldName) + "\"\t\t\"" + value + "\"\n";
+    vdfContent.insert(sectionEnd, insertion);
+    return true;
+}
+
+static bool EnsureVdfSectionPath(std::string& vdfContent,
+                                 const char* const* sections,
+                                 size_t sectionCount) {
+    if (sectionCount == 0) return true;
+
+    size_t sectionStart = 0;
+    size_t sectionEnd = 0;
+    if (FindVdfSectionRange(vdfContent, sections, sectionCount, sectionStart, sectionEnd)) {
+        return true;
+    }
+
+    if (sectionCount == 1) {
+        if (!vdfContent.empty() && vdfContent.back() != '\n') vdfContent.push_back('\n');
+        vdfContent += "\"" + std::string(sections[0]) + "\"\n{\n}\n";
+        return true;
+    }
+
+    if (!EnsureVdfSectionPath(vdfContent, sections, sectionCount - 1)) {
+        return false;
+    }
+
+    size_t parentStart = 0;
+    size_t parentEnd = 0;
+    if (!FindVdfSectionRange(vdfContent, sections, sectionCount - 1, parentStart, parentEnd)) {
+        return false;
+    }
+
+    std::string parentIndent = "\t";
+    size_t lineStart = vdfContent.rfind('\n', parentEnd);
+    if (lineStart != std::string::npos) {
+        ++lineStart;
+        size_t indentEnd = lineStart;
+        while (indentEnd < vdfContent.size() && (vdfContent[indentEnd] == '\t' || vdfContent[indentEnd] == ' ')) {
+            ++indentEnd;
+        }
+        parentIndent.assign(vdfContent.data() + lineStart, indentEnd - lineStart);
+    }
+
+    const std::string childIndent = parentIndent + "\t";
+    std::string insertion;
+    insertion += childIndent + "\"" + std::string(sections[sectionCount - 1]) + "\"\n";
+    insertion += childIndent + "{\n";
+    insertion += childIndent + "}\n";
+    vdfContent.insert(parentEnd, insertion);
+    return true;
+}
+
+static bool InsertPlaytimeAppSection(std::string& vdfContent,
+                                     const char* const* sections,
+                                     size_t sectionCount,
+                                     const std::string& lastPlayed,
+                                     const std::string& playtime,
+                                     const std::string& playtime2wks) {
+    if (!EnsureVdfSectionPath(vdfContent, sections, sectionCount)) {
+        return false;
+    }
+
+    if (!InsertPlaytimeFieldInSection(vdfContent, sections, sectionCount, "LastPlayed", lastPlayed)) {
+        return false;
+    }
+    if (!InsertPlaytimeFieldInSection(vdfContent, sections, sectionCount, "Playtime", playtime)) {
+        return false;
+    }
+    if (!InsertPlaytimeFieldInSection(vdfContent, sections, sectionCount, "Playtime2wks", playtime2wks)) {
+        return false;
+    }
+    return true;
+}
+
+static bool WriteLocalConfigWithRetry(const std::string& vdfPath, const std::string& vdfContent) {
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        if (FileUtil::AtomicWriteText(vdfPath, vdfContent)) {
+            return true;
+        }
+        Sleep(200);
+    }
+    return false;
+}
+
+static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const std::vector<uint8_t>& ptData) {
+    if (ptData.empty()) return;
+
+    std::string blob(reinterpret_cast<const char*>(ptData.data()), ptData.size());
+    uint64_t cloudLastPlayed = 0, cloudPlaytime = 0, cloudPlaytime2wks = 0;
+    ParsePlaytimeBlob(blob, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
+
+    if (cloudLastPlayed == 0 && cloudPlaytime == 0 && cloudPlaytime2wks == 0) {
+        LOG("[Playtime] Cloud blob empty/invalid for app %u, skipping merge", appId);
+        return;
+    }
+
+    std::string vdfPath = GetSteamPath() + "userdata\\" + std::to_string(accountId)
+        + "\\config\\localconfig.vdf";
+    std::ifstream vdfIn(vdfPath);
+    if (!vdfIn.is_open()) {
+        LOG("[Playtime] Cannot open localconfig.vdf for reading (app %u)", appId);
+        return;
+    }
+
+    std::string vdfContent((std::istreambuf_iterator<char>(vdfIn)), {});
+    vdfIn.close();
+
+    std::string appIdStr = std::to_string(appId);
+    const char* sections[] = { "UserLocalConfigStore", "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
+    uint64_t localLastPlayed = 0, localPlaytime = 0, localPlaytime2wks = 0;
+
+    struct FieldLoc { size_t valStart; size_t valEnd; };
+    FieldLoc lpLoc = {0, 0}, ptLoc = {0, 0}, pt2Loc = {0, 0};
+
+    bool found = VdfUtil::ForEachFieldInSection(vdfContent, sections, 6,
+        [&](const VdfUtil::FieldInfo& fi) {
+            if (fi.key == "LastPlayed") {
+                localLastPlayed = strtoull(std::string(fi.value).c_str(), nullptr, 10);
+                lpLoc = { fi.valStart, fi.valEnd };
+            } else if (fi.key == "Playtime") {
+                localPlaytime = strtoull(std::string(fi.value).c_str(), nullptr, 10);
+                ptLoc = { fi.valStart, fi.valEnd };
+            } else if (fi.key == "Playtime2wks") {
+                localPlaytime2wks = strtoull(std::string(fi.value).c_str(), nullptr, 10);
+                pt2Loc = { fi.valStart, fi.valEnd };
+            }
+            return true;
+        });
+
+    if (!found) {
+        std::string newLP = std::to_string(cloudLastPlayed);
+        std::string newPT = std::to_string(cloudPlaytime);
+        std::string newPT2 = std::to_string(cloudPlaytime2wks);
+        if (!InsertPlaytimeAppSection(vdfContent, sections, 6, newLP, newPT, newPT2)) {
+            LOG("[Playtime] App %u section not found in localconfig.vdf, skipping merge", appId);
+            return;
+        }
+
+        if (WriteLocalConfigWithRetry(vdfPath, vdfContent)) {
+            RestoreInMemoryPlaytimeMetadata(appId, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
+            LOG("[Playtime] Created playtime section for app %u: LastPlayed 0->%llu, Playtime 0->%llu, Playtime2wks 0->%llu",
+                appId, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
+        } else {
+            LOG("[Playtime] Failed to write localconfig.vdf for app %u", appId);
+        }
+        return;
+    }
+
+    uint64_t mergedLP = (cloudLastPlayed > localLastPlayed) ? cloudLastPlayed : localLastPlayed;
+    uint64_t mergedPT = (cloudPlaytime > localPlaytime) ? cloudPlaytime : localPlaytime;
+    uint64_t mergedPT2 = (cloudPlaytime2wks > localPlaytime2wks) ? cloudPlaytime2wks : localPlaytime2wks;
+    if (mergedLP == localLastPlayed && mergedPT == localPlaytime && mergedPT2 == localPlaytime2wks) {
+        RestoreInMemoryPlaytimeMetadata(appId, mergedLP, mergedPT, mergedPT2);
+        LOG("[Playtime] Local playtime already up-to-date for app %u", appId);
+        return;
+    }
+
+    std::string newLP = std::to_string(mergedLP);
+    std::string newPT = std::to_string(mergedPT);
+    std::string newPT2 = std::to_string(mergedPT2);
+    bool lpValid = lpLoc.valEnd > lpLoc.valStart;
+    bool ptValid = ptLoc.valEnd > ptLoc.valStart;
+    bool pt2Valid = pt2Loc.valEnd > pt2Loc.valStart;
+
+    struct Replacement { size_t start; size_t len; std::string text; };
+    std::vector<Replacement> reps;
+    if (lpValid) reps.push_back({lpLoc.valStart, lpLoc.valEnd - lpLoc.valStart, newLP});
+    if (ptValid) reps.push_back({ptLoc.valStart, ptLoc.valEnd - ptLoc.valStart, newPT});
+    if (pt2Valid) reps.push_back({pt2Loc.valStart, pt2Loc.valEnd - pt2Loc.valStart, newPT2});
+
+    if (!reps.empty()) {
+        std::sort(reps.begin(), reps.end(),
+            [](const Replacement& a, const Replacement& b) { return a.start > b.start; });
+        for (auto& r : reps)
+            vdfContent.replace(r.start, r.len, r.text);
+    }
+
+    bool inserted = false;
+    if (!lpValid) {
+        inserted = InsertPlaytimeFieldInSection(vdfContent, sections, 6, "LastPlayed", newLP) || inserted;
+    }
+    if (!ptValid) {
+        inserted = InsertPlaytimeFieldInSection(vdfContent, sections, 6, "Playtime", newPT) || inserted;
+    }
+    if (!pt2Valid) {
+        inserted = InsertPlaytimeFieldInSection(vdfContent, sections, 6, "Playtime2wks", newPT2) || inserted;
+    }
+    if (!lpValid && !ptValid && !pt2Valid && !inserted) {
+        LOG("[Playtime] App %u section has no playtime fields, skipping write", appId);
+        return;
+    }
+
+    if (WriteLocalConfigWithRetry(vdfPath, vdfContent)) {
+        RestoreInMemoryPlaytimeMetadata(appId, mergedLP, mergedPT, mergedPT2);
+        LOG("[Playtime] Merged playtime for app %u: LastPlayed %llu->%llu, Playtime %llu->%llu, Playtime2wks %llu->%llu",
+            appId, localLastPlayed, mergedLP, localPlaytime, mergedPT, localPlaytime2wks, mergedPT2);
+    } else {
+        LOG("[Playtime] Failed to write localconfig.vdf for app %u", appId);
+    }
+}
+
+void RestoreAppMetadata(uint32_t accountId, uint32_t appId) {
+    InvalidateTokenCaches(accountId, appId);
+
+    auto statsData = CloudStorage::RetrieveBlob(accountId, appId, kStatsMetadataPath);
+    if (!statsData.empty()) {
+        MergeStatsFile(appId, accountId, statsData);
+    }
+
+    auto ptData = CloudStorage::RetrieveBlob(accountId, appId, kPlaytimeMetadataPath);
+    RestorePlaytimeMetadata(accountId, appId, ptData);
 }
 
 
@@ -174,11 +531,25 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     auto* cnField = PB::FindField(reqBody, 2);
     uint64_t clientChangeNumber = cnField ? cnField->varintVal : 0;
 
-    uint32_t accountId = GetAccountId();
+    uint32_t accountId = 0;
+    if (!RequireAccountId("GetAppFileChangelist", appId, accountId)) {
+        PB::Writer body;
+        body.WriteVarint(1, 0);
+        body.WriteVarint(3, 0);
+        body.WriteString(5, GetMachineName());
+        body.WriteVarint(6, 0);
+        return body;
+    }
+    uint64_t appKey = MakeAppAccountKey(accountId, appId);
     // Filenames from GetFileList are generated by filesystem::relative() against a controlled
     // app root directory, so they cannot contain path traversal sequences (e.g. "../").
     auto files = LocalStorage::GetFileList(accountId, appId);
     uint64_t serverChangeNumber = LocalStorage::GetChangeNumber(accountId, appId);
+
+    files.erase(std::remove_if(files.begin(), files.end(),
+        [](const LocalStorage::FileEntry& fe) {
+            return IsInternalMetadataFile(fe.filename);
+        }), files.end());
 
     LOG("[NS-CL] GetAppFileChangelist app=%u clientCN=%llu serverCN=%llu files=%zu",
         appId, clientChangeNumber, serverChangeNumber, files.size());
@@ -192,7 +563,7 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     std::unordered_set<std::string> rootTokens;
     {
         std::lock_guard<std::mutex> lock(g_rootTokenMutex);
-        auto it = g_appRootTokens.find(appId);
+        auto it = g_appRootTokens.find(appKey);
         if (it != g_appRootTokens.end()) {
             rootTokens = it->second;
         }
@@ -202,7 +573,7 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
         rootTokens = CloudStorage::LoadRootTokens(accountId, appId);
         if (!rootTokens.empty()) {
             std::lock_guard<std::mutex> lock(g_rootTokenMutex);
-            g_appRootTokens[appId] = rootTokens;
+            g_appRootTokens[appKey] = rootTokens;
         }
     }
     // If still empty, use empty string (no root token prefix -- legacy behavior)
@@ -220,15 +591,15 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     std::unordered_map<std::string, std::string> fileTokenSnapshot;
     {
         std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-        if (g_fileTokens.find(appId) == g_fileTokens.end()) {
+        if (g_fileTokens.find(appKey) == g_fileTokens.end()) {
             auto loaded = CloudStorage::LoadFileTokens(accountId, appId);
             if (!loaded.empty()) {
-                g_fileTokens[appId] = std::move(loaded);
-                LOG("[NS-CL] Loaded %zu file-token mappings for app %u",
-                    g_fileTokens[appId].size(), appId);
+                g_fileTokens[appKey] = std::move(loaded);
+                LOG("[NS-CL] Loaded %zu file-token mappings for account %u app %u",
+                    g_fileTokens[appKey].size(), accountId, appId);
             }
         }
-        auto it = g_fileTokens.find(appId);
+        auto it = g_fileTokens.find(appKey);
         if (it != g_fileTokens.end()) {
             fileTokenSnapshot = it->second;
         }
@@ -654,125 +1025,17 @@ PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqB
     RecordLaunchTime(appId);
     // Pull latest data from cloud provider (if active) before game starts.
     // This downloads CN, root tokens, metadata, and any missing blobs.
-    uint32_t accountId = GetAccountId();
+    uint32_t accountId = 0;
+    if (!RequireAccountId("SignalAppLaunchIntent", appId, accountId)) {
+        PB::Writer body;
+        return body;
+    }
     if (CloudStorage::IsCloudActive()) {
         LOG("[NS] Syncing app %u from cloud (%s) before launch...",
             appId, CloudStorage::ProviderName());
         bool hadNewer = CloudStorage::SyncFromCloud(accountId, appId);
         LOG("[NS] Cloud sync complete for app %u (hadNewer=%d)", appId, hadNewer);
-
-        // Merge achievement/stats data from cloud with local
-        if (SyncAchievementsEnabled()) {
-            auto statsData = CloudStorage::RetrieveBlob(accountId, appId, "UserGameStats.bin");
-            if (!statsData.empty()) {
-                MergeStatsFile(appId, accountId, statsData);
-            }
-        }
-
-        // Restore playtime from cloud
-        if (SyncPlaytimeEnabled()) {
-            auto ptData = CloudStorage::RetrieveBlob(accountId, appId, "Playtime.bin");
-            if (!ptData.empty()) {
-                // Parse the blob: tab-separated key/value pairs, one per line
-                std::string blob(reinterpret_cast<const char*>(ptData.data()), ptData.size());
-                uint64_t cloudLastPlayed = 0, cloudPlaytime = 0;
-
-                // Try JSON format first, fall back to legacy tab-separated
-                auto parsed = Json::Parse(blob);
-                if (parsed.type == Json::Type::Object) {
-                    if (parsed.has("LastPlayed"))
-                        cloudLastPlayed = strtoull(parsed["LastPlayed"].strVal.c_str(), nullptr, 10);
-                    if (parsed.has("Playtime"))
-                        cloudPlaytime = strtoull(parsed["Playtime"].strVal.c_str(), nullptr, 10);
-                } else {
-                    std::istringstream blobStream(blob);
-                    std::string blobLine;
-                    while (std::getline(blobStream, blobLine)) {
-                        size_t tab = blobLine.find('\t');
-                        if (tab == std::string::npos) continue;
-                        std::string key = blobLine.substr(0, tab);
-                        std::string val = blobLine.substr(tab + 1);
-                        if (key == "LastPlayed") cloudLastPlayed = strtoull(val.c_str(), nullptr, 10);
-                        else if (key == "Playtime") cloudPlaytime = strtoull(val.c_str(), nullptr, 10);
-                    }
-                }
-
-                if (cloudLastPlayed == 0 && cloudPlaytime == 0) {
-                    LOG("[Playtime] Cloud blob empty/invalid for app %u, skipping merge", appId);
-                } else {
-                    // Read localconfig.vdf and merge playtime (take max)
-                    std::string vdfPath = GetSteamPath() + "userdata\\" + std::to_string(accountId)
-                        + "\\config\\localconfig.vdf";
-
-                    std::ifstream vdfIn(vdfPath);
-                    if (vdfIn.is_open()) {
-                        std::string vdfContent((std::istreambuf_iterator<char>(vdfIn)), {});
-                        vdfIn.close();
-
-                        // Find the app section and read current values
-                        std::string appIdStr = std::to_string(appId);
-                        const char* sections[] = { "UserLocalConfigStore", "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
-                        uint64_t localLastPlayed = 0, localPlaytime = 0;
-
-                        struct FieldLoc { size_t valStart; size_t valEnd; };
-                        FieldLoc lpLoc = {0, 0}, ptLoc = {0, 0};
-
-                        bool found = VdfUtil::ForEachFieldInSection(vdfContent, sections, 6,
-                            [&](const VdfUtil::FieldInfo& fi) {
-                                if (fi.key == "LastPlayed") {
-                                    localLastPlayed = strtoull(std::string(fi.value).c_str(), nullptr, 10);
-                                    lpLoc = { fi.valStart, fi.valEnd };
-                                } else if (fi.key == "Playtime") {
-                                    localPlaytime = strtoull(std::string(fi.value).c_str(), nullptr, 10);
-                                    ptLoc = { fi.valStart, fi.valEnd };
-                                }
-                                return true;
-                            });
-
-                        if (!found) {
-                            LOG("[Playtime] App %u section not found in localconfig.vdf, skipping merge", appId);
-                        } else {
-                            uint64_t mergedLP = (cloudLastPlayed > localLastPlayed) ? cloudLastPlayed : localLastPlayed;
-                            uint64_t mergedPT = (cloudPlaytime > localPlaytime) ? cloudPlaytime : localPlaytime;
-
-                            bool needWrite = (mergedLP != localLastPlayed || mergedPT != localPlaytime);
-                            if (needWrite) {
-                                std::string newLP = std::to_string(mergedLP);
-                                std::string newPT = std::to_string(mergedPT);
-                                bool lpValid = lpLoc.valEnd > lpLoc.valStart;
-                                bool ptValid = ptLoc.valEnd > ptLoc.valStart;
-
-                                struct Replacement { size_t start; size_t len; std::string text; };
-                                std::vector<Replacement> reps;
-                                if (lpValid) reps.push_back({lpLoc.valStart, lpLoc.valEnd - lpLoc.valStart, newLP});
-                                if (ptValid) reps.push_back({ptLoc.valStart, ptLoc.valEnd - ptLoc.valStart, newPT});
-
-                                if (reps.empty()) {
-                                    LOG("[Playtime] App %u section has no LastPlayed/Playtime fields, skipping write", appId);
-                                } else {
-                                    // Apply in reverse offset order so earlier offsets stay valid
-                                    std::sort(reps.begin(), reps.end(),
-                                        [](const Replacement& a, const Replacement& b) { return a.start > b.start; });
-                                    for (auto& r : reps)
-                                        vdfContent.replace(r.start, r.len, r.text);
-                                }
-
-                                if (FileUtil::AtomicWriteText(vdfPath, vdfContent)) {
-                                    LOG("[Playtime] Merged playtime for app %u: LastPlayed %llu->%llu, Playtime %llu->%llu",
-                                        appId, localLastPlayed, mergedLP, localPlaytime, mergedPT);
-                                } else {
-                                    LOG("[Playtime] Failed to write localconfig.vdf for app %u", appId);
-                                }
-                            } else {
-                                LOG("[Playtime] Local playtime already up-to-date for app %u", appId);
-                            }
-                        }
-                    } else {
-                        LOG("[Playtime] Cannot open localconfig.vdf for reading (app %u)", appId);
-                    }
-                }
-            }
-        }
+        RestoreAppMetadata(accountId, appId);
     }
 
     PB::Writer body; // empty = no pending remote operations
@@ -781,8 +1044,20 @@ PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqB
 
 // ClientGetAppQuotaUsage
 PB::Writer HandleQuotaUsage(uint32_t appId, const std::vector<PB::Field>& reqBody) {
-    uint32_t accountId = GetAccountId();
+    uint32_t accountId = 0;
+    if (!RequireAccountId("ClientGetAppQuotaUsage", appId, accountId)) {
+        PB::Writer body;
+        body.WriteVarint(1, 0);
+        body.WriteVarint(2, 0);
+        body.WriteVarint(3, 10000);
+        body.WriteVarint(4, 1073741824ULL);
+        return body;
+    }
     auto files = LocalStorage::GetFileList(accountId, appId);
+    files.erase(std::remove_if(files.begin(), files.end(),
+        [](const LocalStorage::FileEntry& fe) {
+            return IsInternalMetadataFile(fe.filename);
+        }), files.end());
     uint64_t totalBytes = 0;
     for (auto& f : files) totalBytes += f.rawSize;
 
@@ -799,7 +1074,13 @@ PB::Writer HandleQuotaUsage(uint32_t appId, const std::vector<PB::Field>& reqBod
 // BeginAppUploadBatch
 PB::Writer HandleBeginBatch(uint32_t appId, const std::vector<PB::Field>& reqBody) {
     uint64_t batchId = g_nextBatchId.fetch_add(1);
-    uint32_t accountId = GetAccountId();
+    uint32_t accountId = 0;
+    if (!RequireAccountId("BeginAppUploadBatch", appId, accountId)) {
+        PB::Writer body;
+        body.WriteVarint(1, batchId);
+        body.WriteVarint(4, 0);
+        return body;
+    }
     uint64_t changeNumber = LocalStorage::GetChangeNumber(accountId, appId);
 
     // log files to upload/delete and capture root tokens from filenames
@@ -808,13 +1089,13 @@ PB::Writer HandleBeginBatch(uint32_t appId, const std::vector<PB::Field>& reqBod
         if (f.fieldNum == 3 && f.wireType == PB::LengthDelimited) {
             std::string name(reinterpret_cast<const char*>(f.data), f.dataLen);
             LOG("[NS-BATCH]   upload: %s", name.c_str());
-            TryCaptureRootToken(appId, ExtractRootToken(name));
+            TryCaptureRootToken(accountId, appId, ExtractRootToken(name));
             ++uploadCount;
         }
         if (f.fieldNum == 4 && f.wireType == PB::LengthDelimited) {
             std::string name(reinterpret_cast<const char*>(f.data), f.dataLen);
             LOG("[NS-BATCH]   delete: %s", name.c_str());
-            TryCaptureRootToken(appId, ExtractRootToken(name));
+            TryCaptureRootToken(accountId, appId, ExtractRootToken(name));
             ++deleteCount;
         }
     }
@@ -848,15 +1129,20 @@ PB::Writer HandleBeginFileUpload(uint32_t appId, const std::vector<PB::Field>& r
     }
 
     uint16_t port = HttpServer::GetPort();
+    uint32_t accountId = 0;
+    if (!RequireAccountId("ClientBeginFileUpload", appId, accountId)) {
+        return PB::Writer();
+    }
     std::string urlHost = "127.0.0.1:" + std::to_string(port);
     std::string rootToken = ExtractRootToken(filename);
     std::string cleanName = StripRootToken(filename);
-    std::string urlPath = "/upload/" + std::to_string(appId) + "/" + HttpUtil::UrlEncode(cleanName, true);
+    std::string urlPath = "/upload/" + std::to_string(accountId) + "/" + std::to_string(appId)
+        + "/" + HttpUtil::UrlEncode(cleanName, true);
 
     // Remember the root token for this app (used for default fallback in changelist).
     // The per-file token mapping (g_fileTokens) is set in HandleCommitFileUpload
     // after the upload succeeds.
-    TryCaptureRootToken(appId, rootToken);
+    TryCaptureRootToken(accountId, appId, rootToken);
 
     LOG("[NS-UP] BeginFileUpload app=%u file=%s (clean=%s) size=%llu rawSize=%llu -> %s%s",
         appId, filename.c_str(), cleanName.c_str(), fileSize, rawFileSize, urlHost.c_str(), urlPath.c_str());
@@ -919,11 +1205,16 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
 
     std::string cleanName = StripRootToken(filename);
     bool committed = false;
+    uint32_t accountId = 0;
+    if (!RequireAccountId("ClientCommitFileUpload", appId, accountId)) {
+        PB::Writer body;
+        body.WriteVarint(1, 0);
+        return body;
+    }
     if (transferSucceeded) {
         // the file was PUT to HttpServer's blob store already -- verify it exists
-        if (HttpServer::HasBlob(appId, cleanName)) {
+        if (HttpServer::HasBlob(accountId, appId, cleanName)) {
             committed = true;
-            uint32_t accountId = GetAccountId();
 
             // Read blob for cloud upload. No SHA re-verification: Steam sent the
             // data over localhost TCP and told us the transfer succeeded. Re-reading
@@ -932,17 +1223,19 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
             // The real Steam server also doesn't re-verify SHA at commit time; it
             // trusts the uploaded data. Removing this check fixes spurious commit
             // rejections for volatile files (e.g. Player.log).
-            auto blobData = HttpServer::ReadBlob(appId, cleanName);
+            auto blobData = HttpServer::ReadBlob(accountId, appId, cleanName);
             LOG("[NS-UP]   committed: %s (%zu bytes)", cleanName.c_str(), blobData.size());
 
-            if (!blobData.empty()) {
+            {
                 // CloudStorage::StoreBlob writes to the local cache (same dir as
-                // LocalStorage) and increments the change number so Steam sees
-                // serverCN > clientCN on next restart and processes the file list.
-
-                // Push blob to cloud provider (async -- enqueues upload if provider active)
-                CloudStorage::StoreBlob(accountId, appId, cleanName,
-                    blobData.data(), blobData.size());
+                // LocalStorage) and enqueues a cloud upload. Empty files are valid
+                // and must be preserved as zero-byte blobs.
+                const uint8_t* blobPtr = blobData.empty() ? nullptr : blobData.data();
+                if (!CloudStorage::StoreBlob(accountId, appId, cleanName,
+                        blobPtr, blobData.size())) {
+                    LOG("[NS-UP]   ERROR: failed to store blob for %s", cleanName.c_str());
+                    committed = false;
+                }
             }
 
             // Record which root token this file was uploaded under.
@@ -950,8 +1243,8 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
             // preventing Steam's rootoverrides from seeing cross-platform
             // duplicates and issuing spurious deletes.
             std::string rootToken = ExtractRootToken(filename);
-            RecordFileToken(appId, cleanName, rootToken);
-            MarkFileTokensDirty(appId);
+            RecordFileToken(accountId, appId, cleanName, rootToken);
+            MarkFileTokensDirty(accountId, appId);
         } else {
             LOG("[NS-UP]   WARNING: blob not found after PUT for %s (clean=%s)", filename.c_str(), cleanName.c_str());
         }
@@ -966,23 +1259,36 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
 
 // CompleteAppUploadBatchBlocking
 PB::Writer HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqBody) {
-    LOG("[NS] CompleteBatch app=%u", appId);
-
     // Persist file tokens once per batch (deferred from per-file commits/deletes).
     // This replaces N redundant file_tokens.dat cloud uploads with a single one.
     {
-        std::unordered_set<uint32_t> dirtyApps;
+        std::unordered_set<uint64_t> dirtyApps;
         {
             std::lock_guard<std::mutex> lock(g_fileTokensDirtyMutex);
             dirtyApps.swap(g_fileTokensDirtyApps);
         }
-        for (uint32_t dirty : dirtyApps) {
-            PersistFileTokens(dirty);
+        for (uint64_t dirty : dirtyApps) {
+            uint32_t dirtyAccountId = static_cast<uint32_t>(dirty >> 32);
+            uint32_t dirtyAppId = static_cast<uint32_t>(dirty & 0xFFFFFFFFu);
+            PersistFileTokens(dirtyAccountId, dirtyAppId);
         }
     }
 
+    // Increment CN once per batch (not per file) to match real Steam behavior.
+    // This prevents the CN from climbing rapidly and causing conflict dialogs
+    // when Steam restarts with clientCN=0.
+    uint32_t accountId = 0;
+    if (!RequireAccountId("CompleteAppUploadBatchBlocking", appId, accountId)) {
+        return PB::Writer();
+    }
+    uint64_t newCN = LocalStorage::IncrementChangeNumber(accountId, appId);
+    LOG("[NS] CompleteBatch app=%u CN=%llu", appId, newCN);
+
+    // Push updated CN to cloud provider
+    CloudStorage::PushCNToCloud(accountId, appId, newCN);
+
     // Drain cloud sync queue -- ensure all blobs are pushed before we tell Steam "batch done"
-    CloudStorage::DrainQueue();
+    CloudStorage::DrainQueueForApp(accountId, appId);
     PB::Writer body; // empty response
     return body;
 }
@@ -996,13 +1302,17 @@ PB::Writer HandleFileDownload(uint32_t appId, const std::vector<PB::Field>& reqB
             filename.assign(reinterpret_cast<const char*>(f.data), f.dataLen);
     }
 
+    uint32_t accountId = 0;
+    if (!RequireAccountId("ClientFileDownload", appId, accountId)) {
+        return PB::Writer();
+    }
     uint16_t port = HttpServer::GetPort();
     std::string urlHost = "127.0.0.1:" + std::to_string(port);
     std::string cleanName = StripRootToken(filename);
-    std::string urlPath = "/download/" + std::to_string(appId) + "/" + HttpUtil::UrlEncode(cleanName, true);
+    std::string urlPath = "/download/" + std::to_string(accountId) + "/" + std::to_string(appId)
+        + "/" + HttpUtil::UrlEncode(cleanName, true);
 
     // get file metadata from local storage (single-file lookup, no full dir scan)
-    uint32_t accountId = GetAccountId();
     uint64_t fileSize = 0;    uint64_t timestamp = 0;
     std::vector<uint8_t> sha;
 
@@ -1015,7 +1325,7 @@ PB::Writer HandleFileDownload(uint32_t appId, const std::vector<PB::Field>& reqB
 
     // fall back to blob store if not in local storage metadata
     if (fileSize == 0) {
-        fileSize = HttpServer::GetBlobSize(appId, cleanName);
+        fileSize = HttpServer::GetBlobSize(accountId, appId, cleanName);
     }
 
     LOG("[NS-DL] FileDownload app=%u file=%s (clean=%s) size=%llu -> %s%s",
@@ -1046,21 +1356,28 @@ PB::Writer HandleDeleteFile(uint32_t appId, const std::vector<PB::Field>& reqBod
             filename.assign(reinterpret_cast<const char*>(f.data), f.dataLen);
     }
 
-    std::string rootToken = ExtractRootToken(filename);
     std::string cleanName = StripRootToken(filename);
     LOG("[NS] DeleteFile app=%u file=%s (clean=%s)", appId, filename.c_str(), cleanName.c_str());
 
-    uint32_t accountId = GetAccountId();
+    if (IsInternalMetadataFile(cleanName)) {
+        LOG("[NS] DeleteFile app=%u ignored for internal metadata %s", appId, cleanName.c_str());
+        return PB::Writer();
+    }
+
+    uint32_t accountId = 0;
+    if (!RequireAccountId("ClientDeleteFile", appId, accountId)) {
+        return PB::Writer();
+    }
     // CloudStorage::DeleteBlob removes from local cache and cloud, and
     // increments the change number so Steam re-downloads the file list.
-    HttpServer::DeleteBlob(appId, cleanName);
+    HttpServer::DeleteBlob(accountId, appId, cleanName);
 
     // Delete from cloud provider (async -- enqueues delete if provider active)
     CloudStorage::DeleteBlob(accountId, appId, cleanName);
 
     // Remove file-token mapping and mark dirty (persist deferred to CompleteBatch)
-    RemoveFileToken(appId, cleanName);
-    MarkFileTokensDirty(appId);
+    RemoveFileToken(accountId, appId, cleanName);
+    MarkFileTokensDirty(accountId, appId);
 
     PB::Writer body; // empty response
     return body;
