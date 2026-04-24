@@ -180,7 +180,15 @@ static void RequeueFailedWorkForPrefixLocked(const std::string& prefix) {
             // poison). Keep it in g_failedWorkItems so this same item cannot be
             // silently re-queued by a future drain; a fresh EnqueueWork for the
             // same cloudPath will clear both maps and grant a clean attempt.
+            // Release the payload bytes: we will never retry this upload, so
+            // holding the blob data in memory until process exit (or until a
+            // user re-saves the exact same filename) is pure waste. A large
+            // poisoned blob — e.g. 100 MB save that the provider permanently
+            // rejects — would otherwise pin that much heap for the session.
             g_failedPaths.erase(it->first);
+            if (!it->second.data.empty()) {
+                std::vector<uint8_t>().swap(it->second.data);
+            }
             ++it;
             continue;
         }
@@ -648,6 +656,82 @@ bool CommitCNWithRetry(uint32_t accountId, uint32_t appId, uint64_t cn) {
 }
 
 
+// Drop stale conflict-copy files from cloud_redirect\conflicts\. Every sync
+// that detects a local/cloud mismatch during promotion writes a
+// {filename}.{microstamp}.local sidecar under that tree (see
+// CreateLocalConflictCopy). Nothing else prunes them, so a user with flaky
+// cloud sync can accumulate gigabytes of old conflict copies indefinitely.
+// Called at Init time (once per process launch) rather than on a timer; the
+// directory tree is small, the walk is cheap, and doing it synchronously
+// avoids needing another lifetime-managed background thread.
+static void PruneStaleConflictCopies(const std::string& localRoot) {
+    if (localRoot.empty()) return;
+    std::string conflictsRoot = localRoot + "conflicts\\";
+    int removed = 0;
+
+    // Wrap the entire walk in try/catch: std::filesystem APIs we do NOT call
+    // with an error_code overload (notably path::string() for logging) can
+    // still throw when a conflict-copy filename contains characters outside
+    // the system ANSI codepage — common for Japanese/Cyrillic save names.
+    // This function is best-effort cleanup on startup; a throw here must
+    // not escape Init().
+    try {
+        std::error_code ec;
+        if (!std::filesystem::exists(conflictsRoot, ec) || ec) return;
+
+        // Keep at most 30 days of conflict copies. This is long enough that
+        // a user who only notices a bad sync after the weekend still has
+        // the .local sidecar to recover from, but short enough that disk
+        // usage stays bounded.
+        constexpr auto kRetention = std::chrono::hours(24 * 30);
+        auto now = std::filesystem::file_time_type::clock::now();
+
+        // skip_permission_denied suppresses ACL-only iterator failures so
+        // one unreadable subtree does not terminate the whole walk.
+        std::filesystem::recursive_directory_iterator it(
+            conflictsRoot, std::filesystem::directory_options::skip_permission_denied, ec);
+        std::filesystem::recursive_directory_iterator end;
+        if (ec) {
+            LOG("[CloudStorage] PruneStaleConflictCopies: cannot open conflicts root: %s",
+                ec.message().c_str());
+            return;
+        }
+        while (it != end) {
+            std::error_code entryEc;
+            const auto& entry = *it;
+            bool isFile = entry.is_regular_file(entryEc);
+            if (!entryEc && isFile) {
+                auto mtime = std::filesystem::last_write_time(entry.path(), entryEc);
+                if (!entryEc && now - mtime >= kRetention) {
+                    std::filesystem::remove(entry.path(), entryEc);
+                    if (!entryEc) ++removed;
+                }
+            }
+            std::error_code stepEc;
+            it.increment(stepEc);
+            if (stepEc) {
+                // Best-effort cleanup. If the iterator cannot advance we
+                // stop rather than call pop() on a standard-unspecified
+                // iterator state. Next launch retries from a fresh
+                // iterator, and intermittent failures (stale handle,
+                // transient AV lock) get another shot then.
+                LOG("[CloudStorage] PruneStaleConflictCopies: stopping early after iterator "
+                    "error: %s (%d file(s) removed this run)", stepEc.message().c_str(), removed);
+                break;
+            }
+        }
+    } catch (const std::exception& ex) {
+        LOG("[CloudStorage] PruneStaleConflictCopies: aborted on exception: %s", ex.what());
+    } catch (...) {
+        LOG("[CloudStorage] PruneStaleConflictCopies: aborted on unknown exception");
+    }
+
+    if (removed > 0) {
+        LOG("[CloudStorage] PruneStaleConflictCopies: removed %d stale conflict copy file(s) from %s",
+            removed, conflictsRoot.c_str());
+    }
+}
+
 void Init(const std::string& localRoot, std::unique_ptr<ICloudProvider> provider) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_localRoot = localRoot;
@@ -658,6 +742,9 @@ void Init(const std::string& localRoot, std::unique_ptr<ICloudProvider> provider
 
     LOG("[CloudStorage] Initialized. localRoot=%s provider=%s",
         g_localRoot.c_str(), g_provider ? g_provider->Name() : "none (local-only)");
+
+    // Prune stale conflict copies once per process launch (best-effort).
+    PruneStaleConflictCopies(g_localRoot);
 
     // Start background workers if we have a cloud provider
     if (g_provider) {
