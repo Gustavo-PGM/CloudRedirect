@@ -838,7 +838,12 @@ ICloudProvider::ExistsStatus CheckBlobExists(uint32_t accountId, uint32_t appId,
     // Check local cache first
     std::string localPath = LocalBlobPath(accountId, appId, filename);
     if (localPath.empty()) return ICloudProvider::ExistsStatus::Error;  // path traversal rejected
-    if (std::filesystem::exists(localPath) && std::filesystem::is_regular_file(localPath))
+    // Use a single status() call with error_code to avoid TOCTOU and to
+    // avoid throwing if the file is deleted between exists()/is_regular_file()
+    // (some Windows builds surface that race as filesystem_error).
+    std::error_code statEc;
+    auto st = std::filesystem::status(localPath, statEc);
+    if (!statEc && std::filesystem::is_regular_file(st))
         return ICloudProvider::ExistsStatus::Exists;
 
     // Check cloud
@@ -862,7 +867,13 @@ static std::string ReadLocalText(const std::string& path) {
 // Helper: write a small text file to local storage path (atomic via .tmp+rename)
 static bool WriteLocalText(const std::string& path, const std::string& content) {
     auto parent = std::filesystem::path(path).parent_path();
-    std::filesystem::create_directories(parent);
+    std::error_code ec;
+    std::filesystem::create_directories(parent, ec);
+    if (ec) {
+        LOG("[CloudStorage] WriteLocalText: failed to create parent %s: %s",
+            parent.string().c_str(), ec.message().c_str());
+        return false;
+    }
     return FileUtil::AtomicWriteText(path, content);
 }
 
@@ -945,7 +956,15 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     uint64_t localCN = 0;
     uint64_t cloudCN = 0;
     std::string storagePath = LocalStoragePath(accountId, appId);
-    std::filesystem::create_directories(storagePath);
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(storagePath, ec);
+        if (ec) {
+            LOG("[CloudStorage] SyncFromCloud app %u: failed to create local storage "
+                "dir %s: %s — aborting sync", appId, storagePath.c_str(), ec.message().c_str());
+            return false;
+        }
+    }
     std::unordered_set<std::string> originalRootTokens;
     std::unordered_map<std::string, std::string> originalFileTokens;
     std::unordered_set<std::string> mergedCloudRootTokens;
@@ -1243,7 +1262,9 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             }
 
             std::string localBlobFile = LocalBlobPath(accountId, appId, filename);
-            bool localExists = std::filesystem::exists(localBlobFile);
+            std::error_code existsEc;
+            bool localExists = std::filesystem::exists(localBlobFile, existsEc);
+            if (existsEc) localExists = false;
             if (localExists && !cloudHadNewerCN) {
                 skipped++;
                 continue; // already cached
@@ -1292,7 +1313,24 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             std::vector<PromotedBlob> promoted;
             for (auto& staged : stagedNewerBlobs) {
                 std::string localBlobFile = LocalBlobPath(accountId, appId, staged.filename);
-                bool localExists = std::filesystem::exists(localBlobFile);
+                // Promotion is destructive (overwrites local). If we cannot
+                // determine whether a local file exists (transient stat error
+                // from AV lock, share violation, ACL glitch, etc.), we must
+                // NOT treat that as "no local file" — that would skip the
+                // conflict-copy safety net and let us clobber an unsynced
+                // local save without a recoverable backup, and would also
+                // leave hadOriginal=false so a later rollback would not
+                // restore the original. Fail this staged blob into the
+                // rollback path instead.
+                std::error_code promoteEc;
+                bool localExists = std::filesystem::exists(localBlobFile, promoteEc);
+                if (promoteEc) {
+                    LOG("[CloudStorage] SyncFromCloud app %u: stat failed for %s during "
+                        "promotion (%s); failing batch to preserve local state",
+                        appId, staged.filename.c_str(), promoteEc.message().c_str());
+                    failed++;
+                    break;
+                }
                 std::string backupPath;
                 if (localExists) {
                     backupPath = CreateLocalConflictCopy(accountId, appId, staged.filename, localBlobFile);
@@ -1373,33 +1411,57 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                                    std::to_string(accountId) + "\\" +
                                    std::to_string(appId) + "\\";
         int seeded = 0;
-        if (std::filesystem::exists(localBlobDir)) {
-            for (auto& entry : std::filesystem::recursive_directory_iterator(localBlobDir)) {
-                if (!entry.is_regular_file()) continue;
+        std::error_code gapEc;
+        bool dirExists = std::filesystem::exists(localBlobDir, gapEc);
+        if (gapEc) {
+            LOG("[CloudStorage] SyncFromCloud app %u: gap-repair skipped — stat failed for %s: %s",
+                appId, localBlobDir.c_str(), gapEc.message().c_str());
+            dirExists = false;
+        }
+        if (dirExists) {
+            std::error_code iterEc;
+            std::filesystem::recursive_directory_iterator it(localBlobDir, iterEc);
+            std::filesystem::recursive_directory_iterator end;
+            if (iterEc) {
+                LOG("[CloudStorage] SyncFromCloud app %u: gap-repair skipped — cannot open %s: %s",
+                    appId, localBlobDir.c_str(), iterEc.message().c_str());
+            } else {
+                for (; !iterEc && it != end; it.increment(iterEc)) {
+                    std::error_code entryEc;
+                    const auto& entry = *it;
+                    bool isFile = entry.is_regular_file(entryEc);
+                    if (entryEc || !isFile) continue;
 
-                std::string rel = std::filesystem::relative(entry.path(), localBlobDir).string();
-                for (auto& c : rel) { if (c == '\\') c = '/'; }
-                if (rel == "cn.dat" || rel == "root_token.dat" ||
-                    rel == "file_tokens.dat" || rel == "deleted.dat") continue;
-                if (cloudBlobNames.count(rel)) continue;
+                    std::string rel = std::filesystem::relative(entry.path(), localBlobDir, entryEc).string();
+                    if (entryEc) continue;
+                    for (auto& c : rel) { if (c == '\\') c = '/'; }
+                    if (rel == "cn.dat" || rel == "root_token.dat" ||
+                        rel == "file_tokens.dat" || rel == "deleted.dat") continue;
+                    if (cloudBlobNames.count(rel)) continue;
 
-                std::ifstream f(entry.path(), std::ios::binary);
-                if (!f) continue;
-                std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
-                                          std::istreambuf_iterator<char>());
-                WorkItem wi;
-                wi.type = WorkItem::Upload;
-                wi.cloudPath = CloudBlobPath(accountId, appId, rel);
-                wi.data = std::move(data);
-                wi.skipIfExists = true;
-                EnqueueWork(std::move(wi));
-                seeded++;
+                    std::ifstream f(entry.path(), std::ios::binary);
+                    if (!f) continue;
+                    std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
+                                              std::istreambuf_iterator<char>());
+                    WorkItem wi;
+                    wi.type = WorkItem::Upload;
+                    wi.cloudPath = CloudBlobPath(accountId, appId, rel);
+                    wi.data = std::move(data);
+                    wi.skipIfExists = true;
+                    EnqueueWork(std::move(wi));
+                    seeded++;
+                }
+                if (iterEc) {
+                    LOG("[CloudStorage] SyncFromCloud app %u: gap-repair iteration aborted after %d seeded: %s",
+                        appId, seeded, iterEc.message().c_str());
+                }
             }
         }
 
         auto seedMeta = [&](const std::string& filename) {
             std::string localFile = storagePath + filename;
-            if (!std::filesystem::exists(localFile)) return;
+            std::error_code metaEc;
+            if (!std::filesystem::exists(localFile, metaEc) || metaEc) return;
 
             std::ifstream f(localFile, std::ios::binary);
             if (!f) return;
