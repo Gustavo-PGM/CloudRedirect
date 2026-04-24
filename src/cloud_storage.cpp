@@ -12,6 +12,7 @@
 #include <chrono>
 #include <list>
 #include <algorithm>
+#include <limits>
 #include <Windows.h>
 
 namespace CloudStorage {
@@ -258,7 +259,8 @@ static void RemoveLocalBlobsNotInCloud(uint32_t accountId, uint32_t appId,
         std::string rel = std::filesystem::relative(entry.path(), localBlobDir, ec).string();
         if (ec) continue;
         for (auto& c : rel) { if (c == '\\') c = '/'; }
-        if (rel == "cn.dat" || rel == "root_token.dat" || rel == "file_tokens.dat") continue;
+        if (rel == "cn.dat" || rel == "root_token.dat" ||
+            rel == "file_tokens.dat" || rel == "deleted.dat") continue;
         if (cloudBlobNames.count(rel)) continue;
 
         if (!PreserveLocalConflictCopy(accountId, appId, rel, entry.path().string())) continue;
@@ -277,6 +279,46 @@ static std::string CloudBlobPath(uint32_t accountId, uint32_t appId,
                                  const std::string& filename) {
     return std::to_string(accountId) + "/" + std::to_string(appId) +
            "/blobs/" + filename;
+}
+
+// Inverse of CloudBlobPath — returns false if the path doesn't match the
+// "{accountId}/{appId}/blobs/{filename}" shape. Only blob paths are parsable;
+// metadata paths (cn.dat, root_token.dat, etc.) deliberately fail here.
+//
+// Parses only canonical unsigned decimal for accountId/appId — rejects signs,
+// whitespace, leading '+' or '-', and values that don't fit in uint32_t. This
+// keeps the parser symmetric with CloudBlobPath (which always writes canonical
+// unsigned decimal) so a round-trip never produces a different (acct, app)
+// pair than the one we started with.
+static bool ParseCloudBlobPath(const std::string& cloudPath,
+                               uint32_t& accountId, uint32_t& appId,
+                               std::string& filename) {
+    size_t p1 = cloudPath.find('/');
+    if (p1 == std::string::npos || p1 == 0) return false;
+    size_t p2 = cloudPath.find('/', p1 + 1);
+    if (p2 == std::string::npos || p2 == p1 + 1) return false;
+    const std::string kBlobs = "/blobs/";
+    if (cloudPath.compare(p2, kBlobs.size(), kBlobs) != 0) return false;
+    size_t fileStart = p2 + kBlobs.size();
+    if (fileStart >= cloudPath.size()) return false;
+
+    auto parseU32 = [](const std::string& s, uint32_t& out) -> bool {
+        if (s.empty()) return false;
+        for (char c : s) {
+            if (c < '0' || c > '9') return false; // no sign, whitespace, or letters
+        }
+        try {
+            unsigned long long v = std::stoull(s);
+            if (v > (std::numeric_limits<uint32_t>::max)()) return false;
+            out = static_cast<uint32_t>(v);
+            return true;
+        } catch (...) { return false; }
+    };
+
+    if (!parseU32(cloudPath.substr(0, p1), accountId)) return false;
+    if (!parseU32(cloudPath.substr(p1 + 1, p2 - p1 - 1), appId)) return false;
+    filename = cloudPath.substr(fileStart);
+    return !filename.empty();
 }
 
 static std::string CloudMetadataPath(uint32_t accountId, uint32_t appId,
@@ -422,6 +464,17 @@ static void WorkerLoop(int threadId) {
                 LOG("[CloudStorage] BG delete OK [%d]: %s", threadId, item.cloudPath.c_str());
                 OnCloudSuccess();
                 success = true;
+                // Cloud confirmed the delete — drop the local tombstone so a
+                // future StoreBlob of the same filename isn't treated as a
+                // resurrection candidate. Parsing failure (e.g. metadata path)
+                // is silent: non-blob deletes have no tombstone to clear.
+                {
+                    uint32_t doneAcct = 0, doneApp = 0;
+                    std::string doneFile;
+                    if (ParseCloudBlobPath(item.cloudPath, doneAcct, doneApp, doneFile)) {
+                        LocalStorage::ClearDeleted(doneAcct, doneApp, doneFile);
+                    }
+                }
             } else {
                 LOG("[CloudStorage] BG delete FAILED [%d]: %s", threadId, item.cloudPath.c_str());
                 OnCloudFailure("Delete", item.cloudPath);
@@ -674,6 +727,11 @@ bool StoreBlob(uint32_t accountId, uint32_t appId,
     }
     LOG("[CloudStorage] StoreBlob: cached locally: %s (%zu bytes)", filename.c_str(), len);
 
+    // User re-created the file — clear any stale tombstone so SyncFromCloud
+    // won't later suppress it and so the background Upload below is the
+    // authoritative cloud state for this filename.
+    LocalStorage::ClearDeleted(accountId, appId, filename);
+
     // CN is incremented once per batch in HandleCompleteBatch, not per file.
 
     // 2. Enqueue async upload to cloud provider
@@ -739,9 +797,18 @@ bool DeleteBlob(uint32_t accountId, uint32_t appId,
 
     LOG("[CloudStorage] DeleteBlob: removed local cache: %s", filename.c_str());
 
+    // 2. Record tombstone BEFORE enqueuing cloud delete. If the worker
+    //    succeeds we clear it there; if it fails permanently the tombstone
+    //    keeps SyncFromCloud from resurrecting the file on next startup.
+    //    Stamp with the current local CN so a cross-machine re-save whose
+    //    cloud CN exceeds this one can still override the tombstone and
+    //    preserve Steam's "newer CN wins" semantics.
+    uint64_t cnAtDelete = LocalStorage::GetChangeNumber(accountId, appId);
+    LocalStorage::MarkDeleted(accountId, appId, filename, cnAtDelete);
+
     // CN is incremented once per batch in HandleCompleteBatch, not per file.
 
-    // 2. Enqueue cloud delete
+    // 3. Enqueue cloud delete
     if (g_provider) {
         WorkItem wi;
         wi.type = WorkItem::Delete;
@@ -1084,6 +1151,23 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         cloudBlobNames.insert(CanonicalizeInternalMetadataName(fi.path.substr(blobsPos + 7)));
     }
 
+    // Load tombstones once per sync. A cloud Delete whose worker never
+    // succeeded (provider down, permanent transport failure, etc.) would
+    // otherwise resurrect the file here on the next SyncFromCloud. We do
+    // NOT re-enqueue a Delete from this path — doing so would race a
+    // concurrent StoreBlob+Upload via the FIFO queue and could lose the
+    // user's freshly saved file. The tombstone stays until either the
+    // original queued Delete finally succeeds or the user re-saves the
+    // same filename (StoreBlob clears it).
+    //
+    // Each tombstone carries the local CN it was stamped with. If the
+    // provider's CN is strictly greater, a different machine modified this
+    // file after our local delete, and Steam's "newer CN wins" semantics
+    // override the tombstone: we clear it and download normally. Otherwise
+    // the tombstone stands.
+    std::unordered_map<std::string, uint64_t> deletedTombstones =
+        LocalStorage::LoadDeleted(accountId, appId);
+
     {
         struct StagedBlob {
             std::string filename;
@@ -1111,6 +1195,33 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             auto blobsPos = fi.path.find("/blobs/");
             if (blobsPos == std::string::npos) continue;
             std::string filename = CanonicalizeInternalMetadataName(fi.path.substr(blobsPos + 7));
+
+            // Honor local delete tombstones — don't resurrect files the user
+            // deleted locally just because a not-yet-processed cloud Delete
+            // hasn't flushed through the provider yet. Exception: if the
+            // cloud CN is strictly newer than the tombstone CN, a different
+            // machine wrote to this file after our delete and cloud wins.
+            auto tombIt = deletedTombstones.find(filename);
+            if (tombIt != deletedTombstones.end()) {
+                if (cloudCNFound && cloudCN > tombIt->second) {
+                    LOG("[CloudStorage] SyncFromCloud app %u: tombstone for %s "
+                        "overridden by newer cloud CN (%llu > %llu) — clearing and downloading",
+                        appId, filename.c_str(),
+                        (unsigned long long)cloudCN,
+                        (unsigned long long)tombIt->second);
+                    LocalStorage::ClearDeleted(accountId, appId, filename);
+                    deletedTombstones.erase(tombIt);
+                    // fall through to normal download path
+                } else {
+                    skipped++;
+                    LOG("[CloudStorage] SyncFromCloud app %u: skipping tombstoned blob %s "
+                        "(tombstoneCn=%llu, cloudCn=%llu)",
+                        appId, filename.c_str(),
+                        (unsigned long long)tombIt->second,
+                        (unsigned long long)cloudCN);
+                    continue;
+                }
+            }
 
             std::string localBlobFile = LocalBlobPath(accountId, appId, filename);
             bool localExists = std::filesystem::exists(localBlobFile);
@@ -1236,7 +1347,8 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
 
                 std::string rel = std::filesystem::relative(entry.path(), localBlobDir).string();
                 for (auto& c : rel) { if (c == '\\') c = '/'; }
-                if (rel == "cn.dat" || rel == "root_token.dat" || rel == "file_tokens.dat") continue;
+                if (rel == "cn.dat" || rel == "root_token.dat" ||
+                    rel == "file_tokens.dat" || rel == "deleted.dat") continue;
                 if (cloudBlobNames.count(rel)) continue;
 
                 std::ifstream f(entry.path(), std::ios::binary);

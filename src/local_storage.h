@@ -51,6 +51,33 @@ void SaveFileTokens(uint32_t accountId, uint32_t appId,
                     const std::unordered_map<std::string, std::string>& fileTokens);
 std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, uint32_t appId);
 
+// Delete tombstones: persistent record of filenames the user deleted locally
+// whose cloud Remove has not yet been confirmed. SyncFromCloud consults this
+// map and refuses to redownload a tombstoned filename, preventing resurrection
+// after a Delete work item fails its transfer retries and drain requeues.
+//
+// Each tombstone is stored with the local change number at delete time. When
+// SyncFromCloud sees a newer cloud CN, the caller can compare it against the
+// tombstone CN and suppress the tombstone if cloud writes happened after the
+// local delete (i.e. another machine re-created the file). This preserves
+// Steam's "newer CN wins" semantics across machines while still blocking
+// same-machine resurrection from a failed Remove.
+//
+// On-disk format (deleted.dat, per app):
+//   filename\tcn\n
+// Legacy lines without a tab are loaded with cn=0 (treated as "always wins
+// against any newer cloud CN that's ever existed"), matching pre-CN behavior.
+//
+// Tombstones are cleared on successful cloud Remove (worker) or when the user
+// re-creates the file via StoreBlob. The latter also covers user-initiated
+// writes that resurface the same filename after a stuck Delete.
+void MarkDeleted(uint32_t accountId, uint32_t appId, const std::string& filename,
+                 uint64_t cnAtDelete);
+void ClearDeleted(uint32_t accountId, uint32_t appId, const std::string& filename);
+bool IsDeleted(uint32_t accountId, uint32_t appId, const std::string& filename);
+std::unordered_map<std::string, uint64_t> LoadDeleted(uint32_t accountId,
+                                                      uint32_t appId);
+
 #ifdef CLOUDREDIRECT_TESTING
 bool TestResolveAutoCloudRootOverride(const std::string& root, const std::string& path,
                                       const std::string& overrideRoot,

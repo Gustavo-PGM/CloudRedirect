@@ -936,7 +936,8 @@ std::vector<FileEntry> GetFileList(uint32_t accountId, uint32_t appId) {
             for (auto& c : relPath) { if (c == '\\') c = '/'; }
 
             // Skip our internal metadata files
-            if (relPath == "cn.dat" || relPath == "root_token.dat" || relPath == "file_tokens.dat") continue;
+            if (relPath == "cn.dat" || relPath == "root_token.dat" ||
+                relPath == "file_tokens.dat" || relPath == "deleted.dat") continue;
 
             std::string fullPath = appRoot + relPath;
             for (auto& c : fullPath) { if (c == '/') c = '\\'; }
@@ -1525,6 +1526,195 @@ std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, 
         }
     }
     return result;
+}
+
+// ---- Delete tombstones ---------------------------------------------------
+//
+// Persisted as "deleted.dat" under the app dir, one entry per line as
+// "filename\tcn\n". The file is treated as LocalStorage-internal metadata:
+// it is not enumerated by GetFileList, not pruned by RemoveLocalBlobsNotInCloud,
+// and not seeded by the provider-gap repair path. It is deliberately NOT
+// mirrored to cloud; keeping tombstones strictly local avoids cross-client
+// contention between a slow delete and a fresh save of the same filename on
+// another machine.
+//
+// The CN is the local change number at the moment of MarkDeleted. SyncFromCloud
+// compares it against the cloud CN to decide whether a tombstoned entry should
+// still suppress download: if cloud's CN is strictly newer than the tombstone
+// CN, a different machine wrote after our delete, and Steam's "newer wins"
+// semantics prevail — the tombstone is bypassed.
+//
+// Legacy lines without a tab are loaded with cn=0 (suppressing any nonzero
+// cloud CN never arises in practice since CN starts at 2 — so a cn=0 tombstone
+// behaves identically to the pre-CN behavior of "always suppress").
+
+static std::unordered_map<std::string, uint64_t> LoadDeletedLocked(uint32_t accountId,
+                                                                   uint32_t appId,
+                                                                   bool* outNeedsRewrite = nullptr) {
+    // Caller holds g_mutex (shared or exclusive).
+    std::unordered_map<std::string, uint64_t> deleted;
+    if (outNeedsRewrite) *outNeedsRewrite = false;
+    std::string path = GetAppPathInternal(accountId, appId) + "deleted.dat";
+    std::ifstream f(path);
+    if (!f) return deleted;
+    std::string line;
+    while (std::getline(f, line)) {
+        std::string original = line;
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+        if (line != original && outNeedsRewrite) *outNeedsRewrite = true;
+        if (line.empty()) continue;
+        auto tab = line.find('\t');
+        std::string fname;
+        uint64_t cn = 0;
+        if (tab == std::string::npos) {
+            fname = line;
+            if (outNeedsRewrite) *outNeedsRewrite = true; // legacy row, upgrade on rewrite
+        } else {
+            fname = line.substr(0, tab);
+            std::string cnStr = line.substr(tab + 1);
+            // Parse unsigned-decimal only; reject sign, whitespace, overflow.
+            bool ok = !cnStr.empty();
+            for (char c : cnStr) {
+                if (c < '0' || c > '9') { ok = false; break; }
+            }
+            if (ok) {
+                try {
+                    unsigned long long v = std::stoull(cnStr);
+                    cn = static_cast<uint64_t>(v);
+                } catch (...) { ok = false; }
+            }
+            if (!ok && outNeedsRewrite) *outNeedsRewrite = true;
+        }
+        if (fname.empty()) continue;
+        // Keep the highest CN for a filename if duplicates exist on disk.
+        auto it = deleted.find(fname);
+        if (it == deleted.end() || it->second < cn) {
+            deleted[fname] = cn;
+        }
+    }
+    return deleted;
+}
+
+static bool SaveDeletedLocked(uint32_t accountId, uint32_t appId,
+                              const std::unordered_map<std::string, uint64_t>& deleted) {
+    // Caller holds g_mutex exclusively. Returns true on successful persistence.
+    std::string appDir = GetAppPathInternal(accountId, appId);
+    std::error_code mkEc;
+    std::filesystem::create_directories(appDir, mkEc);
+    std::string path = appDir + "deleted.dat";
+    if (deleted.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        if (ec && ec != std::errc::no_such_file_or_directory) {
+            LOG("SaveDeletedLocked: failed to remove empty tombstone file for app %u: %s",
+                appId, ec.message().c_str());
+            return false;
+        }
+        return true;
+    }
+    std::string content;
+    for (auto& kv : deleted) {
+        content += kv.first;
+        content += '\t';
+        content += std::to_string(kv.second);
+        content += '\n';
+    }
+    if (!FileUtil::AtomicWriteText(path, content)) {
+        LOG("SaveDeletedLocked: FAILED to persist %zu tombstone(s) for app %u — "
+            "deletion may resurrect on next SyncFromCloud", deleted.size(), appId);
+        return false;
+    }
+    return true;
+}
+
+std::unordered_map<std::string, uint64_t> LoadDeleted(uint32_t accountId, uint32_t appId) {
+    bool needsRewrite = false;
+    std::unordered_map<std::string, uint64_t> deleted;
+    {
+        std::shared_lock<std::shared_mutex> lock(g_mutex);
+        deleted = LoadDeletedLocked(accountId, appId, &needsRewrite);
+    }
+    // Upgrade legacy/dirty rows to canonical form under an exclusive lock, but
+    // only when there's something worth rewriting. Mirrors LoadRootTokens.
+    //
+    // The authoritative state is whatever is on disk right now: a concurrent
+    // ClearDeleted between our shared read and this exclusive acquire may
+    // have legitimately removed entries we saw, and we MUST NOT resurrect
+    // those. Conversely any concurrent MarkDeleted holds the exclusive lock
+    // and its write is durable before we reach here, so the fresh snapshot
+    // already reflects it. We therefore rewrite `latest` verbatim for the
+    // legacy-format upgrade without merging in the stale shared-lock view.
+    if (needsRewrite) {
+        std::lock_guard<std::shared_mutex> lock(g_mutex);
+        bool latestNeedsRewrite = false;
+        auto latest = LoadDeletedLocked(accountId, appId, &latestNeedsRewrite);
+        if (latestNeedsRewrite && !latest.empty()) {
+            SaveDeletedLocked(accountId, appId, latest);
+        }
+        deleted = std::move(latest);
+    }
+    return deleted;
+}
+
+void MarkDeleted(uint32_t accountId, uint32_t appId, const std::string& filename,
+                 uint64_t cnAtDelete) {
+    if (filename.empty()) return;
+    std::lock_guard<std::shared_mutex> lock(g_mutex);
+    auto deleted = LoadDeletedLocked(accountId, appId, nullptr);
+    auto it = deleted.find(filename);
+    bool inserted = (it == deleted.end());
+    if (!inserted && it->second >= cnAtDelete) {
+        // Already tombstoned at equal-or-higher CN; no-op avoids redundant I/O.
+        return;
+    }
+    deleted[filename] = cnAtDelete;
+    if (!SaveDeletedLocked(accountId, appId, deleted)) {
+        // Persistence failed — the in-memory snapshot is now ahead of disk.
+        // The next LoadDeletedLocked will reflect only what's on disk, so
+        // functionally we've rolled back. Caller is already informed via LOG
+        // from SaveDeletedLocked; just log the site context.
+        LOG("MarkDeleted: app %u tombstone for %s (cn=%llu) NOT persisted",
+            appId, filename.c_str(), (unsigned long long)cnAtDelete);
+        return;
+    }
+    LOG("MarkDeleted: app %u tombstoned %s at cn=%llu (%zu total)",
+        appId, filename.c_str(), (unsigned long long)cnAtDelete, deleted.size());
+}
+
+void ClearDeleted(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    if (filename.empty()) return;
+    std::lock_guard<std::shared_mutex> lock(g_mutex);
+    auto deleted = LoadDeletedLocked(accountId, appId, nullptr);
+    if (deleted.erase(filename) > 0) {
+        if (!SaveDeletedLocked(accountId, appId, deleted)) {
+            LOG("ClearDeleted: app %u clear for %s NOT persisted", appId, filename.c_str());
+            return;
+        }
+        LOG("ClearDeleted: app %u cleared %s (%zu remaining)",
+            appId, filename.c_str(), deleted.size());
+    }
+}
+
+bool IsDeleted(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    if (filename.empty()) return false;
+    std::shared_lock<std::shared_mutex> lock(g_mutex);
+    // Single-name membership: stream the file line-by-line instead of building
+    // the full map, so a future hot-path caller pays O(lines) I/O without also
+    // paying O(lines) hash-set allocation.
+    std::string path = GetAppPathInternal(accountId, appId) + "deleted.dat";
+    std::ifstream f(path);
+    if (!f) return false;
+    std::string line;
+    while (std::getline(f, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+        if (line.empty()) continue;
+        auto tab = line.find('\t');
+        std::string fname = (tab == std::string::npos) ? line : line.substr(0, tab);
+        if (fname == filename) return true;
+    }
+    return false;
 }
 
 } // namespace LocalStorage
