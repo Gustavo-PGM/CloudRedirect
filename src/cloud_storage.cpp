@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <sstream>
 #include <chrono>
+#include <ctime>
 #include <list>
 #include <algorithm>
 #include <limits>
@@ -504,11 +505,16 @@ static void WorkerLoop(int threadId) {
                 // future StoreBlob of the same filename isn't treated as a
                 // resurrection candidate. Parsing failure (e.g. metadata path)
                 // is silent: non-blob deletes have no tombstone to clear.
+                // Canonicalize so legacy-name deletes clear the canonical
+                // tombstone written by DeleteBlob (and vice versa), keeping
+                // the tombstone namespace aligned with SyncFromCloud's
+                // cloudBlobNames lookup.
                 {
                     uint32_t doneAcct = 0, doneApp = 0;
                     std::string doneFile;
                     if (ParseCloudBlobPath(item.cloudPath, doneAcct, doneApp, doneFile)) {
-                        LocalStorage::ClearDeleted(doneAcct, doneApp, doneFile);
+                        LocalStorage::ClearDeleted(doneAcct, doneApp,
+                                                   CanonicalizeInternalMetadataName(doneFile));
                     }
                 }
             } else {
@@ -844,8 +850,10 @@ bool StoreBlob(uint32_t accountId, uint32_t appId,
 
     // User re-created the file — clear any stale tombstone so SyncFromCloud
     // won't later suppress it and so the background Upload below is the
-    // authoritative cloud state for this filename.
-    LocalStorage::ClearDeleted(accountId, appId, filename);
+    // authoritative cloud state for this filename. Canonicalize to match the
+    // key DeleteBlob would have written (see MarkDeleted below).
+    LocalStorage::ClearDeleted(accountId, appId,
+                               CanonicalizeInternalMetadataName(filename));
 
     // CN is incremented once per batch in HandleCompleteBatch, not per file.
 
@@ -927,8 +935,13 @@ bool DeleteBlob(uint32_t accountId, uint32_t appId,
     //    Stamp with the current local CN so a cross-machine re-save whose
     //    cloud CN exceeds this one can still override the tombstone and
     //    preserve Steam's "newer CN wins" semantics.
+    //    Canonicalize the filename so the tombstone key aligns with
+    //    SyncFromCloud's blob-listing namespace (see cloudBlobNames +
+    //    filename at SyncFromCloud line ~1350). Callers may pass either the
+    //    legacy or canonical form; tombstone storage normalizes on canonical.
     uint64_t cnAtDelete = LocalStorage::GetChangeNumber(accountId, appId);
-    LocalStorage::MarkDeleted(accountId, appId, filename, cnAtDelete);
+    LocalStorage::MarkDeleted(accountId, appId,
+                              CanonicalizeInternalMetadataName(filename), cnAtDelete);
 
     // CN is incremented once per batch in HandleCompleteBatch, not per file.
 
@@ -1270,6 +1283,10 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     // Prune decisions below refuse to run on incomplete listings to avoid
     // deleting local blobs that exist in cloud but weren't observed.
     bool cloudListComplete = false;
+    // Capture wall-clock BEFORE the listing call so later tombstone eviction
+    // can protect any MarkDeleted that fires after the listing's cloud
+    // snapshot was frozen. See EvictTombstonesNotIn doc for the race.
+    uint64_t listingCapturedAtUnix = static_cast<uint64_t>(std::time(nullptr));
     bool cloudListSucceeded = g_provider->ListChecked(blobPrefix, cloudBlobs, &cloudListComplete);
     if (!cloudListSucceeded) {
         if (cloudHadNewerCN) {
@@ -1310,11 +1327,38 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     // poisoned-delete same-machine resurrection path while still letting
     // a genuine cross-machine write win.
     //
+    // One-shot migration + load: tombstones written before the canonicalization
+    // fix used the raw filename (e.g. kLegacyStatsMetadataPath) while new code
+    // writes canonical keys (kStatsMetadataPath). Both the tombstone lookup
+    // below (at `deletedTombstones.find(filename)` against a canonical
+    // filename) and EvictTombstonesNotIn's keepSet comparison (cloudBlobNames
+    // is canonicalized) would miss legacy-keyed entries, either resurrecting
+    // deleted files or evicting still-valid tombstones.
+    //
+    // MigrateDeletedKeys runs the rewrite entirely under exclusive g_mutex,
+    // so any concurrent MarkDeleted/ClearDeleted from RPC threads either
+    // commits before the migration's internal re-read (included in the
+    // rewrite) or blocks until after the persist (observes the migrated
+    // file). A naive load + transform + replace pattern would race and
+    // silently drop tombstones written during the migration window.
+    //
     // Legacy tombstones with createTime=0 fall back to CN-only behavior
     // (identical to pre-upgrade semantics). Providers that don't populate
     // blob.modifiedTime likewise fall back to CN-only.
-    std::unordered_map<std::string, LocalStorage::TombstoneInfo> deletedTombstones =
-        LocalStorage::LoadDeleted(accountId, appId);
+    std::unordered_map<std::string, LocalStorage::TombstoneInfo> deletedTombstones;
+    {
+        size_t migratedCount = 0;
+        LocalStorage::MigrateDeletedKeys(
+            accountId, appId,
+            [](const std::string& k) {
+                return CanonicalizeInternalMetadataName(k);
+            },
+            deletedTombstones, migratedCount);
+        if (migratedCount > 0) {
+            LOG("[CloudStorage] SyncFromCloud app %u: canonicalized %zu legacy tombstone key(s)",
+                appId, migratedCount);
+        }
+    }
 
     {
         struct StagedBlob {
@@ -1524,6 +1568,26 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             LOG("[CloudStorage] SyncFromCloud app %u: skipping local-blob prune because provider listing was incomplete",
                 appId);
         }
+    }
+
+    // Tombstone eviction: once the provider confirms a filename is absent
+    // from a complete, non-empty listing, the tombstone has nothing left to
+    // protect — no stale cloud blob exists that could resurrect the file on
+    // the next sync. Keeping stuck tombstones (typically from provider-delete
+    // RPCs that failed on files that never existed in cloud, or from
+    // pre-tombstone-era cleanup) grows deleted.dat indefinitely and adds
+    // O(tombstones) work to every future download loop.
+    //
+    // Gated on cloudListSucceeded + cloudListComplete + non-empty cloudBlobNames
+    // so a partial or empty listing (failed auth / recursion cap) cannot
+    // accidentally evict live protections.
+    //
+    // Unlike the prune block above, eviction does NOT require cloudHadNewerCN:
+    // CN-in-sync and local-ahead cases still have valid listing evidence. What
+    // matters is that we can trust the listing to reflect cloud ground truth.
+    if (cloudListSucceeded && cloudListComplete && !cloudBlobNames.empty()) {
+        LocalStorage::EvictTombstonesNotIn(accountId, appId, cloudBlobNames,
+                                           listingCapturedAtUnix);
     }
 
     // Recovery-only repair: when local is at least as current as the provider,

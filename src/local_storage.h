@@ -1,5 +1,6 @@
 #pragma once
 #include "common.h"
+#include <functional>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -119,9 +120,60 @@ struct TombstoneInfo {
 void MarkDeleted(uint32_t accountId, uint32_t appId, const std::string& filename,
                  uint64_t cnAtDelete);
 void ClearDeleted(uint32_t accountId, uint32_t appId, const std::string& filename);
+
+// Batch-evict tombstones whose filenames are NOT in `keepSet` AND were
+// created strictly before `listingCapturedAtUnix`. Intended for use after a
+// complete, non-empty cloud listing: a tombstone for a filename the cloud
+// provider does not know about has nothing left to protect against (no stale
+// blob can resurrect a file the cloud agrees is gone) and keeping it wastes
+// disk and adds O(n) work to every future SyncFromCloud download loop.
+//
+// The `listingCapturedAtUnix` cutoff (Unix seconds) excludes tombstones
+// created AFTER the listing snapshot was taken. Such tombstones would not be
+// reflected by the keepSet even when the deleted file was actually in cloud
+// — a DeleteBlob that fires mid-sync, with the queued provider Delete
+// poisoned after the listing but before Upload drains, would otherwise see
+// its fresh tombstone evicted and the newly-uploaded file resurrect on the
+// next sync. Legacy tombstones with createTimeUnix == 0 bypass the cutoff
+// because they definitively predate the listing.
+//
+// Writes the tombstone file at most once regardless of how many entries are
+// evicted. Caller must verify provider listing success + completeness before
+// invoking; an empty or partial keepSet would evict legitimate protections.
+void EvictTombstonesNotIn(uint32_t accountId, uint32_t appId,
+                          const std::unordered_set<std::string>& keepSet,
+                          uint64_t listingCapturedAtUnix);
 bool IsDeleted(uint32_t accountId, uint32_t appId, const std::string& filename);
 std::unordered_map<std::string, TombstoneInfo> LoadDeleted(uint32_t accountId,
                                                            uint32_t appId);
+
+// Migrate tombstone keys in place under a single exclusive critical section.
+// `keyRewrite` is called for each on-disk tombstone key and must return the
+// canonical/migrated key (or the input unchanged if no migration applies).
+// The rewrite function is invoked while holding g_mutex exclusive: it MUST
+// be non-blocking and MUST NOT re-enter any LocalStorage API, or it will
+// self-deadlock. When multiple legacy keys collapse to the same canonical
+// key, the entry with the newer CN wins (createTimeUnix breaks ties).
+//
+// The re-read + transform + persist happens inside a single exclusive g_mutex
+// hold, so any concurrent `MarkDeleted`/`ClearDeleted` either commits before
+// this call's read (and is included in the rewrite) or waits until after the
+// persist (and observes the migrated file). Neither can be silently dropped
+// by a stale in-memory snapshot — the lost-update race that a naive
+// load-transform-replace pattern would expose.
+//
+// Returns:
+//   - `outMigratedCount`: number of on-disk keys whose rewritten form differed
+//     from the input key (excluding collisions folded onto the same target).
+//   - The post-rewrite tombstone map via `outFinalState` (for caller use in
+//     subsequent SyncFromCloud logic). Empty on I/O failure.
+// Return value: false on I/O failure (caller may keep going with an empty
+// map or re-LoadDeleted and retry next sync), true otherwise. When no keys
+// need rewriting (`outMigratedCount == 0`) the function is a no-op on disk.
+bool MigrateDeletedKeys(uint32_t accountId, uint32_t appId,
+                        const std::function<std::string(const std::string&)>& keyRewrite,
+                        std::unordered_map<std::string, TombstoneInfo>& outFinalState,
+                        size_t& outMigratedCount);
 
 #ifdef CLOUDREDIRECT_TESTING
 bool TestResolveAutoCloudRootOverride(const std::string& root, const std::string& path,

@@ -2142,6 +2142,129 @@ void ClearDeleted(uint32_t accountId, uint32_t appId, const std::string& filenam
     }
 }
 
+bool MigrateDeletedKeys(uint32_t accountId, uint32_t appId,
+                        const std::function<std::string(const std::string&)>& keyRewrite,
+                        std::unordered_map<std::string, TombstoneInfo>& outFinalState,
+                        size_t& outMigratedCount) {
+    outFinalState.clear();
+    outMigratedCount = 0;
+    if (!keyRewrite) return true; // defensive; nothing to do
+    // NOTE: keyRewrite is invoked inside the exclusive g_mutex critical
+    // section. It MUST be non-blocking and MUST NOT re-enter any
+    // LocalStorage API (which would self-deadlock on g_mutex).
+    std::lock_guard<std::shared_mutex> lock(g_mutex);
+    // Re-read under exclusive lock: any MarkDeleted/ClearDeleted that
+    // committed between the caller's previous observation of the tombstone
+    // map and this critical section is reflected here. That's what makes
+    // the migration immune to the load-transform-replace lost-update race.
+    //
+    // Thread `needsRewrite` through so if the on-disk file is in a legacy
+    // v1/v2 format (no createTimeUnix column), we upgrade it to v3 in the
+    // same persist below — matching LoadDeleted's opportunistic rewrite.
+    bool needsFormatRewrite = false;
+    auto current = LoadDeletedLocked(accountId, appId, &needsFormatRewrite);
+    std::unordered_map<std::string, TombstoneInfo> migrated;
+    migrated.reserve(current.size());
+    bool anyChanged = needsFormatRewrite;
+    for (auto& kv : current) {
+        std::string newKey = keyRewrite(kv.first);
+        if (newKey != kv.first) {
+            ++outMigratedCount;
+            anyChanged = true;
+        }
+        auto it = migrated.find(newKey);
+        if (it == migrated.end()) {
+            migrated.emplace(std::move(newKey), kv.second);
+        } else {
+            // Collision: two input keys collapsed to the same target. Keep
+            // the newer tombstone (higher CN, createTimeUnix tiebreaker) so
+            // the strongest resurrection guard survives.
+            bool incomingNewer = kv.second.cn > it->second.cn ||
+                (kv.second.cn == it->second.cn &&
+                 kv.second.createTimeUnix > it->second.createTimeUnix);
+            if (incomingNewer) it->second = kv.second;
+            anyChanged = true;
+        }
+    }
+    if (anyChanged) {
+        if (!SaveDeletedLocked(accountId, appId, migrated)) {
+            LOG("MigrateDeletedKeys: app %u rewrite of %zu tombstone(s) NOT persisted",
+                appId, migrated.size());
+            // Return the (not-yet-persisted) migrated view so the caller can
+            // keep going in-memory — a future sync retries the persist.
+            // Caveat: during this failed-persist sync, any ClearDeleted on a
+            // canonical key will miss the still-legacy on-disk entry and
+            // silently no-op. The next successful migration closes the gap.
+            outFinalState = std::move(migrated);
+            return false;
+        }
+        LOG("MigrateDeletedKeys: app %u migrated %zu key(s) (format_upgrade=%d), final tombstone count %zu",
+            appId, outMigratedCount, needsFormatRewrite ? 1 : 0, migrated.size());
+    }
+    outFinalState = std::move(migrated);
+    return true;
+}
+
+void EvictTombstonesNotIn(uint32_t accountId, uint32_t appId,
+                          const std::unordered_set<std::string>& keepSet,
+                          uint64_t listingCapturedAtUnix) {
+    // Defensive: an empty keepSet would nuke every tombstone. Callers that
+    // observe provider listing success with zero entries should skip this
+    // function entirely, but we check again here to guarantee "accidentally
+    // unprotected save resurrection" cannot happen if the gate upstream
+    // regresses.
+    if (keepSet.empty()) return;
+
+    std::lock_guard<std::shared_mutex> lock(g_mutex);
+    auto deleted = LoadDeletedLocked(accountId, appId, nullptr);
+    if (deleted.empty()) return;
+
+    size_t before = deleted.size();
+    int evicted = 0;
+    int protectedByCutoff = 0;
+    for (auto it = deleted.begin(); it != deleted.end(); ) {
+        if (keepSet.count(it->first) != 0) {
+            // Cloud confirms the file exists — tombstone is still protecting
+            // against resurrection. Keep it.
+            ++it;
+            continue;
+        }
+        // Tombstone filename absent from cloud listing. Evict only if the
+        // tombstone was written BEFORE the listing snapshot — otherwise we
+        // might be evicting a tombstone for a file whose cloud blob exists
+        // but post-dated the listing snapshot, reopening the resurrection
+        // window that MarkDeleted's caller was trying to close.
+        //
+        // Legacy tombstones (createTimeUnix == 0) definitionally predate any
+        // meaningful listing snapshot and pass the gate.
+        bool predatesListing = (it->second.createTimeUnix == 0) ||
+                               (listingCapturedAtUnix > 0 &&
+                                it->second.createTimeUnix < listingCapturedAtUnix);
+        if (!predatesListing) {
+            ++protectedByCutoff;
+            ++it;
+            continue;
+        }
+        it = deleted.erase(it);
+        ++evicted;
+    }
+    if (evicted == 0) {
+        if (protectedByCutoff > 0) {
+            LOG("EvictTombstonesNotIn: app %u nothing evicted (%d tombstone(s) protected by listing-time cutoff)",
+                appId, protectedByCutoff);
+        }
+        return;
+    }
+
+    if (!SaveDeletedLocked(accountId, appId, deleted)) {
+        LOG("EvictTombstonesNotIn: app %u batch eviction (%d entries) NOT persisted",
+            appId, evicted);
+        return;
+    }
+    LOG("EvictTombstonesNotIn: app %u evicted %d tombstone(s) confirmed absent from cloud (%zu -> %zu, %d protected by cutoff)",
+        appId, evicted, before, deleted.size(), protectedByCutoff);
+}
+
 bool IsDeleted(uint32_t accountId, uint32_t appId, const std::string& filename) {
     if (filename.empty()) return false;
     std::shared_lock<std::shared_mutex> lock(g_mutex);
