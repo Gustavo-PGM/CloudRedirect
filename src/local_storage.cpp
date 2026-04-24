@@ -4,11 +4,14 @@
 #include <wincrypt.h>
 #include <ShlObj.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstring>
 #include <shared_mutex>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #pragma comment(lib, "Advapi32.lib")
 #pragma comment(lib, "Shell32.lib")
 
@@ -781,6 +784,130 @@ static std::string FindGameInstallPath(const std::string& steamPath, uint32_t ap
     return {};
 }
 
+// Read and parse cn.dat. Returns one of:
+//   Absent: file does not exist or could not be opened. Caller falls back
+//           to a "new install" default (typically 1). Not logged loudly.
+//   Valid:  file content parses as a positive decimal uint64 with no
+//           trailing garbage. outCn is set.
+//   Corrupt:file exists but content is empty, non-numeric, has trailing
+//           non-whitespace garbage, or overflows uint64. Logged as an
+//           ERROR and the file is quarantined by the caller so a
+//           subsequent write does NOT silently clobber forensic evidence.
+// Legacy exact-"0" content is accepted as Absent (not Corrupt) because
+// earlier revisions of this codebase wrote 0 and normalized it on read.
+enum class CNParseResult { Absent, Valid, Corrupt };
+
+static CNParseResult ReadCNFile(const std::string& path, uint64_t& outCn) {
+    outCn = 0;
+    // The entire parser must be exception-safe: a corrupt cn.dat is exactly
+    // the input we exist to handle, and an OOM / bad_alloc during parsing
+    // would propagate out of GetChangeNumber holding the exclusive g_mutex
+    // (RAII releases but callers are not structured to expect throws here).
+    try {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return CNParseResult::Absent;
+
+        // Hard cap the read. A valid CN is a decimal uint64 ≤ 20 digits
+        // plus optional trailing newline — 64 bytes is generous. An
+        // uncapped read on a multi-gigabyte corrupt file (FS bleed, AV
+        // quarantine placeholder, ransomware padding) would OOM a 32-bit
+        // process long before we got to validate.
+        constexpr size_t kMaxCNBytes = 64;
+        char buf[kMaxCNBytes + 1] = {0};
+        f.read(buf, kMaxCNBytes);
+        std::streamsize n = f.gcount();
+        if (n <= 0) return CNParseResult::Corrupt;
+
+        // If the file has more data than our cap, it's not a valid cn.dat.
+        // `f.read` stops at n == kMaxCNBytes only when there is more; peek
+        // to distinguish "exactly at cap" from "more remaining".
+        if (static_cast<size_t>(n) == kMaxCNBytes && f.peek() != EOF) {
+            return CNParseResult::Corrupt;
+        }
+
+        std::string content(buf, static_cast<size_t>(n));
+        // Embedded NUL / non-printable anywhere is corruption. Do NOT use
+        // NUL as a read delimiter — a torn write "847\0<junk>" must not be
+        // silently accepted as the valid prefix "847".
+        for (char c : content) {
+            if (c == '\0') return CNParseResult::Corrupt;
+        }
+
+        // Trim trailing whitespace/newlines only (leading whitespace => corrupt).
+        while (!content.empty() && (content.back() == '\n' || content.back() == '\r' ||
+                                    content.back() == ' ' || content.back() == '\t')) {
+            content.pop_back();
+        }
+        if (content.empty()) return CNParseResult::Corrupt;
+
+        // Require pure decimal digits. Any other byte (sign, whitespace,
+        // garbage after a digit prefix, multi-byte UTF-8) is corruption.
+        for (char c : content) {
+            if (c < '0' || c > '9') return CNParseResult::Corrupt;
+        }
+        // Legacy: exact "0" treated as Absent per comment above.
+        if (content == "0") return CNParseResult::Absent;
+
+        // Parse with overflow detection.
+        size_t consumed = 0;
+        unsigned long long v = std::stoull(content, &consumed);
+        if (consumed != content.size()) return CNParseResult::Corrupt;
+        outCn = static_cast<uint64_t>(v);
+        return CNParseResult::Valid;
+    } catch (...) {
+        return CNParseResult::Corrupt;
+    }
+}
+
+// Rename a corrupt cn.dat aside so subsequent increments do not overwrite
+// it. Preserves forensic evidence for users/support to inspect. Logs at
+// ERROR level so the corruption is surfaced loudly. Best-effort: if the
+// rename itself fails, we still fall through to the default CN because
+// refusing to boot the app is worse than a cautious reset.
+static void QuarantineCorruptCNFile(const std::string& cnPath, uint32_t appId) {
+    // Monotonic in-process counter defends against same-microsecond or
+    // clock-rewound collisions across repeated corruption events within a
+    // single session. Combined with the wall clock and PID, collisions
+    // across sessions are effectively impossible.
+    static std::atomic<uint64_t> quarantineSeq{0};
+    try {
+        auto now = std::chrono::system_clock::now().time_since_epoch();
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+        uint64_t seq = quarantineSeq.fetch_add(1, std::memory_order_relaxed);
+        uint32_t pid = static_cast<uint32_t>(GetCurrentProcessId());
+        std::string base = cnPath + ".corrupt." + std::to_string(us) + "." +
+                           std::to_string(pid) + "." + std::to_string(seq);
+
+        // Collision-safe: std::filesystem::rename on Windows maps to
+        // MoveFileExW with MOVEFILE_REPLACE_EXISTING, silently clobbering
+        // a prior quarantine file. Loop on an incrementing suffix if the
+        // target already exists.
+        std::string quarantinePath = base;
+        for (int dup = 1; dup < 1000; ++dup) {
+            std::error_code existEc;
+            if (!std::filesystem::exists(quarantinePath, existEc)) break;
+            quarantinePath = base + "." + std::to_string(dup);
+        }
+
+        std::error_code ec;
+        std::filesystem::rename(cnPath, quarantinePath, ec);
+        if (ec) {
+            LOG("ERROR GetChangeNumber: cn.dat for app %u was corrupt and could not be "
+                "quarantined (%s); subsequent increments may overwrite it",
+                appId, ec.message().c_str());
+        } else {
+            LOG("ERROR GetChangeNumber: cn.dat for app %u was corrupt; quarantined to %s",
+                appId, quarantinePath.c_str());
+        }
+    } catch (...) {
+        // Best-effort: any allocation/clock exception here must not
+        // propagate out of GetChangeNumber / IncrementChangeNumber while
+        // they hold g_mutex.
+        LOG("ERROR GetChangeNumber: cn.dat for app %u was corrupt and quarantine "
+            "raised an exception; file left in place", appId);
+    }
+}
+
 // Persist change number to disk (must be called while holding g_mutex)
 static void SaveChangeNumberLocked(uint32_t accountId, uint32_t appId) {
     auto key = MakeKey(accountId, appId);
@@ -829,20 +956,26 @@ uint64_t GetChangeNumber(uint32_t accountId, uint32_t appId) {
     auto it = g_changeNumbers.find(key);
     if (it != g_changeNumbers.end()) return it->second;
 
-    // Load from disk if not in memory
     std::string cnPath = GetAppPathInternal(accountId, appId) + "cn.dat";
-    std::ifstream f(cnPath);
-    if (f) {
-        uint64_t cn = 0;
-        f >> cn;
-        if (cn > 0) {
+    uint64_t cn = 0;
+    switch (ReadCNFile(cnPath, cn)) {
+        case CNParseResult::Valid:
             g_changeNumbers[key] = cn;
             LOG("GetChangeNumber: loaded CN=%llu from disk for app %u", cn, appId);
             return cn;
-        }
+        case CNParseResult::Corrupt:
+            // A corrupt cn.dat is a strong signal that the last write was
+            // interrupted or the file was tampered with. Quarantine it so
+            // that a subsequent IncrementChangeNumber does NOT overwrite
+            // the damaged content with a fresh small value — the old file
+            // stays on disk for inspection. Fall through to default 1.
+            QuarantineCorruptCNFile(cnPath, appId);
+            break;
+        case CNParseResult::Absent:
+            break;
     }
 
-    // Default: if we have any files, start at 1
+    // Default: new install / no local history.
     g_changeNumbers[key] = 1;
     return 1;
 }
@@ -860,11 +993,26 @@ uint64_t IncrementChangeNumber(uint32_t accountId, uint32_t appId) {
     auto key = MakeKey(accountId, appId);
     auto it = g_changeNumbers.find(key);
     if (it == g_changeNumbers.end()) {
-        // Load from disk first if not in memory
+        // Mirror GetChangeNumber's corrupt-detection path so a damaged
+        // cn.dat is quarantined rather than silently overwritten with a
+        // small fresh value. Falling back to 1 here means the first
+        // increment publishes CN=2 — previously the same code silently
+        // "reset to 2" on corrupt input with no forensic trace.
         std::string cnPath = GetAppPathInternal(accountId, appId) + "cn.dat";
-        std::ifstream f(cnPath);
         uint64_t cn = 1;
-        if (f) { f >> cn; if (cn == 0) cn = 1; }
+        uint64_t parsed = 0;
+        switch (ReadCNFile(cnPath, parsed)) {
+            case CNParseResult::Valid:
+                cn = parsed;
+                break;
+            case CNParseResult::Corrupt:
+                QuarantineCorruptCNFile(cnPath, appId);
+                cn = 1;
+                break;
+            case CNParseResult::Absent:
+                cn = 1;
+                break;
+        }
         g_changeNumbers[key] = cn;
     }
     uint64_t newCN = ++g_changeNumbers[key];
