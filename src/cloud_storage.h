@@ -49,9 +49,6 @@ bool BlobExists(uint32_t accountId, uint32_t appId,
 ICloudProvider::ExistsStatus CheckBlobExists(uint32_t accountId, uint32_t appId,
                                              const std::string& filename);
 
-// Get the authoritative change number (max of local and cloud).
-uint64_t GetChangeNumber(uint32_t accountId, uint32_t appId);
-
 // Root token persistence — same as before but also syncs to cloud.
 void SaveRootTokens(uint32_t accountId, uint32_t appId,
                     const std::unordered_set<std::string>& tokens);

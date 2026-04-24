@@ -857,13 +857,6 @@ ICloudProvider::ExistsStatus CheckBlobExists(uint32_t accountId, uint32_t appId,
 
 
 // Helper: read a small file from local storage path
-static std::string ReadLocalText(const std::string& path) {
-    std::ifstream f(path);
-    if (!f) return "";
-    return std::string(std::istreambuf_iterator<char>(f),
-                       std::istreambuf_iterator<char>());
-}
-
 // Helper: write a small text file to local storage path (atomic via .tmp+rename)
 static bool WriteLocalText(const std::string& path, const std::string& content) {
     auto parent = std::filesystem::path(path).parent_path();
@@ -880,19 +873,13 @@ static bool WriteLocalText(const std::string& path, const std::string& content) 
 // SaveMetadata: removed — metadata.json was never created locally by any code path.
 // With the blob→storage copy in SyncFromCloud, GetFileList() works on restore
 // without a separate metadata file.
-
-uint64_t GetChangeNumber(uint32_t accountId, uint32_t appId) {
-    // Read from LocalStorage's cn.dat (the authoritative local CN)
-    // CloudStorage::SyncFromCloud will have already reconciled with cloud CN
-    std::string cnPath = LocalStoragePath(accountId, appId) + "cn.dat";
-    std::string content = ReadLocalText(cnPath);
-    if (!content.empty()) {
-        try {
-            return std::stoull(content);
-        } catch (...) {}
-    }
-    return 1; // default
-}
+//
+// CloudStorage::GetChangeNumber removed: every caller uses
+// LocalStorage::GetChangeNumber (the in-memory authoritative CN). The
+// cloud_storage-local version re-parsed cn.dat from disk with std::stoull
+// inside catch(...), silently returning 1 on any parse error, which both
+// masked corruption (now handled properly via ReadCNFile/QuarantineCorruptCNFile
+// in local_storage.cpp) and invited drift from the in-memory cache.
 
 
 void SaveRootTokens(uint32_t accountId, uint32_t appId,

@@ -1681,7 +1681,20 @@ static std::vector<BkvNode> MergeStats(
         BkvNode* localAchTimes = BkvFind(localStat->children, "AchievementTimes");
 
         if (cloudAchTimes || localAchTimes) {
-            // Achievement stat: OR the bitfields
+            // Achievement stat: OR the bitfields. BkvNode is a tagged union —
+            // intVal only aliases valid storage when type == BKV_INT. If a
+            // malformed cloud stats blob carries "data" as BKV_UINT64 or
+            // BKV_FLOAT, reading cloudData->intVal is a type-confused read
+            // and ORing it into localData->intVal would persist a garbage
+            // achievement bitmask back to Steam. Skip the merge unless both
+            // sides agree the field is a 32-bit int, matching the defensive
+            // type check the regular-stat branch below already uses.
+            if (localData->type != BKV_INT || cloudData->type != BKV_INT) {
+                LOG("[MergeStats] skipping achievement OR for %s: type mismatch "
+                    "(local=%d cloud=%d)", cloudStat.name.c_str(),
+                    (int)localData->type, (int)cloudData->type);
+                continue;
+            }
             localData->intVal |= cloudData->intVal;
 
             // Ensure local has an AchievementTimes section
