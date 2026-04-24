@@ -952,6 +952,60 @@ bool DeleteFile(uint32_t accountId, uint32_t appId, const std::string& filename)
     return false;
 }
 
+bool RestoreFileIfUnchanged(uint32_t accountId, uint32_t appId,
+                            const std::string& filename,
+                            const std::vector<uint8_t>& expectedData,
+                            const std::string& backupPath,
+                            bool hadOriginal) {
+    std::lock_guard<std::shared_mutex> lock(g_mutex);
+
+    std::string appRoot = GetAppPathInternal(accountId, appId);
+    std::string fullPath = ValidateFilename(appRoot, filename);
+    if (fullPath.empty()) {
+        LOG("RestoreFileIfUnchanged BLOCKED: path traversal in filename '%s'", filename.c_str());
+        return false;
+    }
+
+    std::vector<uint8_t> currentData;
+    {
+        std::ifstream f(fullPath, std::ios::binary);
+        if (f) {
+            currentData.assign(std::istreambuf_iterator<char>(f),
+                               std::istreambuf_iterator<char>());
+        } else if (hadOriginal) {
+            // File missing but we expected to restore an original -- skip, do not clobber.
+            LOG("RestoreFileIfUnchanged: %s missing, expected to restore original; skipping",
+                filename.c_str());
+            return false;
+        }
+    }
+    if (currentData != expectedData) {
+        LOG("RestoreFileIfUnchanged: %s modified concurrently; skipping rollback",
+            filename.c_str());
+        return false;
+    }
+
+    std::error_code ec;
+    if (hadOriginal) {
+        std::filesystem::copy_file(backupPath, fullPath,
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            LOG("RestoreFileIfUnchanged: copy failed for %s: %s",
+                filename.c_str(), ec.message().c_str());
+            return false;
+        }
+    } else {
+        std::filesystem::remove(fullPath, ec);
+        if (ec) {
+            LOG("RestoreFileIfUnchanged: remove failed for %s: %s",
+                filename.c_str(), ec.message().c_str());
+            return false;
+        }
+    }
+    LOG("RestoreFileIfUnchanged: %s restored (hadOriginal=%d)", filename.c_str(), hadOriginal ? 1 : 0);
+    return true;
+}
+
 bool SetFileTimestamp(uint32_t accountId, uint32_t appId, const std::string& filename, uint64_t unixSeconds) {
     if (unixSeconds == 0) return false;
     std::lock_guard<std::shared_mutex> lock(g_mutex);

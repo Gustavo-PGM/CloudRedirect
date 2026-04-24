@@ -25,6 +25,16 @@ std::vector<uint8_t> ReadFile(uint32_t accountId, uint32_t appId, const std::str
 bool WriteFile(uint32_t accountId, uint32_t appId, const std::string& filename, const uint8_t* data, size_t len);
 bool WriteFileNoIncrement(uint32_t accountId, uint32_t appId, const std::string& filename, const uint8_t* data, size_t len);
 bool DeleteFile(uint32_t accountId, uint32_t appId, const std::string& filename);
+// Atomic rollback helper: while holding the storage mutex, compare the file's
+// current bytes to expectedData; if they match, copy backupPath over localPath
+// when hadOriginal is true, or remove localPath when hadOriginal is false.
+// Returns true if the rollback action was taken, false if the file was
+// modified concurrently or on IO failure.
+bool RestoreFileIfUnchanged(uint32_t accountId, uint32_t appId,
+                            const std::string& filename,
+                            const std::vector<uint8_t>& expectedData,
+                            const std::string& backupPath,
+                            bool hadOriginal);
 bool SetFileTimestamp(uint32_t accountId, uint32_t appId, const std::string& filename, uint64_t unixSeconds);
 uint64_t GetChangeNumber(uint32_t accountId, uint32_t appId);
 void SetChangeNumber(uint32_t accountId, uint32_t appId, uint64_t cn);

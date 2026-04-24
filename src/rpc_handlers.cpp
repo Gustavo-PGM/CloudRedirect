@@ -67,6 +67,7 @@ static std::mutex g_autoCloudTokenCacheMutex;
 static std::unordered_map<uint64_t, std::unordered_map<std::string, std::string>> g_autoCloudCanonicalTokenCache;
 static std::unordered_map<uint64_t, uint64_t> g_autoCloudCanonicalTokenGeneration;
 static std::mutex g_autoCloudPublishMutex;
+static std::mutex g_autoCloudImportMutex;
 static std::mutex g_autoCloudBootstrapMutex;
 static std::condition_variable g_autoCloudBootstrapCV;
 static std::unordered_set<uint64_t> g_autoCloudBootstrapAttemptedApps;
@@ -241,7 +242,13 @@ static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
 
     auto fileTokens = CloudStorage::LoadFileTokens(accountId, appId);
     auto rootTokens = CloudStorage::LoadRootTokens(accountId, appId);
-    size_t imported = 0;
+    struct PendingImport {
+        std::string filename;
+        std::string sourcePath;
+        uint64_t timestamp = 0;
+        std::string rootToken;
+    };
+    std::vector<PendingImport> pendingImports;
     bool tokenMetadataChanged = false;
 
     for (const auto& fe : candidates) {
@@ -288,61 +295,111 @@ static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
             continue;
         }
 
-        auto existingToken = fileTokens.find(fe.filename);
-        if (existingToken == fileTokens.end() || existingToken->second != fe.rootToken) {
-            fileTokens[fe.filename] = fe.rootToken;
-            tokenMetadataChanged = true;
-            LOG("[AutoCloudImport] Canonical root token for app %u file %s: '%s'",
-                appId, fe.filename.c_str(), fe.rootToken.c_str());
-        }
-        if (!fe.rootToken.empty() && !rootTokens.count(fe.rootToken)) {
-            rootTokens.insert(fe.rootToken);
-            tokenMetadataChanged = true;
-        }
-
-        bool readOk = false;
-        auto data = ReadWholeFile(fe.sourcePath, readOk);
-        if (!readOk) {
-            LOG("[AutoCloudImport] Failed to read source for app %u: %s", appId, fe.sourcePath.c_str());
-            continue;
-        }
-
-        const uint8_t* ptr = data.empty() ? nullptr : data.data();
-        if (!CloudStorage::StoreBlob(accountId, appId, fe.filename, ptr, data.size())) {
-            LOG("[AutoCloudImport] Failed to cache app %u file %s", appId, fe.filename.c_str());
-            continue;
-        }
-
-        LocalStorage::SetFileTimestamp(accountId, appId, fe.filename, fe.timestamp);
-        ++imported;
-        LOG("[AutoCloudImport] Imported app %u file %s from %s", appId, fe.filename.c_str(), fe.sourcePath.c_str());
+        pendingImports.push_back({ fe.filename, fe.sourcePath, fe.timestamp, fe.rootToken });
     }
 
-    if (imported == 0 && !tokenMetadataChanged) {
-        uint64_t publishGeneration = 0;
+    if (pendingImports.empty() && !tokenMetadataChanged) {
+        finish(true, cacheGeneration);
+        return;
+    }
+
+    uint64_t publishGeneration = 0;
+    size_t imported = 0;
+    uint64_t cn = 0;
+    // Hold g_autoCloudImportMutex only across the critical region that
+    // reads cloud state, writes local blobs, and persists token metadata.
+    // Blocking network calls (DrainQueueForApp, PushCNToCloudSync) run
+    // OUTSIDE this mutex so unrelated RPC paths that call
+    // InvalidateTokenCaches are not stalled on slow providers. The
+    // generation check after the drains detects any concurrent
+    // invalidation that may have raced in during the unlocked window.
+    std::unique_lock<std::mutex> importLock(g_autoCloudImportMutex);
+    {
         std::lock_guard<std::mutex> publishLock(g_autoCloudPublishMutex);
         if (!TryInvalidateTokenCachesForGeneration(accountId, appId, cacheGeneration, publishGeneration)) {
             finish(false, cacheGeneration);
             return;
         }
+    }
+    {
+        for (auto& pending : pendingImports) {
+            if (HasPersistedLocalCloudHistory(accountId, appId)) {
+                LOG("[AutoCloudImport] Skipping app %u file %s because CN appeared before commit",
+                    appId, pending.filename.c_str());
+                continue;
+            }
+            auto blobStatus = CloudStorage::CheckBlobExists(accountId, appId, pending.filename);
+            if (blobStatus != ICloudProvider::ExistsStatus::Missing) {
+                LOG("[AutoCloudImport] Skipping app %u file %s because blob appeared before commit",
+                    appId, pending.filename.c_str());
+                continue;
+            }
+            bool readOk = false;
+            auto data = ReadWholeFile(pending.sourcePath, readOk);
+            if (!readOk) {
+                LOG("[AutoCloudImport] Failed to read source before commit for app %u: %s",
+                    appId, pending.sourcePath.c_str());
+                continue;
+            }
+            const uint8_t* ptr = data.empty() ? nullptr : data.data();
+            if (!CloudStorage::StoreBlob(accountId, appId, pending.filename, ptr, data.size())) {
+                LOG("[AutoCloudImport] Failed to cache app %u file %s", appId, pending.filename.c_str());
+                continue;
+            }
+            auto existingToken = fileTokens.find(pending.filename);
+            if (existingToken == fileTokens.end() || existingToken->second != pending.rootToken) {
+                fileTokens[pending.filename] = pending.rootToken;
+                tokenMetadataChanged = true;
+                LOG("[AutoCloudImport] Canonical root token for app %u file %s: '%s'",
+                    appId, pending.filename.c_str(), pending.rootToken.c_str());
+            }
+            if (!pending.rootToken.empty() && !rootTokens.count(pending.rootToken)) {
+                rootTokens.insert(pending.rootToken);
+                tokenMetadataChanged = true;
+            }
+            LocalStorage::SetFileTimestamp(accountId, appId, pending.filename, pending.timestamp);
+            ++imported;
+            LOG("[AutoCloudImport] Imported app %u file %s", appId, pending.filename.c_str());
+        }
+        if (imported == 0 && !tokenMetadataChanged) {
+            finish(true, publishGeneration);
+            return;
+        }
+        if (!rootTokens.empty()) CloudStorage::SaveRootTokens(accountId, appId, rootTokens);
+        if (!fileTokens.empty() || tokenMetadataChanged) CloudStorage::SaveFileTokens(accountId, appId, fileTokens);
+    }
+    // Release the import mutex before any blocking network calls.
+    importLock.unlock();
+    // Drain blobs/tokens. On failure we keep the local state (user's save is
+    // authoritative locally) and defer CN publish to async retry to avoid
+    // orphaning any provider blobs that already uploaded successfully.
+    bool drained = CloudStorage::DrainQueueForApp(accountId, appId);
+    if (GetAutoCloudCanonicalTokenGeneration(accountId, appId) != publishGeneration) {
+        finish(false, publishGeneration);
+        return;
+    }
+    cn = LocalStorage::IncrementChangeNumber(accountId, appId);
+    bool cnPublished = drained && CloudStorage::PushCNToCloudSync(accountId, appId, cn);
+    if (!cnPublished) {
+        LOG("[AutoCloudImport] Imported app %u locally but could not publish CN=%llu (drained=%d); "
+            "enqueuing async retry and draining",
+            appId, cn, drained ? 1 : 0);
+        CloudStorage::PushCNToCloud(accountId, appId, cn);
+        // Block on the async retry so we don't drop the CN publish if the
+        // process exits before the worker picks it up.
+        CloudStorage::DrainQueueForApp(accountId, appId);
+    }
+    // Re-check generation before publishing canonical tokens; any concurrent
+    // InvalidateTokenCaches during the unlocked drain window bumps the
+    // generation and invalidates our cached candidates.
+    if (GetAutoCloudCanonicalTokenGeneration(accountId, appId) != publishGeneration) {
+        finish(false, publishGeneration);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> publishLock(g_autoCloudPublishMutex);
         CacheAutoCloudCanonicalTokens(accountId, appId, candidates, publishGeneration);
-        finish(true, publishGeneration);
-        return;
     }
-
-    uint64_t publishGeneration = 0;
-    std::lock_guard<std::mutex> publishLock(g_autoCloudPublishMutex);
-    if (!TryInvalidateTokenCachesForGeneration(accountId, appId, cacheGeneration, publishGeneration)) {
-        finish(false, cacheGeneration);
-        return;
-    }
-    if (!rootTokens.empty()) CloudStorage::SaveRootTokens(accountId, appId, rootTokens);
-    if (!fileTokens.empty() || tokenMetadataChanged) CloudStorage::SaveFileTokens(accountId, appId, fileTokens);
-    if (imported > 0) CloudStorage::DrainQueueForApp(accountId, appId);
-    uint64_t cn = LocalStorage::IncrementChangeNumber(accountId, appId);
-    CloudStorage::PushCNToCloud(accountId, appId, cn);
-    CloudStorage::DrainQueueForApp(accountId, appId);
-    CacheAutoCloudCanonicalTokens(accountId, appId, candidates, publishGeneration);
     LOG("[AutoCloudImport] Imported %zu AutoCloud file(s), updatedTokens=%u for app %u, CN=%llu",
         imported, tokenMetadataChanged ? 1 : 0, appId, cn);
     finish(true, publishGeneration);
@@ -641,6 +698,7 @@ static void MarkFileTokensDirty(uint32_t accountId, uint32_t appId) {
 }
 
 static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId) {
+    std::lock_guard<std::mutex> importLock(g_autoCloudImportMutex);
     std::lock_guard<std::mutex> publishLock(g_autoCloudPublishMutex);
     uint64_t key = MakeAppAccountKey(accountId, appId);
     {
@@ -1757,14 +1815,27 @@ PB::Writer HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& req
     if (!RequireAccountId("CompleteAppUploadBatchBlocking", appId, accountId)) {
         return PB::Writer();
     }
+    // Drain cloud sync queue so blobs/tokens land before we advance CN. If the
+    // drain fails we still advance local CN to stay consistent with the local
+    // writes already committed by HandleCommitFileUpload / PersistFileTokens,
+    // and enqueue an async CN retry so cloud CN catches up later.
+    bool drained = CloudStorage::DrainQueueForApp(accountId, appId);
+    uint64_t previousCN = LocalStorage::GetChangeNumber(accountId, appId);
     uint64_t newCN = LocalStorage::IncrementChangeNumber(accountId, appId);
-    LOG("[NS] CompleteBatch app=%u CN=%llu", appId, newCN);
-
-    // Push updated CN to cloud provider
-    CloudStorage::PushCNToCloud(accountId, appId, newCN);
-
-    // Drain cloud sync queue -- ensure all blobs are pushed before we tell Steam "batch done"
-    CloudStorage::DrainQueueForApp(accountId, appId);
+    LOG("[NS] CompleteBatch app=%u CN=%llu (drained=%d)", appId, newCN, drained ? 1 : 0);
+    bool cnPublished = drained && CloudStorage::PushCNToCloudSync(accountId, appId, newCN);
+    if (!cnPublished) {
+        // Async retry: if drain failed this will also retry the queued blobs.
+        CloudStorage::PushCNToCloud(accountId, appId, newCN);
+        LOG("[NS] CompleteBatch app=%u deferring CN publish to async retry (previousCN=%llu)",
+            appId, previousCN);
+        // Block on the async retry so process exit doesn't drop the CN publish
+        // or leave failed deletes unretried (mirrors BootstrapAutoCloudFilesWorker).
+        // This also requeues any failed Upload/Delete work for this prefix, which
+        // is critical for batches that contain deletes -- otherwise a failed cloud
+        // delete could resurrect the file on the next SyncFromCloud.
+        CloudStorage::DrainQueueForApp(accountId, appId);
+    }
     ClearBatchCanonicalTokens(accountId, appId);
     PB::Writer body; // empty response
     return body;
