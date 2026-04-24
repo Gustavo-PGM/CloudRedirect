@@ -82,6 +82,14 @@ bool DrainQueueForApp(uint32_t accountId, uint32_t appId);
 void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn);
 bool PushCNToCloudSync(uint32_t accountId, uint32_t appId, uint64_t cn);
 
+// End-of-batch publish policy: drain pending work, then synchronously push
+// CN. If either step fails, enqueue an async CN retry and block once more on
+// DrainQueueForApp so process exit does not drop the CN publish or leave
+// failed uploads/deletes unretried.
+// Returns true only when both the drain and the sync CN push succeeded
+// without going through the retry path.
+bool CommitCNWithRetry(uint32_t accountId, uint32_t appId, uint64_t cn);
+
 // Show an immediate error dialog for critical auth failures (e.g. token refresh broken).
 // Called by provider implementations (GDrive, OneDrive) when refresh fails.
 void NotifyAuthFailure(const std::string& providerName);

@@ -549,6 +549,21 @@ bool PushCNToCloudSync(uint32_t accountId, uint32_t appId, uint64_t cn) {
     return g_provider->Upload(cloudPath, reinterpret_cast<const uint8_t*>(cnStr.data()), cnStr.size());
 }
 
+bool CommitCNWithRetry(uint32_t accountId, uint32_t appId, uint64_t cn) {
+    bool drained = DrainQueueForApp(accountId, appId);
+    bool cnPublished = drained && PushCNToCloudSync(accountId, appId, cn);
+    if (cnPublished) return true;
+    // Async retry so the CN publish survives process exit; blocking drain
+    // also forces retry of any failed Uploads/Deletes for this app prefix,
+    // critical for batches that contain deletes (otherwise a failed cloud
+    // delete could resurrect on the next SyncFromCloud).
+    LOG("[CloudStorage] CommitCNWithRetry app %u CN=%llu drained=%d: deferring to async retry",
+        appId, (unsigned long long)cn, drained ? 1 : 0);
+    PushCNToCloud(accountId, appId, cn);
+    DrainQueueForApp(accountId, appId);
+    return false;
+}
+
 
 void Init(const std::string& localRoot, std::unique_ptr<ICloudProvider> provider) {
     std::lock_guard<std::mutex> lock(g_mutex);

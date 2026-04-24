@@ -368,27 +368,20 @@ static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
         if (!rootTokens.empty()) CloudStorage::SaveRootTokens(accountId, appId, rootTokens);
         if (!fileTokens.empty() || tokenMetadataChanged) CloudStorage::SaveFileTokens(accountId, appId, fileTokens);
     }
-    // Release the import mutex before any blocking network calls.
+    // Release the import mutex before any blocking network calls so unrelated
+    // RPC paths that call InvalidateTokenCaches are not stalled on slow
+    // providers. Generation checks before and after the network-bound work
+    // detect concurrent invalidations that raced in during the unlocked
+    // window.
     importLock.unlock();
-    // Drain blobs/tokens. On failure we keep the local state (user's save is
-    // authoritative locally) and defer CN publish to async retry to avoid
-    // orphaning any provider blobs that already uploaded successfully.
-    bool drained = CloudStorage::DrainQueueForApp(accountId, appId);
     if (GetAutoCloudCanonicalTokenGeneration(accountId, appId) != publishGeneration) {
         finish(false, publishGeneration);
         return;
     }
     cn = LocalStorage::IncrementChangeNumber(accountId, appId);
-    bool cnPublished = drained && CloudStorage::PushCNToCloudSync(accountId, appId, cn);
-    if (!cnPublished) {
-        LOG("[AutoCloudImport] Imported app %u locally but could not publish CN=%llu (drained=%d); "
-            "enqueuing async retry and draining",
-            appId, cn, drained ? 1 : 0);
-        CloudStorage::PushCNToCloud(accountId, appId, cn);
-        // Block on the async retry so we don't drop the CN publish if the
-        // process exits before the worker picks it up.
-        CloudStorage::DrainQueueForApp(accountId, appId);
-    }
+    // CommitCNWithRetry drains + syncs CN; on failure it async-retries and
+    // blocks on a second drain so process exit does not drop the publish.
+    CloudStorage::CommitCNWithRetry(accountId, appId, cn);
     // Re-check generation before publishing canonical tokens; any concurrent
     // InvalidateTokenCaches during the unlocked drain window bumps the
     // generation and invalidates our cached candidates.
@@ -1815,27 +1808,14 @@ PB::Writer HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& req
     if (!RequireAccountId("CompleteAppUploadBatchBlocking", appId, accountId)) {
         return PB::Writer();
     }
-    // Drain cloud sync queue so blobs/tokens land before we advance CN. If the
-    // drain fails we still advance local CN to stay consistent with the local
-    // writes already committed by HandleCommitFileUpload / PersistFileTokens,
-    // and enqueue an async CN retry so cloud CN catches up later.
-    bool drained = CloudStorage::DrainQueueForApp(accountId, appId);
-    uint64_t previousCN = LocalStorage::GetChangeNumber(accountId, appId);
+    // Advance CN to stay consistent with the local writes already committed
+    // by HandleCommitFileUpload / PersistFileTokens. CommitCNWithRetry drains
+    // pending blob/token work, publishes CN, and on failure async-retries +
+    // blocks on a second drain so process exit does not drop the publish and
+    // failed deletes do not resurrect on the next SyncFromCloud.
     uint64_t newCN = LocalStorage::IncrementChangeNumber(accountId, appId);
-    LOG("[NS] CompleteBatch app=%u CN=%llu (drained=%d)", appId, newCN, drained ? 1 : 0);
-    bool cnPublished = drained && CloudStorage::PushCNToCloudSync(accountId, appId, newCN);
-    if (!cnPublished) {
-        // Async retry: if drain failed this will also retry the queued blobs.
-        CloudStorage::PushCNToCloud(accountId, appId, newCN);
-        LOG("[NS] CompleteBatch app=%u deferring CN publish to async retry (previousCN=%llu)",
-            appId, previousCN);
-        // Block on the async retry so process exit doesn't drop the CN publish
-        // or leave failed deletes unretried (mirrors BootstrapAutoCloudFilesWorker).
-        // This also requeues any failed Upload/Delete work for this prefix, which
-        // is critical for batches that contain deletes -- otherwise a failed cloud
-        // delete could resurrect the file on the next SyncFromCloud.
-        CloudStorage::DrainQueueForApp(accountId, appId);
-    }
+    bool committed = CloudStorage::CommitCNWithRetry(accountId, appId, newCN);
+    LOG("[NS] CompleteBatch app=%u CN=%llu committed=%d", appId, newCN, committed ? 1 : 0);
     ClearBatchCanonicalTokens(accountId, appId);
     PB::Writer body; // empty response
     return body;
