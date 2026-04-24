@@ -659,18 +659,18 @@ bool IsCloudActive() {
 bool StoreBlob(uint32_t accountId, uint32_t appId,
                const std::string& filename,
                const uint8_t* data, size_t len) {
-    // 1. Write to local cache (synchronous — the HTTP server needs this immediately)
-    std::string localPath = LocalBlobPath(accountId, appId, filename);
-    if (localPath.empty()) return false; // path traversal blocked
-    {
-        auto parent = std::filesystem::path(localPath).parent_path();
-        std::filesystem::create_directories(parent);
-
-        // Atomic write: write to .tmp then rename to avoid partial reads
-        if (!FileUtil::AtomicWriteBinary(localPath, data, len)) {
-            LOG("[CloudStorage] StoreBlob: atomic write failed: %s (%zu bytes)", localPath.c_str(), len);
-            return false;
-        }
+    // 1. Write to local cache (synchronous — the HTTP server needs this immediately).
+    //
+    // Route through LocalStorage::WriteFileNoIncrement so the write is serialized
+    // against SyncFromCloud's staged-blob promotion and RestoreFileIfUnchanged
+    // rollback under LocalStorage's g_mutex. Without this, two concurrent writers
+    // (game save via HTTP StoreBlob + cloud pull promoting a staged blob) race at
+    // the filesystem-rename layer and RestoreFileIfUnchanged's compare-and-restore
+    // cannot reliably detect the collision, risking silent save loss.
+    if (!LocalStorage::WriteFileNoIncrement(accountId, appId, filename, data, len)) {
+        LOG("[CloudStorage] StoreBlob: local write failed: app=%u file=%s (%zu bytes)",
+            appId, filename.c_str(), len);
+        return false;
     }
     LOG("[CloudStorage] StoreBlob: cached locally: %s (%zu bytes)", filename.c_str(), len);
 
@@ -715,10 +715,11 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
         if (g_provider->Download(cloudPath, data)) {
             LOG("[CloudStorage] RetrieveBlob: downloaded from cloud: %s (%zu bytes)",
                 filename.c_str(), data.size());
-            // Populate local cache for next time (best-effort atomic write)
-            auto parent = std::filesystem::path(localPath).parent_path();
-            std::filesystem::create_directories(parent);
-            FileUtil::AtomicWriteBinary(localPath, data.data(), data.size());
+            // Populate local cache for next time, serialized with StoreBlob /
+            // SyncFromCloud promotion / RestoreFileIfUnchanged via g_mutex.
+            const uint8_t* writeData = data.empty() ? nullptr : data.data();
+            LocalStorage::WriteFileNoIncrement(accountId, appId, filename,
+                                               writeData, data.size());
             return data;
         }
         LOG("[CloudStorage] RetrieveBlob: not found in cloud: %s", filename.c_str());
@@ -1122,10 +1123,13 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                     continue;
                 }
 
-                auto parent = std::filesystem::path(localBlobFile).parent_path();
-                std::filesystem::create_directories(parent);
+                // Single authoritative write under LocalStorage::g_mutex so this
+                // cannot race StoreBlob or RestoreFileIfUnchanged. CN was already
+                // set from the cloud response in step 1 (matching real Steam
+                // behavior where CN is set once, not per-file), hence No-Increment.
                 const uint8_t* writeData = data.empty() ? nullptr : data.data();
-                if (FileUtil::AtomicWriteBinary(localBlobFile, writeData, data.size())) {
+                if (LocalStorage::WriteFileNoIncrement(accountId, appId, filename,
+                                                       writeData, data.size())) {
                     downloaded++;
                     LOG("[CloudStorage] SyncFromCloud app %u: blob %s downloaded (%zu bytes)",
                         appId, filename.c_str(), data.size());
@@ -1135,14 +1139,6 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                         appId, filename.c_str());
                     continue;
                 }
-
-                // Also write to LocalStorage so GetFileList() can find the file.
-                // Without this, the changelist would report zero files on a fresh machine.
-                // Use WriteFileNoIncrement: CN was already set from the cloud response
-                // in step 1 (matching real Steam behavior where CN is set once, not per-file).
-                const uint8_t* localData = data.empty() ? nullptr : data.data();
-                LocalStorage::WriteFileNoIncrement(accountId, appId, filename,
-                                                  localData, data.size());
             } else {
                 failed++;
                 LOG("[CloudStorage] SyncFromCloud app %u: FAILED to download blob %s",
@@ -1170,18 +1166,20 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                     }
                 }
 
-                auto parent = std::filesystem::path(localBlobFile).parent_path();
-                std::filesystem::create_directories(parent);
+                // Promote the staged blob under LocalStorage::g_mutex so this
+                // write, StoreBlob, and the rollback RestoreFileIfUnchanged below
+                // are all mutually exclusive. Without a shared mutex the atomic
+                // filesystem rename can still clobber a concurrent StoreBlob and
+                // RestoreFileIfUnchanged's compare-and-restore would miss it.
                 const uint8_t* writeData = staged.data.empty() ? nullptr : staged.data.data();
-                if (!FileUtil::AtomicWriteBinary(localBlobFile, writeData, staged.data.size())) {
+                if (!LocalStorage::WriteFileNoIncrement(accountId, appId, staged.filename,
+                                                       writeData, staged.data.size())) {
                     failed++;
                     LOG("[CloudStorage] SyncFromCloud app %u: failed to promote staged blob %s",
                         appId, staged.filename.c_str());
                     break;
                 }
                 promoted.push_back({ staged.filename, backupPath, staged.data, localExists });
-                LocalStorage::WriteFileNoIncrement(accountId, appId, staged.filename,
-                                                   writeData, staged.data.size());
                 LOG("[CloudStorage] SyncFromCloud app %u: blob %s downloaded (%zu bytes)",
                     appId, staged.filename.c_str(), staged.data.size());
             }
