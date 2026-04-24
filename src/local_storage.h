@@ -109,6 +109,11 @@ bool TestResolveAutoCloudRootOverride(const std::string& root, const std::string
                                       std::string& outResolvedPath);
 bool TestIsSafeAutoCloudRelativePath(const std::string& path);
 bool TestParseMinimalAutoCloudKVFixture();
+// Exercises the VDF `siblings` splitter and path-safety filter.
+// Returns the cleaned extension-token list (tokens are stored without
+// leading dots, mirroring Steam's compose-time format). See
+// ParseAutoCloudSiblings doc for the rejection rules.
+std::vector<std::string> TestParseAutoCloudSiblings(const std::string& raw);
 // Exercises platforms-mask filter and exclude-list filter on a savefiles rule.
 // Returns true when the Windows rule is kept (platforms=Windows), the Linux-only
 // rule is dropped, and the exclude pattern "*.log" filters leaves correctly.

@@ -178,7 +178,75 @@ struct AutoCloudRuleNative {
     // Windows=1, MacOS=2, Linux=8 (see IDA dump of Steam platform table).
     uint32_t platforms = 0xFFFFFFFFu;
     std::vector<std::string> excludes;
+    // Steam UFS siblings: space-delimited file-extension tokens (without
+    // leading dots, e.g. "meta thumb") that share a stem with the primary
+    // pattern match. When the walker finds a file matching `pattern`, it
+    // strips that file's last extension and probes for a companion with
+    // each sibling extension. Companions that exist are uploaded as part
+    // of the same AutoCloud set, so games with side-files like .meta or
+    // .thumb stay in sync across machines.
+    //
+    // Delimiter confirmed via IDA: sub_1384DC5D0 calls
+    //   V_SplitStringInternal(siblingsStr, " ", &vec, ...)
+    // where off_139691928 resolves to the one-byte string " ". Our parser
+    // additionally accepts '\t' defensively against whitespace quirks in
+    // hand-edited fixtures.
+    //
+    // Tokens are path-safety filtered at parse time (ParseAutoCloudSiblings),
+    // rejecting empty, leading-dot, slash/backslash, "..", and control-char
+    // values. No cap on count or token length: Steam applies none, and any
+    // fail-closed cap here would either drop legitimate companions (save
+    // loss) or refuse the whole rule (catastrophic save loss). Pathological
+    // appinfo.vdf inputs are bounded instead by the existing scan budget
+    // (kMaxAutoCloudScanFiles / kMaxAutoCloudScanMillis), which each
+    // sibling-existence probe counts against.
+    std::vector<std::string> siblings;
 };
+
+// Split and filter a `siblings` VDF value into clean extension tokens.
+// Steam parity: delimiter is ' '; '\t' is accepted defensively.
+//
+// Rejects tokens that would either escape the scan root when composed into
+// "stem.<token>" or produce nonsense leaves that can never match on disk:
+//   - empty
+//   - "..":                 composes a double-dot leaf
+//   - leading '.':          Steam composes "stem.<token>" and prepends its
+//                           own dot; a user-provided leading dot yields
+//                           "stem..token" which is never a real sibling.
+//                           Rejecting matches Steam's effective outcome
+//                           (exists() would fail) while avoiding weird
+//                           intermediate path strings in our logs.
+//   - contains '/' or '\\': path traversal / directory escape.
+//   - control chars (< 0x20): filesystem-unsafe.
+//
+// This is a safety filter, not a defensive cap — valid tokens pass through
+// unchanged regardless of count or length. See
+// AutoCloudRuleNative::siblings doc for the save-loss-vs-caps reasoning.
+static std::vector<std::string> ParseAutoCloudSiblings(const std::string& raw) {
+    std::vector<std::string> out;
+    std::string token;
+    auto flush = [&]() {
+        if (token.empty()) return;
+        std::string candidate;
+        candidate.swap(token);
+        if (candidate == "..") return;
+        if (candidate.front() == '.') return;
+        for (char c : candidate) {
+            if (c == '/' || c == '\\') return;
+            if ((unsigned char)c < 0x20) return;
+        }
+        out.push_back(std::move(candidate));
+    };
+    for (char c : raw) {
+        if (c == ' ' || c == '\t') {
+            flush();
+        } else {
+            token.push_back(c);
+        }
+    }
+    flush();
+    return out;
+}
 
 static uint32_t ParseAutoCloudPlatformMask(const std::string& name) {
     std::string lower = ToLowerAscii(name);
@@ -358,6 +426,10 @@ bool TestResolveAutoCloudRootOverride(const std::string& root, const std::string
 
 bool TestIsSafeAutoCloudRelativePath(const std::string& path) {
     return IsSafeRelativePath(path);
+}
+
+std::vector<std::string> TestParseAutoCloudSiblings(const std::string& raw) {
+    return ParseAutoCloudSiblings(raw);
 }
 
 bool TestParseMinimalAutoCloudKVFixture() {
@@ -701,6 +773,21 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
                     if (ex.hasString && !ex.stringValue.empty()) {
                         rule.excludes.push_back(ex.stringValue);
                     }
+                }
+            }
+
+            // siblings: space-delimited extension tokens (e.g. "meta thumb")
+            // that share a stem with the primary match. See
+            // AutoCloudRuleNative::siblings for semantics + safety filter.
+            const auto* siblings = FindChild(entry.children, "siblings");
+            if (siblings && siblings->hasString && !siblings->stringValue.empty()) {
+                rule.siblings = ParseAutoCloudSiblings(siblings->stringValue);
+                // Operational signal only — no cap. Legitimate games rarely
+                // have more than a handful of companion extensions.
+                if (rule.siblings.size() > 32) {
+                    LOG("LoadAutoCloudRules: app %u rule root='%s' path='%s' has %zu siblings "
+                        "after safety filter (unusually large; proceeding without cap)",
+                        appId, rule.root.c_str(), rule.path.c_str(), rule.siblings.size());
                 }
             }
 
@@ -1485,6 +1572,14 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
     };
 
     std::unordered_map<std::string, std::string> seenRootsByCloudPath;
+    // Sibling-only dedupe keyed on lowercased cloudPath. Kept separate from
+    // seenRootsByCloudPath so a sibling emit never trips the primary-vs-primary
+    // root-collision check below (which is fatal to the whole bootstrap). If a
+    // later primary visits a path we previously emitted as a sibling, both
+    // records flow through to the caller; the CloudBlobPath key is filename-only
+    // so the upload path's last-writer-wins behavior is strictly better than
+    // aborting every save for the app over one companion file misconfig.
+    std::unordered_set<std::string> emittedSiblings;
     bool hasRootCollision = false;
     bool scanLimitHit = false;
     size_t visitedFiles = 0;
@@ -1590,6 +1685,77 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
             }
             seenRootsByCloudPath[collisionKey] = mapping->rootToken;
             addFile(entry, cloudPath, entry.path().string(), mapping->rootToken, mapping->rootId);
+
+            // Steam parity: expand siblings for the primary match. The
+            // walker in sub_1384DBA40 strips the primary's last extension
+            // and probes "stem.<siblingExt>" for each token. Companions
+            // that exist become CHILD CAutoCloudFile nodes of the primary;
+            // CR flattens this to individual FileEntry emits because it
+            // always sends full changelists (is_only_delta=0) and the
+            // downstream upload path treats entries independently — the
+            // tree is an internal bookkeeping detail of Steam's delta
+            // tracker that has no wire equivalent in CR.
+            //
+            // Intentionally SKIP the exclude re-check on synthesized
+            // sibling paths. Steam's walker only applies exclude during
+            // directory enumeration, and siblings are constructed from
+            // stem+ext, so exclude does not participate. A game that
+            // carries small side-files (.meta, .thumb) under a rule with
+            // exclude="*.meta" would otherwise silently lose its siblings.
+            //
+            // Siblings do NOT feed the primary root-collision map. Two
+            // rules whose siblings land on the same cloud path is a
+            // benign dedupe case, and a primary later claiming a path a
+            // sibling already emitted would cause spurious abort of the
+            // entire bootstrap — downgraded here to silent-skip because
+            // the primary record covers the file on its own.
+            for (const auto& siblingExt : rule.siblings) {
+                if (scanLimitReached()) break;
+                // Count each sibling probe against the scan budget up front,
+                // BEFORE any of the filter/continue branches below. If we only
+                // bumped on success, a pathological appinfo.vdf with thousands
+                // of sibling tokens matching non-existent files would walk the
+                // whole rule set for free and dodge kMaxAutoCloudScanFiles /
+                // kMaxAutoCloudScanMillis.
+                ++visitedFiles;
+                std::filesystem::path siblingPath = entry.path();
+                siblingPath.replace_extension(siblingExt);
+                std::error_code sibEc;
+                if (!std::filesystem::exists(siblingPath, sibEc) || sibEc) continue;
+                if (!std::filesystem::is_regular_file(siblingPath, sibEc) || sibEc) continue;
+                std::string siblingRel = NormalizeSlashes(
+                    std::filesystem::relative(siblingPath, scanRoot, sibEc).string());
+                if (sibEc || !IsSafeRelativePath(siblingRel)) continue;
+                std::string siblingCloudPath = normalizedCloudPath.empty()
+                    ? siblingRel
+                    : normalizedCloudPath + "/" + siblingRel;
+                std::string siblingKey = ToLowerAscii(NormalizeSlashes(siblingCloudPath));
+                // If a PRIMARY already claimed this cloud path under any
+                // rootToken, silently skip the sibling probe. Emitting would
+                // either duplicate the record or (cross-rule) trip the primary
+                // collision path and abort the whole bootstrap; silent-skip is
+                // the least destructive outcome because the primary record
+                // already covers the file.
+                if (seenRootsByCloudPath.find(siblingKey) != seenRootsByCloudPath.end()) {
+                    LOG("GetAutoCloudFileList: sibling %s already claimed by a primary for app %u; skipping",
+                        siblingCloudPath.c_str(), appId);
+                    continue;
+                }
+                // Sibling-vs-sibling dedupe within this bootstrap. Two rules
+                // resolving to the same sibling path is benign (same bytes,
+                // same blob key) so just skip the duplicate emit. We use a
+                // two-phase "check then commit" against emittedSiblings so
+                // that a transient stat failure below (directory_entry
+                // construction racing with AV/OneDrive/sharing violations)
+                // does not poison the dedupe set and permanently suppress
+                // later retry attempts from other primaries or rules.
+                if (emittedSiblings.find(siblingKey) != emittedSiblings.end()) continue;
+                std::filesystem::directory_entry siblingDirEntry(siblingPath, sibEc);
+                if (sibEc) continue;
+                emittedSiblings.insert(siblingKey);
+                addFile(siblingDirEntry, siblingCloudPath, siblingPath.string(),
+                        mapping->rootToken, mapping->rootId);
+            }
         };
 
         if (rule.recursive) {
