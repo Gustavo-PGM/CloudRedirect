@@ -5,11 +5,15 @@
 #include <fstream>
 
 bool LocalDiskProvider::Init(const std::string& rootPath) {
+    // m_root is the UTF-8 narrow-string form; every filesystem call routes it
+    // through FileUtil::Utf8ToPath so a non-ASCII provider root (e.g. a user
+    // profile like "C:\Users\Владимир\...") does not get ACP-mangled when
+    // constructing std::filesystem::path.
     m_root = rootPath;
     if (!m_root.empty() && m_root.back() != '\\' && m_root.back() != '/')
         m_root += '\\';
     std::error_code ec;
-    std::filesystem::create_directories(m_root, ec);
+    std::filesystem::create_directories(FileUtil::Utf8ToPath(m_root), ec);
     if (ec) {
         LOG("[LocalDiskProvider] Failed to create root %s: %s", m_root.c_str(), ec.message().c_str());
         return false;
@@ -34,18 +38,20 @@ std::string LocalDiskProvider::ToFullPath(const std::string& relPath) const {
             relPath.c_str(), m_root.c_str());
         return {};
     }
-    // Return canonical path (callers expect normalized result)
+    // Return canonical path (callers expect normalized result). UTF-8 in,
+    // UTF-8 out: weakly_canonical operates on a wide native path and
+    // PathToUtf8 round-trips the result without ACP loss.
     std::error_code ec;
-    auto canonical = std::filesystem::weakly_canonical(full, ec);
+    auto canonical = std::filesystem::weakly_canonical(FileUtil::Utf8ToPath(full), ec);
     if (ec) return {};
-    return canonical.string();
+    return FileUtil::PathToUtf8(canonical);
 }
 
 bool LocalDiskProvider::Upload(const std::string& path,
                                const uint8_t* data, size_t len) {
     std::string full = ToFullPath(path);
     if (full.empty()) return false;
-    auto parent = std::filesystem::path(full).parent_path();
+    auto parent = FileUtil::Utf8ToPath(full).parent_path();
     std::error_code ec;
     std::filesystem::create_directories(parent, ec);
     if (ec) {
@@ -63,7 +69,7 @@ bool LocalDiskProvider::Download(const std::string& path,
                                  std::vector<uint8_t>& outData) {
     std::string full = ToFullPath(path);
     if (full.empty()) return false;
-    std::ifstream f(full, std::ios::binary);
+    std::ifstream f(FileUtil::Utf8ToPath(full), std::ios::binary);
     if (!f) return false;
     outData.assign(std::istreambuf_iterator<char>(f),
                    std::istreambuf_iterator<char>());
@@ -74,7 +80,7 @@ bool LocalDiskProvider::Remove(const std::string& path) {
     std::string full = ToFullPath(path);
     if (full.empty()) return false;
     std::error_code ec;
-    std::filesystem::remove(full, ec);
+    std::filesystem::remove(FileUtil::Utf8ToPath(full), ec);
     // success if removed or never existed
     return !ec;
 }
@@ -87,10 +93,11 @@ ICloudProvider::ExistsStatus LocalDiskProvider::CheckExists(const std::string& p
     std::string full = ToFullPath(path);
     if (full.empty()) return ExistsStatus::Error;
     std::error_code ec;
-    bool exists = std::filesystem::exists(full, ec);
+    auto fsPath = FileUtil::Utf8ToPath(full);
+    bool exists = std::filesystem::exists(fsPath, ec);
     if (ec) return ExistsStatus::Error;
     if (!exists) return ExistsStatus::Missing;
-    bool regular = std::filesystem::is_regular_file(full, ec);
+    bool regular = std::filesystem::is_regular_file(fsPath, ec);
     if (ec) return ExistsStatus::Error;
     return regular ? ExistsStatus::Exists : ExistsStatus::Missing;
 }
@@ -111,10 +118,11 @@ bool LocalDiskProvider::ListChecked(const std::string& prefix, std::vector<FileI
     std::string dir = ToFullPath(prefix);
     if (dir.empty()) return false;
     std::error_code ec;
-    bool exists = std::filesystem::exists(dir, ec);
+    auto dirPath = FileUtil::Utf8ToPath(dir);
+    bool exists = std::filesystem::exists(dirPath, ec);
     if (ec) return false;
     if (!exists) { if (outComplete) *outComplete = true; return true; }
-    bool isDir = std::filesystem::is_directory(dir, ec);
+    bool isDir = std::filesystem::is_directory(dirPath, ec);
     if (ec) return false;
     if (!isDir) { if (outComplete) *outComplete = true; return true; }
 
@@ -127,7 +135,7 @@ bool LocalDiskProvider::ListChecked(const std::string& prefix, std::vector<FileI
     // would let the caller (SyncFromCloud) treat the listing as a verified
     // inventory and delete local blobs the provider actually still holds.
     // A permission error is a listing failure for our purposes.
-    std::filesystem::recursive_directory_iterator it(dir, ec);
+    std::filesystem::recursive_directory_iterator it(dirPath, ec);
     std::filesystem::recursive_directory_iterator end;
     // Per-entry filesystem errors (stale handle, concurrent deletion, AV
     // lock, reparse point race) must not silently drop files from the
@@ -143,7 +151,12 @@ bool LocalDiskProvider::ListChecked(const std::string& prefix, std::vector<FileI
         if (ec2) { sawSkippedEntries = true; continue; }
         if (!isFile) continue;
 
-        std::string rel = std::filesystem::relative(entry.path(), m_root, ec2).string();
+        // relative() needs a std::filesystem::path base; pass the wide form
+        // of m_root so non-ASCII segments in m_root match under canonical
+        // comparison. Emit UTF-8 narrow for the FileInfo.path field per
+        // ICloudProvider convention.
+        std::string rel = FileUtil::PathToUtf8(
+            std::filesystem::relative(entry.path(), FileUtil::Utf8ToPath(m_root), ec2));
         if (ec2) { sawSkippedEntries = true; continue; }
         // normalize to forward slashes (ICloudProvider convention)
         for (auto& c : rel) {

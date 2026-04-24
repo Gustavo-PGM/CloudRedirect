@@ -15,17 +15,104 @@
 
 namespace FileUtil {
 
+// UTF-8 ⇄ std::filesystem::path bridges.
+//
+// The codebase convention is that every std::string holding a path is UTF-8
+// (see GetKnownFolderPathString in local_storage.cpp, all path log fields,
+// and every cloud_path / blob_path argument across the providers).
+//
+// MSVC's std::filesystem::path(std::string) constructor and path::string()
+// method DO NOT use UTF-8: they go through the C runtime narrow encoding,
+// which on Windows is the active code page (typically CP_1252 or a regional
+// equivalent). Round-tripping a non-ASCII UTF-8 path through path::string()
+// silently mangles the bytes, and then path(string) re-interprets the
+// mangled bytes as ACP, producing a wide path that points at a different
+// (or non-existent) file. Symptoms in the wild: AutoCloud silently failing
+// for any user whose Steam install or Documents folder contains non-ASCII
+// characters (Cyrillic / CJK / accented Latin usernames are the typical
+// triggers).
+//
+// PathToUtf8 / Utf8ToPath route through the wide path explicitly so the
+// conversion is whatever Windows actually stores in NTFS, regardless of the
+// process ACP. Use these any time a path crosses the std::string ⇄
+// std::filesystem::path boundary inside this codebase.
+inline std::string PathToUtf8(const std::filesystem::path& p) {
+    const std::wstring& wide = p.native();
+    if (wide.empty()) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), (int)wide.size(),
+                                  nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string out((size_t)len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), (int)wide.size(),
+                        out.data(), len, nullptr, nullptr);
+    return out;
+}
+
+// Wide → UTF-8 narrow string. Distinct from PathToUtf8 because callers receive
+// wchar_t* directly from Win32 (FindFirstFileW results, GetModuleFileNameW,
+// GetEnvironmentVariableW) and do not have a std::filesystem::path on hand.
+// Constructing a path just to round-trip would discard the explicit length and
+// re-canonicalize the string. WC_ERR_INVALID_CHARS rejects ill-formed UTF-16
+// (lone surrogates) — we never want to write those into a UTF-8 buffer that
+// will later be sent to a cloud server or written to NTFS as a filename.
+inline std::string WideToUtf8(const wchar_t* w) {
+    if (!w || !*w) return {};
+    int len = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w, -1,
+                                  nullptr, 0, nullptr, nullptr);
+    if (len <= 1) return {};
+    std::string s(static_cast<size_t>(len - 1), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w, -1,
+                            s.data(), len, nullptr, nullptr) <= 0) {
+        return {};
+    }
+    return s;
+}
+
+// Length-explicit overload for callers that already trimmed a wide buffer
+// (e.g. GetModuleFileNameW returns the count without the null, GetSteamPath
+// slices off the filename leaf before encoding). Avoids the temporary NUL-
+// termination round-trip and the risk of splitting a surrogate pair when
+// the caller computes the length on the wide side.
+inline std::string WideToUtf8(const wchar_t* w, size_t len) {
+    if (!w || len == 0) return {};
+    int outLen = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w, (int)len,
+                                     nullptr, 0, nullptr, nullptr);
+    if (outLen <= 0) return {};
+    std::string s(static_cast<size_t>(outLen), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w, (int)len,
+                            s.data(), outLen, nullptr, nullptr) <= 0) {
+        return {};
+    }
+    return s;
+}
+
+inline std::filesystem::path Utf8ToPath(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    int wideLen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(),
+                                      nullptr, 0);
+    if (wideLen <= 0) return {};
+    std::wstring wide((size_t)wideLen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(),
+                        wide.data(), wideLen);
+    return std::filesystem::path(std::move(wide));
+}
+
 // Path containment check: returns true if `fullPath` resolves to a location
 // within `root` after canonicalization. Case-insensitive on Windows.
 // Used to prevent path traversal attacks across blob storage modules.
 inline bool IsPathWithin(const std::string& root, const std::string& fullPath) {
+    // root and fullPath are UTF-8 by codebase convention; route through the
+    // wide path so non-ASCII (Cyrillic / CJK / accented) names canonicalize
+    // and compare correctly. The previous std::string overloads silently
+    // re-interpreted the bytes as the process ACP and broke containment
+    // for any user whose Steam install lived under a non-ASCII profile.
     std::error_code ec;
-    auto canonRoot = std::filesystem::weakly_canonical(root, ec);
+    auto canonRoot = std::filesystem::weakly_canonical(Utf8ToPath(root), ec);
     if (ec) return false;
-    auto canonPath = std::filesystem::weakly_canonical(fullPath, ec);
+    auto canonPath = std::filesystem::weakly_canonical(Utf8ToPath(fullPath), ec);
     if (ec) return false;
-    std::string rootStr = canonRoot.string();
-    std::string pathStr = canonPath.string();
+    std::string rootStr = PathToUtf8(canonRoot);
+    std::string pathStr = PathToUtf8(canonPath);
     if (pathStr.size() < rootStr.size()) return false;
     if (_strnicmp(pathStr.c_str(), rootStr.c_str(), rootStr.size()) != 0) return false;
     // Exact match (path == root) or next char must be a separator
@@ -54,15 +141,16 @@ inline void CleanupEmptyDirsUpTo(const std::string& startDir,
                                  const std::string& stopAt) {
     if (startDir.empty() || stopAt.empty()) return;
     std::error_code ec;
-    auto canonStop = std::filesystem::weakly_canonical(stopAt, ec);
+    // UTF-8 → wide so non-ASCII Steam install paths canonicalize correctly.
+    auto canonStop = std::filesystem::weakly_canonical(Utf8ToPath(stopAt), ec);
     if (ec) return;
-    auto cur = std::filesystem::weakly_canonical(startDir, ec);
+    auto cur = std::filesystem::weakly_canonical(Utf8ToPath(startDir), ec);
     if (ec) return;
 
-    const std::string stopStr = canonStop.string();
+    const std::string stopStr = PathToUtf8(canonStop);
 
     for (int i = 0; i < 256; ++i) {
-        const std::string curStr = cur.string();
+        const std::string curStr = PathToUtf8(cur);
         // Must be strictly under stopAt — equal or outside stops the walk.
         if (curStr.size() <= stopStr.size()) break;
         if (_strnicmp(curStr.c_str(), stopStr.c_str(), stopStr.size()) != 0) break;
@@ -144,8 +232,13 @@ inline bool IsPathRedirectingReparsePoint(const std::string& path) {
 }
 
 inline bool AtomicWriteBinary(const std::string& path, const void* data, size_t len) {
-    std::string tmpPath = path + ".tmp";
-    std::ofstream f(tmpPath, std::ios::binary);
+    // Route through wide path so non-ASCII targets (e.g. Cyrillic Steam
+    // userdata roots) actually open. std::ofstream(std::wstring) is an MSVC
+    // extension; std::filesystem::path's wide overload is portable and the
+    // STL forwards to wide CRT internally.
+    auto pathFs = Utf8ToPath(path);
+    auto tmpPathFs = Utf8ToPath(path + ".tmp");
+    std::ofstream f(tmpPathFs, std::ios::binary);
     if (!f) return false;
     if (len != 0) {
         f.write(static_cast<const char*>(data), len);
@@ -153,33 +246,36 @@ inline bool AtomicWriteBinary(const std::string& path, const void* data, size_t 
     if (!f.good()) {
         f.close();
         std::error_code ec;
-        std::filesystem::remove(tmpPath, ec);
+        std::filesystem::remove(tmpPathFs, ec);
         return false;
     }
     f.close();
-    if (!MoveFileExA(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    if (!MoveFileExW(tmpPathFs.c_str(), pathFs.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         std::error_code ec;
-        std::filesystem::remove(tmpPath, ec);
+        std::filesystem::remove(tmpPathFs, ec);
         return false;
     }
     return true;
 }
 
 inline bool AtomicWriteText(const std::string& path, const std::string& content) {
-    std::string tmpPath = path + ".tmp";
-    std::ofstream f(tmpPath, std::ios::trunc);
+    auto pathFs = Utf8ToPath(path);
+    auto tmpPathFs = Utf8ToPath(path + ".tmp");
+    std::ofstream f(tmpPathFs, std::ios::trunc);
     if (!f) return false;
     f << content;
     if (!f.good()) {
         f.close();
         std::error_code ec;
-        std::filesystem::remove(tmpPath, ec);
+        std::filesystem::remove(tmpPathFs, ec);
         return false;
     }
     f.close();
-    if (!MoveFileExA(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    if (!MoveFileExW(tmpPathFs.c_str(), pathFs.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         std::error_code ec;
-        std::filesystem::remove(tmpPath, ec);
+        std::filesystem::remove(tmpPathFs, ec);
         return false;
     }
     return true;

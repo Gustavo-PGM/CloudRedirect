@@ -287,12 +287,12 @@ static void HandleClient(SOCKET client) {
             // leave doneFlag un-set, so PruneClientThreads never reaps the
             // slot and the 16-thread cap eventually wedges the whole server.
             std::string blobPath = BlobPath(accountId, appId, filename);
-            auto parent = std::filesystem::path(blobPath).parent_path();
+            auto parent = FileUtil::Utf8ToPath(blobPath).parent_path();
             std::error_code mkEc;
             std::filesystem::create_directories(parent, mkEc);
             if (mkEc) {
                 LOG("[HTTP] PUT %s -> create_directories '%s' FAILED: %s",
-                    path, parent.string().c_str(), mkEc.message().c_str());
+                    path, FileUtil::PathToUtf8(parent).c_str(), mkEc.message().c_str());
                 const char* errResponse =
                     "HTTP/1.1 500 Internal Server Error\r\n"
                     "Content-Length: 0\r\n"
@@ -355,7 +355,7 @@ static void HandleClient(SOCKET client) {
 
         if (ParseBlobPath(path, "/download/", accountId, appId, filename)) {
             std::string blobPath = BlobPath(accountId, appId, filename);
-            std::ifstream f(blobPath, std::ios::binary | std::ios::ate);
+            std::ifstream f(FileUtil::Utf8ToPath(blobPath), std::ios::binary | std::ios::ate);
 
             if (f) {
                 auto pos = f.tellg();
@@ -548,7 +548,7 @@ bool Start(const std::string& blobRoot, uint32_t accountId) {
     if (!g_blobRoot.empty() && g_blobRoot.back() != '\\')
         g_blobRoot += '\\';
     std::error_code rootEc;
-    std::filesystem::create_directories(g_blobRoot, rootEc);
+    std::filesystem::create_directories(FileUtil::Utf8ToPath(g_blobRoot), rootEc);
     if (rootEc) {
         LOG("[HTTP] create_directories '%s' FAILED: %s (continuing — later PUT writes will retry)",
             g_blobRoot.c_str(), rootEc.message().c_str());
@@ -658,7 +658,7 @@ bool HasBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return false;
     std::error_code ec;
-    bool ex = std::filesystem::exists(path, ec);
+    bool ex = std::filesystem::exists(FileUtil::Utf8ToPath(path), ec);
     return !ec && ex;
 }
 
@@ -666,14 +666,14 @@ uint64_t GetBlobSize(uint32_t accountId, uint32_t appId, const std::string& file
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return 0;
     std::error_code ec;
-    auto sz = std::filesystem::file_size(path, ec);
+    auto sz = std::filesystem::file_size(FileUtil::Utf8ToPath(path), ec);
     return ec ? 0 : (uint64_t)sz;
 }
 
 std::vector<uint8_t> ReadBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return {};
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(FileUtil::Utf8ToPath(path), std::ios::binary);
     if (!f) return {};
     return std::vector<uint8_t>(
         std::istreambuf_iterator<char>(f),
@@ -685,19 +685,19 @@ bool DeleteBlob(uint32_t accountId, uint32_t appId, const std::string& filename)
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return false;
     std::error_code ec;
-    return std::filesystem::remove(path, ec);
+    return std::filesystem::remove(FileUtil::Utf8ToPath(path), ec);
 }
 
 bool WriteBlob(uint32_t accountId, uint32_t appId, const std::string& filename,
                const uint8_t* data, size_t len) {
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return false;
-    auto parent = std::filesystem::path(path).parent_path();
+    auto parent = FileUtil::Utf8ToPath(path).parent_path();
     std::error_code ec;
     std::filesystem::create_directories(parent, ec);
     if (ec) {
         LOG("[HTTP] WriteBlob create_directories '%s' FAILED: %s",
-            parent.string().c_str(), ec.message().c_str());
+            FileUtil::PathToUtf8(parent).c_str(), ec.message().c_str());
         return false;
     }
     return FileUtil::AtomicWriteBinary(path, data, len);

@@ -132,14 +132,13 @@ static bool IsSafeRelativePath(const std::string& path) {
 static std::string GetKnownFolderPathString(const KNOWNFOLDERID& id) {
     PWSTR wide = nullptr;
     if (FAILED(SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &wide)) || !wide) return {};
-
-    int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
-    std::string result;
-    if (len > 1) {
-        std::string tmp((size_t)len, '\0');
-        WideCharToMultiByte(CP_UTF8, 0, wide, -1, tmp.data(), len, nullptr, nullptr);
-        result.assign(tmp.data());
-    }
+    // Route through the canonical wide→UTF-8 encoder so this site gets the
+    // same WC_ERR_INVALID_CHARS rejection of malformed UTF-16 as every other
+    // narrow-conversion call in the DLL. SHGetKnownFolderPath is system-
+    // controlled, so malformed surrogates are unlikely, but encoding policy
+    // must be uniform — otherwise the next person hardening WideToUtf8 will
+    // fix it in 1 of N places.
+    std::string result = FileUtil::WideToUtf8(wide);
     CoTaskMemFree(wide);
     return result;
 }
@@ -607,7 +606,7 @@ bool TestAutoCloudPlatformAndExcludeFilters() {
 
 static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& steamPath, uint32_t appId) {
     std::vector<AutoCloudRuleNative> rules;
-    std::filesystem::path appInfoPath = std::filesystem::path(steamPath) / "appcache" / "appinfo.vdf";
+    std::filesystem::path appInfoPath = FileUtil::Utf8ToPath(steamPath) / "appcache" / "appinfo.vdf";
     std::error_code statEc;
     auto appInfoMtime = std::filesystem::last_write_time(appInfoPath, statEc);
     auto appInfoSize = std::filesystem::file_size(appInfoPath, statEc);
@@ -627,7 +626,11 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
     };
     static std::mutex cacheMutex;
     static std::unordered_map<std::string, RulesCacheEntry> cache;
-    std::string cacheKey = appInfoPath.string() + "\n" + std::to_string(appId);
+    // Cache key: PathToUtf8 is a stable representation of the wide native path.
+    // Using path::string() would ACP-round-trip non-ASCII characters to '?' and
+    // could collide cache entries for distinct installs that differ only by
+    // non-ACP codepoints in the Steam root.
+    std::string cacheKey = FileUtil::PathToUtf8(appInfoPath) + "\n" + std::to_string(appId);
     {
         std::lock_guard<std::mutex> lock(cacheMutex);
         auto it = cache.find(cacheKey);
@@ -643,7 +646,7 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
 
     std::ifstream f(appInfoPath, std::ios::binary | std::ios::ate);
     if (!f) {
-        LOG("GetAutoCloudFileList: appinfo.vdf not found: %s", appInfoPath.string().c_str());
+        LOG("GetAutoCloudFileList: appinfo.vdf not found: %s", FileUtil::PathToUtf8(appInfoPath).c_str());
         return rules;
     }
 
@@ -868,9 +871,16 @@ static bool WildcardMatchInsensitive(const std::string& pattern, const std::stri
 
 static std::vector<std::filesystem::path> GetSteamLibraryPaths(const std::string& steamPath) {
     std::vector<std::filesystem::path> paths;
-    paths.push_back(std::filesystem::path(steamPath));
+    auto steamPathFs = FileUtil::Utf8ToPath(steamPath);
+    paths.push_back(steamPathFs);
 
-    std::ifstream f(std::filesystem::path(steamPath) / "config" / "libraryfolders.vdf");
+    // libraryfolders.vdf may live under a non-ASCII Steam install root and
+    // its "path" entries themselves can be non-ASCII when the user installed
+    // libraries on a Cyrillic/CJK volume. Ifstream(std::filesystem::path)
+    // forwards to the wide CRT so the open is correct; the parsed strings
+    // are UTF-8 (Steam writes VDF as UTF-8) and we feed them through the
+    // same wide bridge before constructing paths.
+    std::ifstream f(steamPathFs / "config" / "libraryfolders.vdf");
     if (!f) return paths;
 
     std::string line;
@@ -886,11 +896,13 @@ static std::vector<std::filesystem::path> GetSteamLibraryPaths(const std::string
             path.replace(pos, 2, "\\");
             ++pos;
         }
-        std::filesystem::path p(path);
+        std::filesystem::path p = FileUtil::Utf8ToPath(path);
         if (!std::filesystem::exists(p)) continue;
         bool seen = false;
         for (const auto& existing : paths) {
-            if (_stricmp(existing.string().c_str(), p.string().c_str()) == 0) {
+            // Compare via wide native form so non-ASCII library roots dedupe
+            // correctly. _wcsicmp is the wide-aware case-insensitive compare.
+            if (_wcsicmp(existing.native().c_str(), p.native().c_str()) == 0) {
                 seen = true;
                 break;
             }
@@ -915,7 +927,7 @@ static std::string FindGameInstallPath(const std::string& steamPath, uint32_t ap
             auto q2 = q1 == std::string::npos ? std::string::npos : line.rfind('"', q1 - 1);
             if (q1 != std::string::npos && q2 != std::string::npos && q1 > q2) {
                 auto installDir = line.substr(q2 + 1, q1 - q2 - 1);
-                return (libPath / "steamapps" / "common" / installDir).string();
+                return FileUtil::PathToUtf8(libPath / "steamapps" / "common" / installDir);
             }
         }
     }
@@ -942,7 +954,7 @@ static CNParseResult ReadCNFile(const std::string& path, uint64_t& outCn) {
     // would propagate out of GetChangeNumber holding the exclusive g_mutex
     // (RAII releases but callers are not structured to expect throws here).
     try {
-        std::ifstream f(path, std::ios::binary);
+        std::ifstream f(FileUtil::Utf8ToPath(path), std::ios::binary);
         if (!f) return CNParseResult::Absent;
 
         // Hard cap the read. A valid CN is a decimal uint64 ≤ 20 digits
@@ -1187,10 +1199,13 @@ std::vector<uint8_t> SHA1(const uint8_t* data, size_t len) {
     return hash;
 }
 
-// Streaming SHA1 — reads file in chunks to avoid loading entire file into memory
+// Streaming SHA1 — reads file in chunks to avoid loading entire file into memory.
+// path is UTF-8 by codebase convention; route through the wide bridge so
+// non-ASCII filenames open correctly (ifstream(std::string) goes through ACP
+// and silently misses any path with Cyrillic/CJK/accented characters).
 static std::vector<uint8_t> SHA1File(const std::string& path) {
     std::vector<uint8_t> hash(20, 0);
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(FileUtil::Utf8ToPath(path), std::ios::binary);
     if (!f) return hash;
 
     HCRYPTPROV hProv = 0;
@@ -1226,8 +1241,16 @@ std::vector<FileEntry> GetFileList(uint32_t accountId, uint32_t appId) {
     {
         std::shared_lock<std::shared_mutex> lock(g_mutex);
         std::string appRoot = GetAppPathInternal(accountId, appId);
+        // Convert appRoot once via Utf8ToPath. The previous implementation
+        // passed appRoot directly into std::filesystem::exists / iterator /
+        // relative which uses the implicit ACP-decoding string overload — for
+        // any non-ASCII account profile (Cyrillic / CJK userdata path) that
+        // returned false from exists(), silently producing an empty file list
+        // and skipping cloud sync entirely. Fix: convert once on the wide
+        // path side and reuse `appRootFs` for every fs call below.
+        auto appRootFs = FileUtil::Utf8ToPath(appRoot);
         std::error_code ec;
-        if (!std::filesystem::exists(appRoot, ec) || ec) return result;
+        if (!std::filesystem::exists(appRootFs, ec) || ec) return result;
 
         // ec overload with skip_permission_denied: GetFileList runs on
         // the Cloud RPC hot path. A transient I/O fault (OneDrive reparse,
@@ -1235,7 +1258,7 @@ std::vector<FileEntry> GetFileList(uint32_t accountId, uint32_t appId) {
         // boundary — bail out with whatever we have and let the caller
         // treat the app as empty this cycle.
         std::filesystem::recursive_directory_iterator it(
-            appRoot,
+            appRootFs,
             std::filesystem::directory_options::skip_permission_denied,
             ec);
         if (ec) {
@@ -1253,7 +1276,9 @@ std::vector<FileEntry> GetFileList(uint32_t accountId, uint32_t appId) {
                 continue;
             }
 
-            std::string relPath = std::filesystem::relative(entry.path(), appRoot, fileEc).string();
+            // relPath becomes a cloud filename (goes to the server & peer clients).
+            // Must be UTF-8; path::string() would ACP-encode non-ASCII names.
+            std::string relPath = FileUtil::PathToUtf8(std::filesystem::relative(entry.path(), appRootFs, fileEc));
             if (fileEc) {
                 it.increment(ec);
                 if (ec) break;
@@ -1366,7 +1391,7 @@ std::vector<uint8_t> ReadFile(uint32_t accountId, uint32_t appId, const std::str
     std::string fullPath = ValidateFilename(appRoot, filename);
     if (fullPath.empty()) return {};
 
-    std::ifstream f(fullPath, std::ios::binary);
+    std::ifstream f(FileUtil::Utf8ToPath(fullPath), std::ios::binary);
     if (!f) return {};
     return std::vector<uint8_t>(
         std::istreambuf_iterator<char>(f),
@@ -1384,12 +1409,12 @@ bool WriteFile(uint32_t accountId, uint32_t appId, const std::string& filename, 
         return false;
     }
 
-    auto parent = std::filesystem::path(fullPath).parent_path();
+    auto parent = FileUtil::Utf8ToPath(fullPath).parent_path();
     std::error_code dirEc;
     std::filesystem::create_directories(parent, dirEc);
     if (dirEc) {
         LOG("WriteFile: create_directories failed for '%s': %s",
-            parent.string().c_str(), dirEc.message().c_str());
+            FileUtil::PathToUtf8(parent).c_str(), dirEc.message().c_str());
         return false;
     }
 
@@ -1414,12 +1439,12 @@ bool WriteFileNoIncrement(uint32_t accountId, uint32_t appId, const std::string&
         return false;
     }
 
-    auto parent = std::filesystem::path(fullPath).parent_path();
+    auto parent = FileUtil::Utf8ToPath(fullPath).parent_path();
     std::error_code dirEc;
     std::filesystem::create_directories(parent, dirEc);
     if (dirEc) {
         LOG("WriteFileNoIncrement: create_directories failed for '%s': %s",
-            parent.string().c_str(), dirEc.message().c_str());
+            FileUtil::PathToUtf8(parent).c_str(), dirEc.message().c_str());
         return false;
     }
 
@@ -1473,7 +1498,7 @@ bool RestoreFileIfUnchanged(uint32_t accountId, uint32_t appId,
 
     std::vector<uint8_t> currentData;
     {
-        std::ifstream f(fullPath, std::ios::binary);
+        std::ifstream f(FileUtil::Utf8ToPath(fullPath), std::ios::binary);
         if (f) {
             currentData.assign(std::istreambuf_iterator<char>(f),
                                std::istreambuf_iterator<char>());
@@ -1569,7 +1594,7 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
         return outResult;
     }
 
-    std::filesystem::path appUserdataDir = std::filesystem::path(steamPath) / "userdata" /
+    std::filesystem::path appUserdataDir = FileUtil::Utf8ToPath(steamPath) / "userdata" /
         std::to_string(accountId) / std::to_string(appId);
 
     auto addFile = [&](const std::filesystem::directory_entry& fileEntry,
@@ -1577,7 +1602,10 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
                        const std::string& sourcePath,
                        const std::string& rootToken,
                        uint32_t rootId) {
-        std::string fileName = fileEntry.path().filename().string();
+        // filename() compare is against an ASCII literal; either ACP or UTF-8
+        // round-trips "steam_autocloud.vdf" identically, so either string()
+        // would work here. PathToUtf8 is used for codebase consistency.
+        std::string fileName = FileUtil::PathToUtf8(fileEntry.path().filename());
         if (fileName == "steam_autocloud.vdf") return;
 
         std::error_code ec;
@@ -1589,7 +1617,9 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
             return;
         }
 
-        auto sha = SHA1File(fileEntry.path().string());
+        // SHA1File opens via Utf8ToPath; feed it a UTF-8 source-path string
+        // so non-ASCII scanned paths are hashed from the correct file.
+        auto sha = SHA1File(FileUtil::PathToUtf8(fileEntry.path()));
         auto ftime = std::filesystem::last_write_time(fileEntry.path(), ec);
         if (ec) return;
         uint64_t ts = FileTimeToUnixSeconds(ftime);
@@ -1612,55 +1642,58 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
         uint32_t rootId;
         std::string envExpansion;
     };
-    // Thread-safe environment variable expansion using GetEnvironmentVariableA
-    // (getenv() returns a pointer to an internal static buffer that is not thread-safe)
-    auto getEnvSafe = [](const char* name, char* buf, size_t bufSize) -> bool {
-        DWORD n = GetEnvironmentVariableA(name, buf, (DWORD)bufSize);
-        return n > 0 && n < (DWORD)bufSize;
+    // Thread-safe environment variable expansion using GetEnvironmentVariableW
+    // (getenv() uses a non-thread-safe static buffer; GetEnvironmentVariableA
+    // silently ACP-encodes non-ASCII profile paths like "C:\Users\Владимир\..."
+    // which then corrupts every derived scan root and breaks auto-cloud for
+    // affected users).
+    auto getEnvUtf8 = [](const wchar_t* name) -> std::string {
+        wchar_t wbuf[MAX_PATH];
+        constexpr DWORD bufLen = (DWORD)(sizeof(wbuf) / sizeof(wbuf[0]));
+        DWORD n = GetEnvironmentVariableW(name, wbuf, bufLen);
+        if (n == 0 || n >= bufLen) return {};
+        // Use FileUtil::WideToUtf8 so every wide→UTF-8 conversion in the DLL
+        // shares the same WC_ERR_INVALID_CHARS rejection of malformed UTF-16.
+        return FileUtil::WideToUtf8(wbuf, (size_t)n);
     };
 
-    char localLow[MAX_PATH] = {};
+    std::string localLow;
     {
-        char tmp[MAX_PATH];
-        if (getEnvSafe("LOCALAPPDATA", tmp, sizeof(tmp)))
-            snprintf(localLow, sizeof(localLow), "%s\\..\\LocalLow\\", tmp);
+        std::string tmp = getEnvUtf8(L"LOCALAPPDATA");
+        if (!tmp.empty()) localLow = tmp + "\\..\\LocalLow\\";
     }
 
-    char localAppData[MAX_PATH] = {};
+    std::string localAppData;
     {
-        char tmp[MAX_PATH];
-        if (getEnvSafe("LOCALAPPDATA", tmp, sizeof(tmp)))
-            snprintf(localAppData, sizeof(localAppData), "%s\\", tmp);
+        std::string tmp = getEnvUtf8(L"LOCALAPPDATA");
+        if (!tmp.empty()) localAppData = tmp + "\\";
     }
 
-    char roamingAppData[MAX_PATH] = {};
+    std::string roamingAppData;
     {
-        char tmp[MAX_PATH];
-        if (getEnvSafe("APPDATA", tmp, sizeof(tmp)))
-            snprintf(roamingAppData, sizeof(roamingAppData), "%s\\", tmp);
+        std::string tmp = getEnvUtf8(L"APPDATA");
+        if (!tmp.empty()) roamingAppData = tmp + "\\";
     }
 
-    char myDocuments[MAX_PATH] = {};
+    std::string myDocuments;
     {
         std::string known = GetKnownFolderPathString(FOLDERID_Documents);
         if (!known.empty()) {
-            snprintf(myDocuments, sizeof(myDocuments), "%s\\", known.c_str());
+            myDocuments = known + "\\";
         } else {
-            char tmp[MAX_PATH];
-            if (getEnvSafe("USERPROFILE", tmp, sizeof(tmp)))
-                snprintf(myDocuments, sizeof(myDocuments), "%s\\Documents\\", tmp);
+            std::string tmp = getEnvUtf8(L"USERPROFILE");
+            if (!tmp.empty()) myDocuments = tmp + "\\Documents\\";
         }
     }
 
-    char savedGames[MAX_PATH] = {};
+    std::string savedGames;
     {
         std::string known = GetKnownFolderPathString(FOLDERID_SavedGames);
         if (!known.empty()) {
-            snprintf(savedGames, sizeof(savedGames), "%s\\", known.c_str());
+            savedGames = known + "\\";
         } else {
-            char tmp[MAX_PATH];
-            if (getEnvSafe("USERPROFILE", tmp, sizeof(tmp)))
-                snprintf(savedGames, sizeof(savedGames), "%s\\Saved Games\\", tmp);
+            std::string tmp = getEnvUtf8(L"USERPROFILE");
+            if (!tmp.empty()) savedGames = tmp + "\\Saved Games\\";
         }
     }
 
@@ -1670,13 +1703,13 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
     //   0=Default, 1=GameInstall, 2=WinMyDocuments, 3=WinAppDataLocal,
     //   4=WinAppDataRoaming, 6=WinSavedGames, 12=WinAppDataLocalLow
     RootMapping mappings[] = {
-        {"",                   "",                    0, (appUserdataDir / "remote").string()},
+        {"",                   "",                    0, FileUtil::PathToUtf8(appUserdataDir / "remote")},
         {"GameInstall",        "%GameInstall%",        1, gameInstallPath},
-        {"WinAppDataLocalLow", "%WinAppDataLocalLow%", 12, std::string(localLow)},
-        {"WinAppDataLocal",    "%WinAppDataLocal%",    3, std::string(localAppData)},
-        {"WinAppDataRoaming",  "%WinAppDataRoaming%",  4, std::string(roamingAppData)},
-        {"WinMyDocuments",     "%WinMyDocuments%",     2, std::string(myDocuments)},
-        {"WinSavedGames",      "%WinSavedGames%",      6, std::string(savedGames)},
+        {"WinAppDataLocalLow", "%WinAppDataLocalLow%", 12, localLow},
+        {"WinAppDataLocal",    "%WinAppDataLocal%",    3, localAppData},
+        {"WinAppDataRoaming",  "%WinAppDataRoaming%",  4, roamingAppData},
+        {"WinMyDocuments",     "%WinMyDocuments%",     2, myDocuments},
+        {"WinSavedGames",      "%WinSavedGames%",      6, savedGames},
     };
 
     std::unordered_map<std::string, std::string> seenRootsByCloudPath;
@@ -1741,13 +1774,18 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
         while (!normalizedScanPath.empty() && normalizedScanPath.front() == '/') normalizedScanPath.erase(0, 1);
         while (!normalizedScanPath.empty() && normalizedScanPath.back() == '/') normalizedScanPath.pop_back();
 
-        std::filesystem::path scanRoot = std::filesystem::path(mapping->envExpansion);
+        // Build the scan root from UTF-8 via the wide-path bridge so non-ASCII
+        // expansions (Cyrillic / CJK / accented %USERPROFILE%) reach the
+        // filesystem intact. Constructing std::filesystem::path directly from
+        // a UTF-8 std::string would re-decode the bytes through the process
+        // ACP and silently retarget the iterator at the wrong tree.
+        std::filesystem::path scanRoot = FileUtil::Utf8ToPath(mapping->envExpansion);
         if (!normalizedScanPath.empty()) {
             std::filesystem::path rel;
             std::stringstream ss(normalizedScanPath);
             std::string part;
             while (std::getline(ss, part, '/')) {
-                if (!part.empty()) rel /= part;
+                if (!part.empty()) rel /= FileUtil::Utf8ToPath(part);
             }
             scanRoot /= rel;
         }
@@ -1756,7 +1794,8 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
         if (!std::filesystem::exists(scanRoot, scanRootEc) || scanRootEc ||
             !std::filesystem::is_directory(scanRoot, scanRootEc) || scanRootEc) {
             LOG("GetAutoCloudFileList: app %u rule path missing: root='%s' path='%s' resolved='%s'",
-                appId, rule.root.c_str(), rule.path.c_str(), scanRoot.string().c_str());
+                appId, rule.root.c_str(), rule.path.c_str(),
+                FileUtil::PathToUtf8(scanRoot).c_str());
             continue;
         }
         // Reject path-redirecting reparse points at the rule's resolved
@@ -1767,15 +1806,16 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
         // walk and let the app boot without AutoCloud rather than
         // uploading the wrong tree. OneDrive cloud-placeholder dirs are
         // explicitly NOT rejected — see IsPathRedirectingReparsePoint.
-        if (FileUtil::IsPathRedirectingReparsePoint(scanRoot.string())) {
+        std::string scanRootUtf8 = FileUtil::PathToUtf8(scanRoot);
+        if (FileUtil::IsPathRedirectingReparsePoint(scanRootUtf8)) {
             LOG("GetAutoCloudFileList: app %u rule scan root is a junction/symlink, refusing to walk: root='%s' path='%s' resolved='%s'",
-                appId, rule.root.c_str(), rule.path.c_str(), scanRoot.string().c_str());
+                appId, rule.root.c_str(), rule.path.c_str(), scanRootUtf8.c_str());
             continue;
         }
 
         LOG("GetAutoCloudFileList: app %u rule root='%s' path='%s' resolvedPath='%s' pattern='%s' recursive=%u resolved='%s'",
             appId, rule.root.c_str(), rule.path.c_str(), rule.resolvedPath.c_str(),
-            rule.pattern.c_str(), rule.recursive ? 1 : 0, scanRoot.string().c_str());
+            rule.pattern.c_str(), rule.recursive ? 1 : 0, scanRootUtf8.c_str());
 
         auto considerFile = [&](const std::filesystem::directory_entry& entry) {
             std::error_code fileEc;
@@ -1787,16 +1827,18 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
             // only fires when the iterator actually yields a reparse entry.
             // OneDrive cloud-placeholder files are intentionally allowed
             // through — they read as their real bytes via the cloud filter.
-            if (FileUtil::IsPathRedirectingReparsePoint(entry.path().string())) {
+            std::string entryUtf8 = FileUtil::PathToUtf8(entry.path());
+            if (FileUtil::IsPathRedirectingReparsePoint(entryUtf8)) {
                 LOG("GetAutoCloudFileList: app %u skipping junction/symlink entry under '%s': %s",
-                    appId, scanRoot.string().c_str(), entry.path().string().c_str());
+                    appId, scanRootUtf8.c_str(), entryUtf8.c_str());
                 return;
             }
             if (!entry.is_regular_file(fileEc)) return;
             ++visitedFiles;
-            std::string relFromRoot = NormalizeSlashes(std::filesystem::relative(entry.path(), scanRoot, fileEc).string());
+            std::string relFromRoot = NormalizeSlashes(
+                FileUtil::PathToUtf8(std::filesystem::relative(entry.path(), scanRoot, fileEc)));
             if (fileEc) return;
-            std::string leaf = entry.path().filename().string();
+            std::string leaf = FileUtil::PathToUtf8(entry.path().filename());
             if (leaf == "steam_autocloud.vdf") return;
             std::string pattern = NormalizeSlashes(rule.pattern.empty() ? "*" : rule.pattern);
             const std::string& matchTarget = pattern.find('/') == std::string::npos ? leaf : relFromRoot;
@@ -1820,7 +1862,7 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
                 return;
             }
             seenRootsByCloudPath[collisionKey] = mapping->rootToken;
-            addFile(entry, cloudPath, entry.path().string(), mapping->rootToken, mapping->rootId);
+            addFile(entry, cloudPath, entryUtf8, mapping->rootToken, mapping->rootId);
 
             // Steam parity: expand siblings for the primary match. The
             // walker in sub_1384DBA40 strips the primary's last extension
@@ -1855,7 +1897,10 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
                 // kMaxAutoCloudScanMillis.
                 ++visitedFiles;
                 std::filesystem::path siblingPath = entry.path();
-                siblingPath.replace_extension(siblingExt);
+                // replace_extension takes a path; convert the UTF-8 sibling
+                // extension token through the wide bridge so a Cyrillic-named
+                // sibling extension survives.
+                siblingPath.replace_extension(FileUtil::Utf8ToPath(siblingExt));
                 std::error_code sibEc;
                 if (!std::filesystem::exists(siblingPath, sibEc) || sibEc) continue;
                 // Same junction/symlink gate as the primary considerFile path:
@@ -1863,14 +1908,15 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
                 // primary that already passed the gate, but a malicious save
                 // tree can still drop a file symlink with the matching
                 // sibling extension (e.g. save.thumb -> C:\path\to\secret).
-                if (FileUtil::IsPathRedirectingReparsePoint(siblingPath.string())) {
+                std::string siblingPathUtf8 = FileUtil::PathToUtf8(siblingPath);
+                if (FileUtil::IsPathRedirectingReparsePoint(siblingPathUtf8)) {
                     LOG("GetAutoCloudFileList: app %u skipping junction/symlink sibling: %s",
-                        appId, siblingPath.string().c_str());
+                        appId, siblingPathUtf8.c_str());
                     continue;
                 }
                 if (!std::filesystem::is_regular_file(siblingPath, sibEc) || sibEc) continue;
                 std::string siblingRel = NormalizeSlashes(
-                    std::filesystem::relative(siblingPath, scanRoot, sibEc).string());
+                    FileUtil::PathToUtf8(std::filesystem::relative(siblingPath, scanRoot, sibEc)));
                 if (sibEc || !IsSafeRelativePath(siblingRel)) continue;
                 std::string siblingCloudPath = normalizedCloudPath.empty()
                     ? siblingRel
@@ -1899,7 +1945,7 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
                 std::filesystem::directory_entry siblingDirEntry(siblingPath, sibEc);
                 if (sibEc) continue;
                 emittedSiblings.insert(siblingKey);
-                addFile(siblingDirEntry, siblingCloudPath, siblingPath.string(),
+                addFile(siblingDirEntry, siblingCloudPath, siblingPathUtf8,
                         mapping->rootToken, mapping->rootId);
             }
         };
@@ -1978,7 +2024,7 @@ std::unordered_set<std::string> LoadRootTokens(uint32_t accountId, uint32_t appI
     {
         std::shared_lock<std::shared_mutex> lock(g_mutex);
         std::string path = GetAppPathInternal(accountId, appId) + "root_token.dat";
-        std::ifstream f(path);
+        std::ifstream f(FileUtil::Utf8ToPath(path));
         if (f) {
             std::string line;
             while (std::getline(f, line)) {
@@ -2043,7 +2089,7 @@ std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, 
     std::shared_lock<std::shared_mutex> lock(g_mutex);
     std::string path = GetAppPathInternal(accountId, appId) + "file_tokens.dat";
     std::unordered_map<std::string, std::string> result;
-    std::ifstream f(path);
+    std::ifstream f(FileUtil::Utf8ToPath(path));
     if (f) {
         std::string line;
         while (std::getline(f, line)) {
@@ -2102,7 +2148,7 @@ static std::unordered_map<std::string, TombstoneInfo> LoadDeletedLocked(uint32_t
     std::unordered_map<std::string, TombstoneInfo> deleted;
     if (outNeedsRewrite) *outNeedsRewrite = false;
     std::string path = GetAppPathInternal(accountId, appId) + "deleted.dat";
-    std::ifstream f(path);
+    std::ifstream f(FileUtil::Utf8ToPath(path));
     if (!f) return deleted;
 
     auto parseUnsigned = [](const std::string& s, uint64_t& out) -> bool {
@@ -2416,7 +2462,7 @@ bool IsDeleted(uint32_t accountId, uint32_t appId, const std::string& filename) 
     // the full map, so a future hot-path caller pays O(lines) I/O without also
     // paying O(lines) hash-set allocation.
     std::string path = GetAppPathInternal(accountId, appId) + "deleted.dat";
-    std::ifstream f(path);
+    std::ifstream f(FileUtil::Utf8ToPath(path));
     if (!f) return false;
     std::string line;
     while (std::getline(f, line)) {

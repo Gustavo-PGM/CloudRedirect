@@ -238,7 +238,7 @@ static constexpr uint64_t kMaxAutoCloudImportBytes = 128ULL * 1024 * 1024;
 
 static std::vector<uint8_t> ReadWholeFile(const std::string& path, bool& ok) {
     ok = false;
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(FileUtil::Utf8ToPath(path), std::ios::binary | std::ios::ate);
     if (!f) return {};
     auto size = f.tellg();
     if (size < 0) return {};
@@ -255,7 +255,7 @@ static std::vector<uint8_t> ReadWholeFile(const std::string& path, bool& ok) {
 }
 
 static bool HasPersistedLocalCloudHistory(uint32_t accountId, uint32_t appId) {
-    return std::filesystem::exists(std::filesystem::path(LocalStorage::GetAppPath(accountId, appId)) / "cn.dat");
+    return std::filesystem::exists(FileUtil::Utf8ToPath(LocalStorage::GetAppPath(accountId, appId)) / "cn.dat");
 }
 
 static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
@@ -1270,7 +1270,7 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
 
     std::string vdfPath = GetSteamPath() + "userdata\\" + std::to_string(accountId)
         + "\\config\\localconfig.vdf";
-    std::ifstream vdfIn(vdfPath);
+    std::ifstream vdfIn(FileUtil::Utf8ToPath(vdfPath));
     if (!vdfIn.is_open()) {
         LOG("[Playtime] Cannot open localconfig.vdf for reading (app %u)", appId);
         return;
@@ -1950,7 +1950,7 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
     }
 
     // Read local file
-    std::ifstream localFile(statsPath, std::ios::binary | std::ios::ate);
+    std::ifstream localFile(FileUtil::Utf8ToPath(statsPath), std::ios::binary | std::ios::ate);
     if (!localFile.is_open()) {
         // No local file -- parse and rewrite cloud data to strip junk
         std::vector<uint8_t> outBuf;

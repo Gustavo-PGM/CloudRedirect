@@ -210,11 +210,44 @@ static LONG WINAPI CrashExcFilter(PEXCEPTION_POINTERS pExc) {
             s_crashAccessType = 99;
             s_crashAccessAddr = 0;
         }
-        // Identify which module contains the crashing instruction
+        // Identify which module contains the crashing instruction.
+        // GetModuleFileNameW + UTF-8 narrow rather than GetModuleFileNameA: a
+        // crash inside a DLL whose path contains non-ASCII characters
+        // (Steam under a Cyrillic / CJK profile, for example) would otherwise
+        // either truncate to "?" placeholders or produce ACP bytes that get
+        // mangled when written to the UTF-8 log. The crash filter runs at
+        // process-exit time so a single extra conversion is free, and the
+        // resulting log line is what we use to triage which module faulted.
         s_crashModuleName[0] = '\0';
         MEMORY_BASIC_INFORMATION mbi = {};
         if (VirtualQuery((void*)s_crashFaultAddr, &mbi, sizeof(mbi)) && mbi.AllocationBase) {
-            GetModuleFileNameA((HMODULE)mbi.AllocationBase, s_crashModuleName, sizeof(s_crashModuleName));
+            wchar_t wbuf[MAX_PATH];
+            DWORD wlen = GetModuleFileNameW((HMODULE)mbi.AllocationBase, wbuf, MAX_PATH);
+            if (wlen > 0 && wlen < MAX_PATH) {
+                // s_crashModuleName is sized for ANSI MAX_PATH but a UTF-8
+                // encoding of a wide path needs up to 3× the wide length for
+                // BMP codepoints (4× for surrogate pairs counted per wchar).
+                // For Cyrillic/CJK Steam install paths approaching MAX_PATH
+                // the full path will not fit. Fall back to the leaf name
+                // (everything past the final '\') which is what crash-report
+                // triage actually needs — "dwmapi.dll" or "steamclient64.dll"
+                // is the diagnostic, the directory prefix is noise.
+                int n = WideCharToMultiByte(CP_UTF8, 0, wbuf, (int)wlen,
+                                            s_crashModuleName,
+                                            (int)sizeof(s_crashModuleName) - 1,
+                                            nullptr, nullptr);
+                if (n > 0) {
+                    s_crashModuleName[n] = '\0';
+                } else {
+                    const wchar_t* leaf = wcsrchr(wbuf, L'\\');
+                    leaf = leaf ? leaf + 1 : wbuf;
+                    int leafN = WideCharToMultiByte(CP_UTF8, 0, leaf, -1,
+                                                    s_crashModuleName,
+                                                    (int)sizeof(s_crashModuleName),
+                                                    nullptr, nullptr);
+                    if (leafN <= 0) s_crashModuleName[0] = '\0';
+                }
+            }
         }
     }
     return EXCEPTION_EXECUTE_HANDLER;
@@ -2067,7 +2100,7 @@ static std::string GetLuaSyncStatePath() {
 
 static SyncState ReadSyncState() {
     SyncState state;
-    std::ifstream f(GetLuaSyncStatePath());
+    std::ifstream f(FileUtil::Utf8ToPath(GetLuaSyncStatePath()));
     if (!f.is_open()) return state;
     std::string line;
     // First line is the timestamp
@@ -2087,7 +2120,7 @@ static SyncState ReadSyncState() {
 static void WriteSyncState(uint64_t syncTime, const std::unordered_set<std::string>& files) {
     std::string path = GetLuaSyncStatePath();
     std::error_code ec;
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    std::filesystem::create_directories(FileUtil::Utf8ToPath(path).parent_path(), ec);
     // Build the payload in memory and atomic-write. A crash between
     // ofstream's trunc and the serialized write completing would leave
     // .sync_state empty, causing every file to be re-downloaded on next
@@ -2150,13 +2183,22 @@ static bool IsValidLuaContent(const uint8_t* data, size_t len) {
 static std::vector<LuaFile> ReadLocalLuaFiles() {
     std::vector<LuaFile> files;
     std::string dir = g_steamPath + "config\\stplug-in\\";
-    WIN32_FIND_DATAA fd;
-    HANDLE hFind = FindFirstFileA((dir + "*.lua").c_str(), &fd);
+    // FindFirstFileW + wide pattern: FindFirstFileA would return ACP-encoded
+    // filenames, and an ACP-unrepresentable filename (non-Latin-1 alphabet)
+    // degrades to the 8.3 short name — a different path from the one the
+    // Windows filesystem stored, which rotates into a different lua record
+    // every launch. We convert dir to wide via Utf8ToPath, then every
+    // discovered filename back to UTF-8 narrow to match our convention.
+    auto dirWide = FileUtil::Utf8ToPath(dir).wstring();
+    std::wstring pattern = dirWide + L"*.lua";
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
     if (hFind == INVALID_HANDLE_VALUE) return files;
     do {
-        std::string name = fd.cFileName;
+        std::string name = FileUtil::WideToUtf8(fd.cFileName);
+        if (name.empty()) continue;
         std::string path = dir + name;
-        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        std::ifstream f(FileUtil::Utf8ToPath(path), std::ios::binary | std::ios::ate);
         if (!f.is_open()) continue;
         auto size = f.tellg();
         if (size <= 0 || size > 10 * 1024 * 1024) continue; // 10 MB per-file limit
@@ -2171,7 +2213,7 @@ static std::vector<LuaFile> ReadLocalLuaFiles() {
         uli.HighPart = fd.ftLastWriteTime.dwHighDateTime;
         lf.modTime = (uli.QuadPart - 116444736000000000ULL) / 10000000ULL;
         files.push_back(std::move(lf));
-    } while (FindNextFileA(hFind, &fd));
+    } while (FindNextFileW(hFind, &fd));
     FindClose(hFind);
     return files;
 }
@@ -2585,7 +2627,7 @@ static constexpr uint64_t EXPECTED_STEAM_VERSION = 1773426488ULL;
 
 static uint64_t ReadSteamVersion(const std::string& steamDir) {
     std::string manifest = steamDir + "package\\steam_client_win64.manifest";
-    std::ifstream f(manifest);
+    std::ifstream f(FileUtil::Utf8ToPath(manifest));
     if (!f) return 0;
     std::string line;
     while (std::getline(f, line)) {
@@ -2614,7 +2656,7 @@ static uint64_t ReadSteamVersion(const std::string& steamDir) {
 // appId, meaning the base game itself is lua-unlocked (not owned). DLC-only luas
 // never call addappid() with the base game's appId and should be excluded.
 static bool IsSelfUnlockingLua(const std::string& filePath, uint32_t appId) {
-    std::ifstream ifs(filePath);
+    std::ifstream ifs(FileUtil::Utf8ToPath(filePath));
     if (!ifs.is_open()) return false;
 
     // Build the two markers: "addappid(12345)" and "addappid(12345,"
@@ -2693,11 +2735,17 @@ void Init(const std::string& steamPath) {
     std::string pluginDir = g_steamPath + "config\\stplug-in\\*";
     std::string pluginBase = g_steamPath + "config\\stplug-in\\";
     int totalLuas = 0, selfUnlocking = 0;
-    WIN32_FIND_DATAA fd;
-    HANDLE hFind = FindFirstFileA(pluginDir.c_str(), &fd);
+    // Wide enumeration parity with the lua readers above: FindFirstFileA
+    // on a non-ASCII g_steamPath returns ERROR_FILE_NOT_FOUND even when
+    // the directory exists, silently disabling namespace auto-detection
+    // for every game.
+    auto pluginDirWide = FileUtil::Utf8ToPath(pluginDir).wstring();
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(pluginDirWide.c_str(), &fd);
     if (hFind != INVALID_HANDLE_VALUE) {
         do {
-            std::string name = fd.cFileName;
+            std::string name = FileUtil::WideToUtf8(fd.cFileName);
+            if (name.empty()) continue;
             if (name.size() > 4 && name.compare(name.size() - 4, 4, ".lua") == 0) {
                 std::string stem = name.substr(0, name.size() - 4);
                 bool allDigits = !stem.empty();
@@ -2716,7 +2764,7 @@ void Init(const std::string& steamPath) {
                     }
                 }
             }
-        } while (FindNextFileA(hFind, &fd));
+        } while (FindNextFileW(hFind, &fd));
         FindClose(hFind);
     } else {
         LOG("[NS] Failed to scan stplug-in directory: %s (err=%u)",
@@ -2734,7 +2782,7 @@ void Init(const std::string& steamPath) {
     std::string cloudRoot = g_steamPath + "cloud_redirect\\";
     {
         std::string pinConfigPath = cloudRoot + "config.json";
-        std::ifstream pinFile(pinConfigPath);
+        std::ifstream pinFile(FileUtil::Utf8ToPath(pinConfigPath));
         if (pinFile) {
             std::string pinStr((std::istreambuf_iterator<char>(pinFile)), {});
             pinFile.close();
@@ -2772,18 +2820,32 @@ void Init(const std::string& steamPath) {
             //   - the app is in pinned_apps (per-app override)
             if (g_manifestPinsEnabled.load()) {
                 std::string luaDir = g_steamPath + "config\\stplug-in\\";
-                WIN32_FIND_DATAA fd;
-                HANDLE hFind = FindFirstFileA((luaDir + "*.lua").c_str(), &fd);
+                // Wide enumeration: luaDir may be non-ASCII when Steam is
+                // installed under a profile with non-ANSI codepage
+                // characters; FindFirstFileA would refuse to open the
+                // directory. Filenames we care about here are numeric
+                // (<appId>.lua) — if the name isn't an ASCII digit sequence
+                // we skip it anyway, so we stay on the wide cFileName for
+                // the strtoul parse (high bytes just fail the parse) and
+                // only convert to UTF-8 narrow for the log.
+                auto luaDirWide = FileUtil::Utf8ToPath(luaDir).wstring();
+                std::wstring pattern = luaDirWide + L"*.lua";
+                WIN32_FIND_DATAW fd;
+                HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
                 if (hFind != INVALID_HANDLE_VALUE) {
                     do {
-                        uint32_t fileAppId = (uint32_t)strtoul(fd.cFileName, nullptr, 10);
+                        // Convert cFileName to narrow for strtoul. Digits are
+                        // single-byte in both wide and UTF-8, so a pure-digit
+                        // prefix is preserved identically.
+                        std::string nameUtf8 = FileUtil::WideToUtf8(fd.cFileName);
+                        uint32_t fileAppId = (uint32_t)strtoul(nameUtf8.c_str(), nullptr, 10);
                         if (fileAppId == 0) continue;
 
                         bool shouldLoad = !g_autoComment.load() || g_pinnedApps.count(fileAppId);
                         if (!shouldLoad) continue;
 
-                        std::string luaPath = luaDir + fd.cFileName;
-                        std::ifstream luaFile(luaPath);
+                        std::string luaPath = luaDir + nameUtf8;
+                        std::ifstream luaFile(FileUtil::Utf8ToPath(luaPath));
                         if (!luaFile) continue;
                         std::string line;
                         while (std::getline(luaFile, line)) {
@@ -2812,9 +2874,9 @@ void Init(const std::string& steamPath) {
                             g_manifestPins[fileAppId][depotId] = manifestId;
                             totalPins++;
                             LOG("[ManifestPin] Lua pin: app %u depot %u -> manifest %llu (from %s)",
-                                fileAppId, depotId, manifestId, fd.cFileName);
+                                fileAppId, depotId, manifestId, nameUtf8.c_str());
                         }
-                    } while (FindNextFileA(hFind, &fd));
+                    } while (FindNextFileW(hFind, &fd));
                     FindClose(hFind);
                 }
             }
@@ -2851,7 +2913,7 @@ void Init(const std::string& steamPath) {
                 if (!entry.is_regular_file()) continue;
                 auto rel = std::filesystem::relative(entry.path(), oldRoot, ec);
                 if (ec) continue;
-                auto dest = std::filesystem::path(newRoot) / rel;
+                auto dest = FileUtil::Utf8ToPath(newRoot) / rel;
                 if (std::filesystem::exists(dest, ec)) { skipped++; continue; }
                 std::filesystem::create_directories(dest.parent_path(), ec);
                 std::filesystem::rename(entry.path(), dest, ec);
@@ -2899,7 +2961,7 @@ void Init(const std::string& steamPath) {
             LOG("[NS] WARNING: Could not resolve %%APPDATA%%, falling back to steam folder for config");
         }
     }
-    std::ifstream configFile(configPath);
+    std::ifstream configFile(FileUtil::Utf8ToPath(configPath));
     if (configFile) {
         std::string configStr((std::istreambuf_iterator<char>(configFile)), {});
         configFile.close();

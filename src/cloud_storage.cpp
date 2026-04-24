@@ -246,13 +246,13 @@ static std::string CreateLocalConflictCopy(uint32_t accountId, uint32_t appId,
     std::string conflictPath = appConflictRoot + filename + "." + std::to_string(stamp) + ".local";
     for (auto& c : conflictPath) { if (c == '/') c = '\\'; }
     std::error_code ec;
-    std::filesystem::create_directories(appConflictRoot, ec);
+    std::filesystem::create_directories(FileUtil::Utf8ToPath(appConflictRoot), ec);
     if (ec) return {};
     if (!FileUtil::IsPathWithin(appConflictRoot, conflictPath)) return {};
 
-    std::filesystem::create_directories(std::filesystem::path(conflictPath).parent_path(), ec);
+    std::filesystem::create_directories(FileUtil::Utf8ToPath(conflictPath).parent_path(), ec);
     if (ec) return {};
-    std::filesystem::copy_file(localPath, conflictPath,
+    std::filesystem::copy_file(FileUtil::Utf8ToPath(localPath), FileUtil::Utf8ToPath(conflictPath),
         std::filesystem::copy_options::none, ec);
     if (!ec) {
         LOG("[CloudStorage] Preserved local conflict copy for app %u file %s at %s",
@@ -274,7 +274,8 @@ static void RemoveLocalBlobsNotInCloud(uint32_t accountId, uint32_t appId,
                                        const std::unordered_set<std::string>& cloudBlobNames) {
     std::string localBlobDir = LocalStoragePath(accountId, appId);
     std::error_code ec;
-    if (!std::filesystem::exists(localBlobDir, ec) || !std::filesystem::is_directory(localBlobDir, ec)) return;
+    auto localBlobDirPath = FileUtil::Utf8ToPath(localBlobDir);
+    if (!std::filesystem::exists(localBlobDirPath, ec) || !std::filesystem::is_directory(localBlobDirPath, ec)) return;
 
     int removed = 0;
     // Collect parents of removed files for post-iteration empty-dir cleanup.
@@ -282,23 +283,29 @@ static void RemoveLocalBlobsNotInCloud(uint32_t accountId, uint32_t appId,
     // caches dir handles and removing a dir mid-traversal produces undefined
     // iterator state. Defer cleanup until the iterator is destroyed.
     std::unordered_set<std::string> removedParents;
-    for (auto& entry : std::filesystem::recursive_directory_iterator(localBlobDir, ec)) {
+    for (auto& entry : std::filesystem::recursive_directory_iterator(localBlobDirPath, ec)) {
         if (ec) break;
         if (!entry.is_regular_file(ec)) continue;
 
-        std::string rel = std::filesystem::relative(entry.path(), localBlobDir, ec).string();
+        // rel is compared against cloudBlobNames (UTF-8 filenames straight
+        // from the cloud listing) and is used as a cloud identifier when
+        // preserving conflict copies. It must be UTF-8, never ACP.
+        std::string rel = FileUtil::PathToUtf8(
+            std::filesystem::relative(entry.path(), localBlobDirPath, ec));
         if (ec) continue;
         for (auto& c : rel) { if (c == '\\') c = '/'; }
         if (rel == "cn.dat" || rel == "root_token.dat" ||
             rel == "file_tokens.dat" || rel == "deleted.dat") continue;
         if (cloudBlobNames.count(rel)) continue;
 
-        if (!PreserveLocalConflictCopy(accountId, appId, rel, entry.path().string())) continue;
+        if (!PreserveLocalConflictCopy(accountId, appId, rel, FileUtil::PathToUtf8(entry.path()))) continue;
         std::filesystem::path parentPath = entry.path().parent_path();
         std::filesystem::remove(entry.path(), ec);
         if (!ec) {
             ++removed;
-            removedParents.insert(parentPath.string());
+            // parentPath feeds CleanupEmptyCacheDirs which calls back into
+            // LocalStorage paths keyed by UTF-8 strings.
+            removedParents.insert(FileUtil::PathToUtf8(parentPath));
         }
     }
     if (removed > 0) {
@@ -383,11 +390,12 @@ static std::unordered_set<uint32_t> EnumerateLocalAppIds(uint32_t accountId) {
     std::unordered_set<uint32_t> appIds;
     std::string accountRoot = g_localRoot + "storage\\" + std::to_string(accountId) + "\\";
     std::error_code ec;
-    if (!std::filesystem::exists(accountRoot, ec) || !std::filesystem::is_directory(accountRoot, ec)) {
+    auto accountRootPath = FileUtil::Utf8ToPath(accountRoot);
+    if (!std::filesystem::exists(accountRootPath, ec) || !std::filesystem::is_directory(accountRootPath, ec)) {
         return appIds;
     }
 
-    for (const auto& entry : std::filesystem::directory_iterator(accountRoot, ec)) {
+    for (const auto& entry : std::filesystem::directory_iterator(accountRootPath, ec)) {
         if (ec) break;
         if (!entry.is_directory(ec)) continue;
         const std::string name = entry.path().filename().string();
@@ -718,7 +726,8 @@ static void PruneStaleConflictCopies(const std::string& localRoot) {
     // not escape Init().
     try {
         std::error_code ec;
-        if (!std::filesystem::exists(conflictsRoot, ec) || ec) return;
+        auto conflictsRootPath = FileUtil::Utf8ToPath(conflictsRoot);
+        if (!std::filesystem::exists(conflictsRootPath, ec) || ec) return;
 
         // Keep at most 30 days of conflict copies. This is long enough that
         // a user who only notices a bad sync after the weekend still has
@@ -730,7 +739,7 @@ static void PruneStaleConflictCopies(const std::string& localRoot) {
         // skip_permission_denied suppresses ACL-only iterator failures so
         // one unreadable subtree does not terminate the whole walk.
         std::filesystem::recursive_directory_iterator it(
-            conflictsRoot, std::filesystem::directory_options::skip_permission_denied, ec);
+            conflictsRootPath, std::filesystem::directory_options::skip_permission_denied, ec);
         std::filesystem::recursive_directory_iterator end;
         if (ec) {
             LOG("[CloudStorage] PruneStaleConflictCopies: cannot open conflicts root: %s",
@@ -900,7 +909,7 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
     std::string localPath = LocalBlobPath(accountId, appId, filename);
     if (localPath.empty()) return {}; // path traversal blocked
     {
-        std::ifstream f(localPath, std::ios::binary | std::ios::ate);
+        std::ifstream f(FileUtil::Utf8ToPath(localPath), std::ios::binary | std::ios::ate);
         if (f) {
             auto size = f.tellg();
             f.seekg(0, std::ios::beg);
@@ -939,7 +948,7 @@ bool DeleteBlob(uint32_t accountId, uint32_t appId,
     std::string localPath = LocalBlobPath(accountId, appId, filename);
     if (localPath.empty()) return false; // path traversal blocked
     std::error_code ec;
-    std::filesystem::remove(localPath, ec);
+    std::filesystem::remove(FileUtil::Utf8ToPath(localPath), ec);
 
     // Best-effort: clean up empty parent dirs so the cache doesn't accumulate
     // empty session subtrees (observed with Unity's per-launch Analytics/
@@ -947,8 +956,8 @@ bool DeleteBlob(uint32_t accountId, uint32_t appId,
     // acquires the same mutex WriteFileNoIncrement uses, preventing a TOCTOU
     // where a concurrent writer's parent dir disappears between that call's
     // create_directories() and its AtomicWriteBinary().
-    std::filesystem::path fileParent = std::filesystem::path(localPath).parent_path();
-    LocalStorage::CleanupEmptyCacheDirs(accountId, appId, {fileParent.string()});
+    std::filesystem::path fileParent = FileUtil::Utf8ToPath(localPath).parent_path();
+    LocalStorage::CleanupEmptyCacheDirs(accountId, appId, {FileUtil::PathToUtf8(fileParent)});
 
     LOG("[CloudStorage] DeleteBlob: removed local cache: %s", filename.c_str());
 
@@ -993,7 +1002,7 @@ ICloudProvider::ExistsStatus CheckBlobExists(uint32_t accountId, uint32_t appId,
     // avoid throwing if the file is deleted between exists()/is_regular_file()
     // (some Windows builds surface that race as filesystem_error).
     std::error_code statEc;
-    auto st = std::filesystem::status(localPath, statEc);
+    auto st = std::filesystem::status(FileUtil::Utf8ToPath(localPath), statEc);
     if (!statEc && std::filesystem::is_regular_file(st))
         return ICloudProvider::ExistsStatus::Exists;
 
@@ -1010,12 +1019,12 @@ ICloudProvider::ExistsStatus CheckBlobExists(uint32_t accountId, uint32_t appId,
 // Helper: read a small file from local storage path
 // Helper: write a small text file to local storage path (atomic via .tmp+rename)
 static bool WriteLocalText(const std::string& path, const std::string& content) {
-    auto parent = std::filesystem::path(path).parent_path();
+    auto parent = FileUtil::Utf8ToPath(path).parent_path();
     std::error_code ec;
     std::filesystem::create_directories(parent, ec);
     if (ec) {
         LOG("[CloudStorage] WriteLocalText: failed to create parent %s: %s",
-            parent.string().c_str(), ec.message().c_str());
+            FileUtil::PathToUtf8(parent).c_str(), ec.message().c_str());
         return false;
     }
     return FileUtil::AtomicWriteText(path, content);
@@ -1107,7 +1116,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     std::string storagePath = LocalStoragePath(accountId, appId);
     {
         std::error_code ec;
-        std::filesystem::create_directories(storagePath, ec);
+        std::filesystem::create_directories(FileUtil::Utf8ToPath(storagePath), ec);
         if (ec) {
             LOG("[CloudStorage] SyncFromCloud app %u: failed to create local storage "
                 "dir %s: %s — aborting sync", appId, storagePath.c_str(), ec.message().c_str());
@@ -1549,7 +1558,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
 
             std::string localBlobFile = LocalBlobPath(accountId, appId, filename);
             std::error_code existsEc;
-            bool localExists = std::filesystem::exists(localBlobFile, existsEc);
+            bool localExists = std::filesystem::exists(FileUtil::Utf8ToPath(localBlobFile), existsEc);
             if (existsEc) localExists = false;
             if (localExists && !cloudHadNewerCN) {
                 skipped++;
@@ -1609,7 +1618,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                 // restore the original. Fail this staged blob into the
                 // rollback path instead.
                 std::error_code promoteEc;
-                bool localExists = std::filesystem::exists(localBlobFile, promoteEc);
+                bool localExists = std::filesystem::exists(FileUtil::Utf8ToPath(localBlobFile), promoteEc);
                 if (promoteEc) {
                     LOG("[CloudStorage] SyncFromCloud app %u: stat failed for %s during "
                         "promotion (%s); failing batch to preserve local state",
@@ -1716,9 +1725,10 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         std::string localBlobDir = g_localRoot + "storage\\" +
                                    std::to_string(accountId) + "\\" +
                                    std::to_string(appId) + "\\";
+        auto localBlobDirPath = FileUtil::Utf8ToPath(localBlobDir);
         int seeded = 0;
         std::error_code gapEc;
-        bool dirExists = std::filesystem::exists(localBlobDir, gapEc);
+        bool dirExists = std::filesystem::exists(localBlobDirPath, gapEc);
         if (gapEc) {
             LOG("[CloudStorage] SyncFromCloud app %u: gap-repair skipped — stat failed for %s: %s",
                 appId, localBlobDir.c_str(), gapEc.message().c_str());
@@ -1726,7 +1736,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         }
         if (dirExists) {
             std::error_code iterEc;
-            std::filesystem::recursive_directory_iterator it(localBlobDir, iterEc);
+            std::filesystem::recursive_directory_iterator it(localBlobDirPath, iterEc);
             std::filesystem::recursive_directory_iterator end;
             if (iterEc) {
                 LOG("[CloudStorage] SyncFromCloud app %u: gap-repair skipped — cannot open %s: %s",
@@ -1738,13 +1748,18 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                     bool isFile = entry.is_regular_file(entryEc);
                     if (entryEc || !isFile) continue;
 
-                    std::string rel = std::filesystem::relative(entry.path(), localBlobDir, entryEc).string();
+                    // rel becomes a cloud path via CloudBlobPath — must be
+                    // UTF-8 so non-ASCII blob names upload to the right key.
+                    std::string rel = FileUtil::PathToUtf8(
+                        std::filesystem::relative(entry.path(), localBlobDirPath, entryEc));
                     if (entryEc) continue;
                     for (auto& c : rel) { if (c == '\\') c = '/'; }
                     if (rel == "cn.dat" || rel == "root_token.dat" ||
                         rel == "file_tokens.dat" || rel == "deleted.dat") continue;
                     if (cloudBlobNames.count(rel)) continue;
 
+                    // entry.path() is already a wide native path; ifstream's
+                    // path overload forwards to the wide CRT open — safe.
                     std::ifstream f(entry.path(), std::ios::binary);
                     if (!f) continue;
                     std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
@@ -1767,9 +1782,10 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         auto seedMeta = [&](const std::string& filename) {
             std::string localFile = storagePath + filename;
             std::error_code metaEc;
-            if (!std::filesystem::exists(localFile, metaEc) || metaEc) return;
+            auto localFilePath = FileUtil::Utf8ToPath(localFile);
+            if (!std::filesystem::exists(localFilePath, metaEc) || metaEc) return;
 
-            std::ifstream f(localFile, std::ios::binary);
+            std::ifstream f(localFilePath, std::ios::binary);
             if (!f) return;
             std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
                                       std::istreambuf_iterator<char>());
