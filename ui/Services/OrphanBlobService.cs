@@ -121,8 +121,16 @@ internal sealed class OrphanBlobService
     /// Delete the given set of orphan filenames from the cloud. Callers are
     /// responsible for having just obtained these filenames from a
     /// <see cref="ScanAsync"/> result with <c>ListingComplete = true</c> and
-    /// for having obtained user confirmation &#8212; this method performs no
-    /// safety checks of its own.
+    /// for having obtained user confirmation.
+    ///
+    /// DEFENSE-IN-DEPTH: This method independently enforces the
+    /// <see cref="InternalMetadataFilenames"/> whitelist before calling the
+    /// provider. <see cref="ComputeOrphans"/> already filters at scan time, but
+    /// a future caller, a buggy binding, a stale persisted orphan list, or a
+    /// scan-vs-prune list mutation could still feed a metadata filename here;
+    /// without this second check the provider would happily delete live DLL
+    /// playtime/stats state. The destructive boundary is the right place for
+    /// a save-loss-critical invariant to live.
     /// </summary>
     public async Task<PruneResult> PruneAsync(
         string accountId, string appId, IReadOnlyCollection<string> orphanFilenames,
@@ -131,12 +139,28 @@ internal sealed class OrphanBlobService
         if (orphanFilenames.Count == 0)
             return new PruneResult(0, 0, Array.Empty<string>(), null);
 
-        _log?.Invoke($"[OrphanBlob] Pruning {orphanFilenames.Count} orphan blob(s) for account {accountId} app {appId}");
+        // Whitelist-filter at the destructive boundary. Empty / null filenames
+        // are also dropped here so the provider never sees a request for
+        // ambiguous state.
+        var filtered = new List<string>(orphanFilenames.Count);
+        int skipped = 0;
+        foreach (var name in orphanFilenames)
+        {
+            if (string.IsNullOrEmpty(name)) { skipped++; continue; }
+            if (InternalMetadataFilenames.Contains(name)) { skipped++; continue; }
+            filtered.Add(name);
+        }
+        if (skipped > 0)
+            _log?.Invoke($"[OrphanBlob] Refused to prune {skipped} invalid/metadata filename(s) at destructive boundary");
+        if (filtered.Count == 0)
+            return new PruneResult(0, 0, Array.Empty<string>(), null);
+
+        _log?.Invoke($"[OrphanBlob] Pruning {filtered.Count} orphan blob(s) for account {accountId} app {appId}");
 
         CloudProviderClient.DeleteBlobsResult result;
         try
         {
-            result = await _client.DeleteAppBlobsAsync(accountId, appId, orphanFilenames, cancel);
+            result = await _client.DeleteAppBlobsAsync(accountId, appId, filtered, cancel);
         }
         catch (OperationCanceledException)
         {
@@ -145,12 +169,43 @@ internal sealed class OrphanBlobService
         catch (Exception ex)
         {
             _log?.Invoke($"[OrphanBlob] Prune threw: {ex.Message}");
-            return new PruneResult(0, orphanFilenames.Count, orphanFilenames.ToList(), ex.Message);
+            return new PruneResult(0, filtered.Count, filtered, ex.Message);
         }
 
         _log?.Invoke($"[OrphanBlob] Prune complete: deleted={result.Deleted} failed={result.Failed}");
         return new PruneResult(result.Deleted, result.Failed, result.FailedFilenames, result.Error);
     }
+
+    /// <summary>
+    /// DLL-internal metadata filenames that must NEVER be reported as orphans
+    /// regardless of <c>file_tokens.dat</c> state. These are the four forms
+    /// the native side treats as metadata in the exclusion filter at
+    /// <c>src/rpc_handlers.cpp:57-58</c>: canonical <c>.cloudredirect/*.bin</c>
+    /// plus their pre-canonicalization legacy top-level names
+    /// (<c>src/cloud_intercept.h:6-9</c>).
+    ///
+    /// Why this exists: the native <c>CanonicalizeInternalMetadataName</c>
+    /// rewrites legacy top-level metadata reads/writes to the canonical
+    /// subfolder path, so <c>file_tokens.dat</c> only keys the canonical
+    /// form. But older sessions (or cross-machine sync from an unmigrated
+    /// peer) can leave a legacy top-level blob on the cloud, and the
+    /// top-level <c>blobs/</c> listing in this UI will return it. A pure
+    /// set-difference against <c>referenced</c> would then mark it as an
+    /// orphan &#8212; triggering a UI prune would delete live playtime /
+    /// stats metadata the DLL still relies on. These filenames stay under
+    /// the DLL's authority; UI orphan logic is scoped to user save files.
+    /// Kept in lockstep with <c>src/rpc_handlers.cpp:IsInternalMetadata</c>;
+    /// adding a new metadata path on the native side requires mirroring it
+    /// here.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> InternalMetadataFilenames =
+        new HashSet<string>(StringComparer.Ordinal)
+        {
+            ".cloudredirect/Playtime.bin",
+            ".cloudredirect/UserGameStats.bin",
+            "Playtime.bin",
+            "UserGameStats.bin",
+        };
 
     /// <summary>
     /// Pure function: given an unordered cloud-side blob list and the set of
@@ -160,19 +215,10 @@ internal sealed class OrphanBlobService
     /// Duplicates in the input are deduplicated so the prune step only
     /// issues one delete per filename.
     ///
-    /// CANONICALIZATION NOTE: The native side maps legacy metadata filenames
-    /// (e.g. <c>Playtime.bin</c>) to canonical <c>.cloudredirect/*</c> paths
-    /// via <c>CanonicalizeInternalMetadataName</c> in
-    /// <c>src/cloud_storage.cpp:20-28</c>. Canonical names contain a path
-    /// separator, so they live inside a subfolder of <c>blobs/</c> and are
-    /// never returned by this UI's top-level listing &#8212; which is exactly
-    /// why they cannot be falsely flagged as orphans here. Legacy names at
-    /// the blobs root ARE listed, and if migration has moved the key to the
-    /// canonical form in <c>file_tokens.dat</c>, the legacy blob is
-    /// correctly treated as a stale orphan. IMPORTANT: any future
-    /// canonicalization that keeps the blob at the top level of
-    /// <c>blobs/</c> must be mirrored here, otherwise the UI will
-    /// incorrectly flag live files as orphans.
+    /// INTERNAL METADATA: Filenames in <see cref="InternalMetadataFilenames"/>
+    /// are unconditionally skipped &#8212; they are DLL-managed, not user
+    /// save data, and pruning them would corrupt playtime / achievement
+    /// state. See that set's doc comment for the full rationale.
     /// </summary>
     internal static List<string> ComputeOrphans(
         IEnumerable<string> cloudBlobFilenames,
@@ -184,6 +230,7 @@ internal sealed class OrphanBlobService
         {
             if (string.IsNullOrEmpty(name)) continue;
             if (!seen.Add(name)) continue; // dedup
+            if (InternalMetadataFilenames.Contains(name)) continue; // DLL-internal, never prune
             if (!referenced.Contains(name)) orphans.Add(name);
         }
         orphans.Sort(StringComparer.Ordinal);

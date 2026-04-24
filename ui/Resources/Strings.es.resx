@@ -818,6 +818,42 @@ Puedes restaurar desde el panel de Restaurar partidas.</value>
   </data>
 
   <!-- AppsPage orphan-blob prune -->
+  <data name="Apps_ScanForOrphans" xml:space="preserve">
+    <value>Buscar huérfanos en la nube</value>
+  </data>
+  <data name="Apps_ScanningOrphansFormat" xml:space="preserve">
+    <value>Escaneando... ({0}/{1})</value>
+  </data>
+  <data name="Apps_ScanLocalOnlyTitle" xml:space="preserve">
+    <value>Sin proveedor en la nube</value>
+  </data>
+  <data name="Apps_ScanLocalOnlyMessage" xml:space="preserve">
+    <value>CloudRedirect está configurado solo para almacenamiento local. No hay nube para buscar blobs huérfanos.</value>
+  </data>
+  <data name="Apps_ScanFailedTitle" xml:space="preserve">
+    <value>Escaneo fallido</value>
+  </data>
+  <data name="Apps_ScanCompleteCleanFormat" xml:space="preserve">
+    <value>Se escanearon {0} aplicación(es) -- no se encontraron blobs huérfanos.</value>
+  </data>
+  <data name="Apps_ScanCompleteFoundFormat" xml:space="preserve">
+    <value>Se encontraron {0} blob(s) huérfano(s) en {1} aplicación(es).</value>
+  </data>
+  <data name="Apps_ScanCompletePartialFormat" xml:space="preserve">
+    <value>{0} aplicación(es) no pudieron verificarse (listado incompleto).</value>
+  </data>
+  <data name="Apps_OrphanSummaryFormat" xml:space="preserve">
+    <value>{0} blob(s) sin referenciar en la nube</value>
+  </data>
+  <data name="Apps_PruneAll" xml:space="preserve">
+    <value>Eliminar todo</value>
+  </data>
+  <data name="Apps_ReviewOrphans" xml:space="preserve">
+    <value>Revisar huérfanos</value>
+  </data>
+  <data name="Apps_CollapseOrphans" xml:space="preserve">
+    <value>Contraer</value>
+  </data>
   <data name="Apps_PruneTooltip" xml:space="preserve">
     <value>Eliminar blobs huérfanos en la nube que ya no estén referenciados por esta aplicación</value>
   </data>
@@ -1359,7 +1395,7 @@ Esto puede causar pérdida de datos en algunos casos.
     <value>Steam está en ejecución</value>
   </data>
   <data name="Steam_IsRunningMessage" xml:space="preserve">
-    <value>Steam debe estar cerrado antes de restaurar partidas. Cierra Steam e intenta de nuevo.</value>
+    <value>Steam debe estar cerrado antes de continuar. Cierra Steam e intenta de nuevo.</value>
   </data>
 
   <data name="Provider_GoogleDrive" xml:space="preserve">

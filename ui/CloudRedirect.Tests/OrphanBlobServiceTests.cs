@@ -1,3 +1,5 @@
+using System.IO;
+using System.Text.RegularExpressions;
 using CloudRedirect.Services;
 using Xunit;
 
@@ -113,5 +115,159 @@ public class OrphanBlobServiceTests
         var orphans = OrphanBlobService.ComputeOrphans(cloud, refs);
         Assert.Single(orphans);
         Assert.Equal("blob_00042.sav", orphans[0]);
+    }
+
+    // ── Internal metadata whitelist ────────────────────────────────────
+    //
+    // DLL-internal metadata (Playtime.bin / UserGameStats.bin, canonical
+    // and legacy forms) must never be flagged as orphans regardless of
+    // file_tokens.dat state. Pruning them would delete live playtime /
+    // achievement state the DLL still relies on. Kept in lockstep with
+    // the native exclusion filter at src/rpc_handlers.cpp:57-58.
+
+    [Fact]
+    public void ComputeOrphans_LegacyPlaytimeBin_NeverOrphan()
+    {
+        // The canonical historical bug: file_tokens.dat keys the canonical
+        // ".cloudredirect/Playtime.bin" but an older session left the legacy
+        // top-level "Playtime.bin" on the cloud. Naive set-difference would
+        // flag it as an orphan and a user-confirmed prune would silently
+        // delete live playtime metadata.
+        var cloud = new[] { "Playtime.bin", "real_save.dat" };
+        var refs = Referenced(".cloudredirect/Playtime.bin");
+        var orphans = OrphanBlobService.ComputeOrphans(cloud, refs);
+        Assert.Equal(new[] { "real_save.dat" }, orphans);
+    }
+
+    [Fact]
+    public void ComputeOrphans_LegacyUserGameStatsBin_NeverOrphan()
+    {
+        var cloud = new[] { "UserGameStats.bin", "real_save.dat" };
+        var refs = Referenced(".cloudredirect/UserGameStats.bin");
+        var orphans = OrphanBlobService.ComputeOrphans(cloud, refs);
+        Assert.Equal(new[] { "real_save.dat" }, orphans);
+    }
+
+    [Fact]
+    public void ComputeOrphans_CanonicalMetadata_NeverOrphan()
+    {
+        // Defensive: even if a canonical metadata path somehow surfaces in a
+        // top-level listing (e.g. future provider change, filename with an
+        // embedded slash stored as a flat key), the whitelist still skips it.
+        var cloud = new[] { ".cloudredirect/Playtime.bin", ".cloudredirect/UserGameStats.bin" };
+        var orphans = OrphanBlobService.ComputeOrphans(cloud, Referenced());
+        Assert.Empty(orphans);
+    }
+
+    [Fact]
+    public void ComputeOrphans_MetadataWhitelistIndependentOfReferencedSet()
+    {
+        // Whitelist must be unconditional: even with a totally empty
+        // file_tokens.dat, the 4 metadata paths are never returned.
+        var cloud = new[]
+        {
+            "Playtime.bin",
+            "UserGameStats.bin",
+            ".cloudredirect/Playtime.bin",
+            ".cloudredirect/UserGameStats.bin",
+            "save01.dat",
+        };
+        var orphans = OrphanBlobService.ComputeOrphans(cloud, Referenced());
+        Assert.Equal(new[] { "save01.dat" }, orphans);
+    }
+
+    [Fact]
+    public void ComputeOrphans_MetadataWhitelistCaseSensitive()
+    {
+        // Case-sensitive match mirrors the native side. A spuriously
+        // capitalized "playtime.bin" is NOT treated as metadata -- if the
+        // user actually has a save literally named "playtime.bin" (lowercase)
+        // that isn't referenced, it's a real orphan.
+        var cloud = new[] { "playtime.bin", "PLAYTIME.BIN" };
+        var orphans = OrphanBlobService.ComputeOrphans(cloud, Referenced());
+        Assert.Equal(new[] { "PLAYTIME.BIN", "playtime.bin" }, orphans);
+    }
+
+    [Fact]
+    public void InternalMetadataFilenames_ContainsAllFourPaths()
+    {
+        // Lockstep assertion with src/rpc_handlers.cpp:IsInternalMetadata and
+        // src/cloud_intercept.h:6-9. Adding a new metadata path on the
+        // native side requires extending this set; this test catches the
+        // case where one side is updated without the other.
+        Assert.Contains(".cloudredirect/Playtime.bin", OrphanBlobService.InternalMetadataFilenames);
+        Assert.Contains(".cloudredirect/UserGameStats.bin", OrphanBlobService.InternalMetadataFilenames);
+        Assert.Contains("Playtime.bin", OrphanBlobService.InternalMetadataFilenames);
+        Assert.Contains("UserGameStats.bin", OrphanBlobService.InternalMetadataFilenames);
+        Assert.Equal(4, OrphanBlobService.InternalMetadataFilenames.Count);
+    }
+
+    /// <summary>
+    /// Stronger lockstep: actually parse <c>src/cloud_intercept.h</c> and
+    /// require the UI-side whitelist to be a superset of every
+    /// <c>k*MetadataPath</c> constant the native side currently exposes.
+    ///
+    /// Rationale: the hardcoded-literal test above catches a rename of an
+    /// existing constant, but a brand-new metadata path added on the native
+    /// side (e.g. <c>kAchievementsMetadataPath</c>) would slip past it --
+    /// the four existing assertions still pass, the <c>Count == 4</c>
+    /// assertion still passes, and the UI would start deleting the new
+    /// file as an "orphan". Parsing the header forces the two sides to
+    /// move in lockstep at CI time.
+    ///
+    /// If the repo layout changes such that the header can't be located
+    /// from the test binary, the test is skipped rather than failed; the
+    /// primary hardcoded assertion above still guards the known-at-write-
+    /// time set. A false-negative skip in an unusual build layout is
+    /// preferable to a spurious CI failure.
+    /// </summary>
+    [Fact]
+    public void InternalMetadataFilenames_IsSupersetOfNativeConstants()
+    {
+        var headerPath = FindRepoFile(Path.Combine("src", "cloud_intercept.h"));
+        if (headerPath is null)
+            return; // Header unlocatable; rely on the hardcoded assertion above.
+
+        var text = File.ReadAllText(headerPath);
+        // Matches e.g. `inline constexpr const char* kPlaytimeMetadataPath = ".cloudredirect/Playtime.bin";`
+        // Captures the string literal; tolerates any identifier shape that
+        // ends in `MetadataPath`, so a future kAchievementsMetadataPath is
+        // picked up automatically.
+        var rx = new Regex(
+            @"k\w*MetadataPath\s*=\s*""([^""]+)""",
+            RegexOptions.CultureInvariant);
+        var matches = rx.Matches(text);
+
+        // Sanity: we must find at least the four known constants. If the
+        // regex silently stops matching (e.g. header reformatted with raw
+        // string literals), fail loudly rather than vacuously pass.
+        Assert.True(
+            matches.Count >= 4,
+            $"Expected at least 4 k*MetadataPath constants in cloud_intercept.h, found {matches.Count}. " +
+            "Regex may need updating to match a new literal form.");
+
+        foreach (Match m in matches)
+        {
+            var nativePath = m.Groups[1].Value;
+            Assert.Contains(nativePath, OrphanBlobService.InternalMetadataFilenames);
+        }
+    }
+
+    /// <summary>
+    /// Walks up from the test assembly location looking for a file at the
+    /// given repo-relative path. Returns null if not found within 8 levels
+    /// (generous upper bound for typical nested bin/ layouts).
+    /// </summary>
+    private static string? FindRepoFile(string relativePath)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        for (int i = 0; i < 8 && dir != null; i++)
+        {
+            var candidate = Path.Combine(dir.FullName, relativePath);
+            if (File.Exists(candidate))
+                return candidate;
+            dir = dir.Parent;
+        }
+        return null;
     }
 }

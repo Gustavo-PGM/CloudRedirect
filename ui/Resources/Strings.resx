@@ -839,9 +839,45 @@ You can restore from the Restore Saves panel.</value>
     <value>Delete Failed</value>
   </data>
 
-  <!-- AppsPage orphan-blob prune -->
+  <!-- AppsPage orphan-blob scan + prune -->
   <data name="Apps_PruneTooltip" xml:space="preserve">
     <value>Delete orphan cloud blobs no longer referenced by this app</value>
+  </data>
+  <data name="Apps_ScanForOrphans" xml:space="preserve">
+    <value>Scan Cloud for Orphans</value>
+  </data>
+  <data name="Apps_ScanningOrphansFormat" xml:space="preserve">
+    <value>Scanning... ({0}/{1})</value>
+  </data>
+  <data name="Apps_ScanLocalOnlyTitle" xml:space="preserve">
+    <value>No Cloud Provider</value>
+  </data>
+  <data name="Apps_ScanLocalOnlyMessage" xml:space="preserve">
+    <value>CloudRedirect is configured for local-only storage. There is no cloud to scan for orphan blobs.</value>
+  </data>
+  <data name="Apps_ScanFailedTitle" xml:space="preserve">
+    <value>Scan Failed</value>
+  </data>
+  <data name="Apps_ScanCompleteCleanFormat" xml:space="preserve">
+    <value>Scanned {0} app(s) -- no orphan cloud blobs found.</value>
+  </data>
+  <data name="Apps_ScanCompleteFoundFormat" xml:space="preserve">
+    <value>Found {0} orphan cloud blob(s) across {1} app(s).</value>
+  </data>
+  <data name="Apps_ScanCompletePartialFormat" xml:space="preserve">
+    <value>{0} app(s) could not be verified (listing incomplete).</value>
+  </data>
+  <data name="Apps_OrphanSummaryFormat" xml:space="preserve">
+    <value>{0} unreferenced cloud blob(s)</value>
+  </data>
+  <data name="Apps_PruneAll" xml:space="preserve">
+    <value>Prune All</value>
+  </data>
+  <data name="Apps_ReviewOrphans" xml:space="preserve">
+    <value>Review Orphans</value>
+  </data>
+  <data name="Apps_CollapseOrphans" xml:space="preserve">
+    <value>Collapse</value>
   </data>
   <data name="Apps_PruneScanningTitle" xml:space="preserve">
     <value>Scanning cloud blobs...</value>
@@ -1401,7 +1437,7 @@ Are you sure?</value>
     <value>Steam Is Running</value>
   </data>
   <data name="Steam_IsRunningMessage" xml:space="preserve">
-    <value>Steam must be closed before restoring saves. Please close Steam and try again.</value>
+    <value>Steam must be closed before continuing. Please close Steam and try again.</value>
   </data>
 
   <!-- CloudConfig.DisplayName -->
