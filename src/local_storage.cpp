@@ -1165,13 +1165,15 @@ bool SetFileTimestamp(uint32_t accountId, uint32_t appId, const std::string& fil
 }
 
 
-std::vector<FileEntry> GetAutoCloudFileList(const std::string& steamPath, uint32_t accountId, uint32_t appId) {
-    std::vector<FileEntry> result;
+AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
+                                         uint32_t accountId, uint32_t appId) {
+    AutoCloudScanResult outResult;
+    std::vector<FileEntry>& result = outResult.files;
 
     auto rules = LoadAutoCloudRules(steamPath, appId);
     if (rules.empty()) {
         LOG("GetAutoCloudFileList: no appinfo UFS save rules for app %u", appId);
-        return result;
+        return outResult;
     }
 
     std::filesystem::path appUserdataDir = std::filesystem::path(steamPath) / "userdata" /
@@ -1414,20 +1416,24 @@ std::vector<FileEntry> GetAutoCloudFileList(const std::string& steamPath, uint32
         if (scanLimitReached()) break;
     }
 
-    if (scanLimitHit) {
-        throw std::runtime_error("AutoCloud scan limit reached before complete enumeration");
-    }
-
+    // Surface termination conditions to the caller via the structured
+    // result rather than an exception. Scan-limit and root-collision are
+    // expected outcomes of a bounded scan against adversarial/misconfigured
+    // inputs, not unrecoverable errors — using exceptions here would mean
+    // every caller pays for unwinding on a routine abort path.
+    outResult.scanLimitHit = scanLimitHit;
+    outResult.hasRootCollision = hasRootCollision;
     if (hasRootCollision) {
         result.clear();
         LOG("GetAutoCloudFileList: aborting app %u bootstrap due to root/path collision", appId);
     }
 
-    LOG("GetAutoCloudFileList: found %zu rule-matched Auto-Cloud files for app %u", result.size(), appId);
+    LOG("GetAutoCloudFileList: found %zu rule-matched Auto-Cloud files for app %u (scanLimitHit=%d, hasRootCollision=%d)",
+        result.size(), appId, (int)scanLimitHit, (int)hasRootCollision);
     for (auto& fe : result) {
         LOG("  AC file: root=%u %s (%llu bytes)", fe.rootId, fe.filename.c_str(), fe.rawSize);
     }
-    return result;
+    return outResult;
 }
 
 void SaveRootTokens(uint32_t accountId, uint32_t appId, const std::unordered_set<std::string>& tokens) {

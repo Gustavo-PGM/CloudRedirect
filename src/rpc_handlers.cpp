@@ -230,10 +230,14 @@ static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
         return;
     }
 
-    std::vector<LocalStorage::FileEntry> candidates;
+    LocalStorage::AutoCloudScanResult scan;
     try {
-        candidates = LocalStorage::GetAutoCloudFileList(GetSteamPath(), accountId, appId);
+        scan = LocalStorage::GetAutoCloudFileList(GetSteamPath(), accountId, appId);
     } catch (const std::exception& ex) {
+        // Any remaining exceptions are genuinely unexpected filesystem-API
+        // failures, not the routine scan-limit condition (which now returns
+        // structured state below). Clear the cache because we have no
+        // confidence in internal state at this point.
         LOG("[AutoCloudImport] Scan failed for app %u: %s", appId, ex.what());
         ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
         finish(false, cacheGeneration);
@@ -244,6 +248,39 @@ static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
         finish(false, cacheGeneration);
         return;
     }
+    // Order matters: collision is OBSERVED evidence of misconfiguration —
+    // it was actually seen in the scanned prefix. Scan-limit is a statement
+    // about the UNOBSERVED tail. If both fire in the same scan, the
+    // collision is already proof the rules are broken regardless of what
+    // the unwalked tail contains, so treat it as corruption unconditionally.
+    // Checking scanLimitHit first would let a genuine collision spin
+    // forever on apps with large save trees: scan-limit preserves the
+    // cache and forces a retry, and every retry that trips the cap again
+    // would mask the collision indefinitely.
+    if (scan.hasRootCollision) {
+        // GetAutoCloudFileList already cleared scan.files. Clear the cache,
+        // fail closed, and markAttempted=true so we don't loop on this app.
+        LOG("[AutoCloudImport] Root collision detected for app %u; aborting bootstrap", appId);
+        ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+        finish(true, cacheGeneration);
+        return;
+    }
+    if (scan.scanLimitHit) {
+        // Scan-limit is a resource cap, not corruption. `scan.files` is a
+        // truncated prefix — importing it would commit to canonicalizing
+        // only part of the save set while the Steam client may reference
+        // files beyond the cap. Fail closed on import (markAttempted=false
+        // so a future session retries with possibly more generous conditions)
+        // but preserve any canonical token cache that was already populated:
+        // wiping it would strand incoming RPCs that rely on cached tokens
+        // for files the scan DID observe successfully on a prior boot.
+        LOG("[AutoCloudImport] Scan limit hit for app %u (%zu files observed); "
+            "refusing partial import, preserving canonical token cache",
+            appId, scan.files.size());
+        finish(false, cacheGeneration);
+        return;
+    }
+    std::vector<LocalStorage::FileEntry>& candidates = scan.files;
     if (candidates.empty()) {
         ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
         finish(true, cacheGeneration);

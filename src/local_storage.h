@@ -41,7 +41,27 @@ void SetChangeNumber(uint32_t accountId, uint32_t appId, uint64_t cn);
 uint64_t IncrementChangeNumber(uint32_t accountId, uint32_t appId);
 std::vector<uint8_t> SHA1(const uint8_t* data, size_t len);
 std::string GetAppPath(uint32_t accountId, uint32_t appId);
-std::vector<FileEntry> GetAutoCloudFileList(const std::string& steamPath, uint32_t accountId, uint32_t appId);
+// Result of a bounded AutoCloud save-rule scan.
+// - files: rule-matched files observed before any termination condition.
+// - scanLimitHit: the resource cap (kMaxAutoCloudScanFiles /
+//   kMaxAutoCloudScanMillis) was reached; `files` is a truncated prefix of
+//   what the filesystem contains. Callers MUST NOT commit to an import
+//   based on this — they can't tell whether an unobserved file is a
+//   foreign-app pollution sentinel or a legitimate save. They also MUST
+//   NOT clear any canonical-token cache: a partial scan is not corruption
+//   evidence, and discarding a previously-populated cache would break
+//   incoming ChangelistGet canonicalization for files that were scanned
+//   successfully on a prior session.
+// - hasRootCollision: two rules resolved to the same cloud path under
+//   different root tokens. `files` is cleared. Import must abort.
+struct AutoCloudScanResult {
+    std::vector<FileEntry> files;
+    bool scanLimitHit = false;
+    bool hasRootCollision = false;
+};
+
+AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
+                                         uint32_t accountId, uint32_t appId);
 void SaveRootTokens(uint32_t accountId, uint32_t appId, const std::unordered_set<std::string>& tokens);
 std::unordered_set<std::string> LoadRootTokens(uint32_t accountId, uint32_t appId);
 
