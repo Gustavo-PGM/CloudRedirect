@@ -983,16 +983,22 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                 hadNewer = true;
             }
 
-            // If cloud had corrupted tokens, push cleaned version back
+            // If cloud had corrupted tokens, push the cleaned *cloud* set back --
+            // NOT the local-merged superset. This is purely a serialization repair:
+            // cloud already considered these tokens authoritative under its CN, we
+            // are only fixing CRLF-duplicated entries. Uploading `localTokens` here
+            // would leak local-only tokens to cloud that a later SyncFromCloud
+            // rollback would revert locally, stranding them in cloud and
+            // propagating them to other clients on the next sync.
             if (cloudHadCorruption) {
                 std::string cleaned;
-                for (auto& t : localTokens) {
+                for (auto& t : cloudTokens) {
                     cleaned += t + "\n";
                 }
                 std::vector<uint8_t> cleanedData(cleaned.begin(), cleaned.end());
                 if (g_provider->Upload(cloudTokenPath, cleanedData.data(), cleanedData.size())) {
                     LOG("[CloudStorage] SyncFromCloud app %u: pushed cleaned root_token.dat to cloud (%zu tokens)",
-                        appId, localTokens.size());
+                        appId, cloudTokens.size());
                 } else {
                     LOG("[CloudStorage] SyncFromCloud app %u: FAILED to push cleaned root_token.dat to cloud",
                         appId);
