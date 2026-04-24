@@ -112,7 +112,17 @@ static std::vector<std::thread>          g_workerThreads;
 static std::atomic<bool>                 g_workerRunning{false};
 static std::atomic<int>                  g_activeWorkers{0};
 static std::unordered_map<std::string, int> g_activePaths;
+// g_failedPaths tracks ONLY retriable failures: items that DrainQueueForApp
+// should still wait on and callers should treat as unfinished work. Once an
+// item exhausts MAX_DRAIN_REQUEUES it is removed from this set even though it
+// stays in g_failedWorkItems for diagnostic purposes, so that callers like
+// CommitCNWithRetry stop blocking for 30s per drain on work we have given up
+// on.
 static std::unordered_set<std::string>   g_failedPaths;
+// g_failedWorkItems is the dead-letter record of every failed item, including
+// poisoned ones. It drives RequeueFailedWorkForPrefixLocked's decision on
+// whether to retry or skip, and is cleared when a fresh EnqueueWork supersedes
+// the failed item or at Shutdown.
 static std::unordered_map<std::string, WorkItem> g_failedWorkItems;
 static std::condition_variable           g_drainCV;       // signaled when a worker finishes an item
 static constexpr int                     WORKER_THREAD_COUNT = 4;
@@ -154,8 +164,13 @@ static void RequeueFailedWorkForPrefixLocked(const std::string& prefix) {
         }
         if (it->second.drainRequeues >= MAX_DRAIN_REQUEUES) {
             // Poison item: exhausted both inline retries and drain requeues.
-            // Leave it in g_failedWorkItems so HasFailedWorkForPrefix still
-            // reports the failure to callers, but do not requeue it.
+            // Drop it from g_failedPaths so HasFailedWorkForPrefix stops
+            // reporting the failure to drain callers (otherwise CommitCNWithRetry
+            // stalls Steam's RPC thread ~60s per batch for the lifetime of the
+            // poison). Keep it in g_failedWorkItems so this same item cannot be
+            // silently re-queued by a future drain; a fresh EnqueueWork for the
+            // same cloudPath will clear both maps and grant a clean attempt.
+            g_failedPaths.erase(it->first);
             ++it;
             continue;
         }
@@ -550,13 +565,19 @@ bool PushCNToCloudSync(uint32_t accountId, uint32_t appId, uint64_t cn) {
 }
 
 bool CommitCNWithRetry(uint32_t accountId, uint32_t appId, uint64_t cn) {
+    // DrainQueueForApp only waits on retriable pending work; it reports
+    // drained=true once the only remaining failed items are poisoned
+    // (MAX_DRAIN_REQUEUES exhausted). That is the right behavior here
+    // because poisoned items will never succeed and we should not stall
+    // Steam's hot-path RPC thread waiting for them.
     bool drained = DrainQueueForApp(accountId, appId);
     bool cnPublished = drained && PushCNToCloudSync(accountId, appId, cn);
     if (cnPublished) return true;
-    // Async retry so the CN publish survives process exit; blocking drain
-    // also forces retry of any failed Uploads/Deletes for this app prefix,
-    // critical for batches that contain deletes (otherwise a failed cloud
-    // delete could resurrect on the next SyncFromCloud).
+    // Genuine transient failure (drain timed out or sync CN push failed).
+    // Queue an async retry so the CN publish survives process exit, then
+    // block on a second drain so failed Uploads/Deletes for this app prefix
+    // get one more chance before this batch returns to Steam — a failed
+    // cloud delete left behind can resurrect on the next SyncFromCloud.
     LOG("[CloudStorage] CommitCNWithRetry app %u CN=%llu drained=%d: deferring to async retry",
         appId, (unsigned long long)cn, drained ? 1 : 0);
     PushCNToCloud(accountId, appId, cn);
