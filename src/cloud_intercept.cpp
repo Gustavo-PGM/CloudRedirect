@@ -1639,11 +1639,21 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
             if (g_syncAchievements) UploadStatsOnExit(capturedAppId);
             if (g_syncPlaytime) UploadPlaytimeOnExit(capturedAppId);
         });
+        // Re-check g_shuttingDown UNDER g_bgThreadsMutex so we cannot push
+        // a new thread into the vector after CloudIntercept::Shutdown() has
+        // already moved-out and cleared it. The pre-bounded-join code held
+        // this lock across the entire join loop and got this protection
+        // implicitly; the new move-then-join structure releases the lock
+        // early, opening a window the spawn site must close itself.
         std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
-        g_bgThreads.push_back(std::move(t));
+        if (g_shuttingDown.load(std::memory_order_acquire)) {
+            t.detach(); // OS reaps at process exit
+        } else {
+            g_bgThreads.push_back(std::move(t));
+        }
     }
 
-    // Namespace app — suppress the notification (don't send to Steam servers)
+    // Namespace app - suppress the notification (don't send to Steam servers)
     LOG("[VtHook-Notif] SUPPRESSED %s app=%u (notification not sent to server)", methodName, realAppId);
     return true;  // Return success without actually sending
 }
@@ -1678,11 +1688,16 @@ static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodN
             if (g_syncAchievements) UploadStatsOnExit(capturedAppId);
             if (g_syncPlaytime) UploadPlaytimeOnExit(capturedAppId);
         });
+        // See NotificationHook (slot 8) above — same shutdown-window race.
         std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
-        g_bgThreads.push_back(std::move(t));
+        if (g_shuttingDown.load(std::memory_order_acquire)) {
+            t.detach();
+        } else {
+            g_bgThreads.push_back(std::move(t));
+        }
     }
 
-    // Namespace app — suppress the notification
+    // Namespace app - suppress the notification
     LOG("[VtHook-Notif] SUPPRESSED %s app=%u (direct notification not sent to server)", methodName, realAppId);
     return true;
 }
@@ -3229,6 +3244,29 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
     return true;
 }
 
+// Bounded join: waits up to timeoutMs for `t` to finish; if it doesn't, the
+// thread is detached and we log + return false. Used during shutdown so a
+// wedged network call (UploadStatsOnExit, StoreBlob, etc.) or an
+// undismissed modal MessageBox cannot keep Steam alive in the tray.
+//
+// Detached threads are reaped by the OS at process exit; the DllMain
+// DLL_PROCESS_DETACH path with reserved != NULL already skips Shutdown(),
+// so detach-on-timeout only affects FreeLibrary / normal shutdown — both
+// of which terminate the process shortly after.
+static bool JoinThreadWithTimeout(std::thread& t, DWORD timeoutMs, const char* name) {
+    if (!t.joinable()) return true;
+    HANDLE h = static_cast<HANDLE>(t.native_handle());
+    DWORD wait = WaitForSingleObject(h, timeoutMs);
+    if (wait == WAIT_OBJECT_0) {
+        t.join();
+        return true;
+    }
+    LOG("Shutdown: %s did not finish within %u ms (wait=%u) — detaching to unblock shutdown",
+        name, timeoutMs, wait);
+    t.detach();
+    return false;
+}
+
 // Shutdown
 void Shutdown() {
     g_shuttingDown.store(true);
@@ -3279,17 +3317,43 @@ void Shutdown() {
         g_bddOrigAddr = nullptr;
     }
 
-    // Join lua sync thread before shutdown proceeds
-    if (g_luaSyncThread.joinable()) g_luaSyncThread.join();
-    if (g_startupMetadataThread.joinable()) g_startupMetadataThread.join();
+    // Join lua sync thread before shutdown proceeds. Both threads check
+    // g_shuttingDown internally, so a 5s budget is more than enough to let
+    // them exit their poll/upload loops cleanly. If they're stuck inside
+    // SyncLuaFiles / SyncAllFromCloud network I/O, detach so shutdown
+    // proceeds — the OS reaps the worker at process exit.
+    JoinThreadWithTimeout(g_luaSyncThread, 5000, "g_luaSyncThread");
+    JoinThreadWithTimeout(g_startupMetadataThread, 5000, "g_startupMetadataThread");
 
-    // Join background threads (exit-sync uploads, MessageBox, etc.)
+    // Join background threads (exit-sync uploads, MessageBox, etc.).
+    // These do not check g_shuttingDown mid-flight (UploadStatsOnExit,
+    // UploadPlaytimeOnExit call CloudStorage::StoreBlob which can block in
+    // WinHttpReceiveResponse) and the MessageBox thread waits for user
+    // dismissal that may never come if Steam tore down its UI first.
+    // Bounded join keeps Steam shutdown responsive.
     {
-        std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
-        for (auto& t : g_bgThreads) {
-            if (t.joinable()) t.join();
+        std::vector<std::thread> threads;
+        {
+            std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
+            threads = std::move(g_bgThreads);
+            g_bgThreads.clear();
         }
-        g_bgThreads.clear();
+        // Move out before joining so spawn sites that race in during
+        // shutdown don't deadlock on g_bgThreadsMutex while we wait. The
+        // spawn sites themselves re-check g_shuttingDown under the mutex
+        // and detach instead of pushing, so an empty post-clear vector
+        // stays empty.
+        size_t total = threads.size();
+        size_t joined = 0, detached = 0, skipped = 0;
+        for (auto& t : threads) {
+            if (!t.joinable()) { ++skipped; continue; }
+            if (JoinThreadWithTimeout(t, 3000, "g_bgThreads[bg]")) ++joined;
+            else ++detached;
+        }
+        if (total > 0) {
+            LOG("Shutdown: bg threads joined=%zu detached=%zu skipped=%zu (total=%zu)",
+                joined, detached, skipped, total);
+        }
     }
 
     // Upload current lua state before cloud provider shuts down
