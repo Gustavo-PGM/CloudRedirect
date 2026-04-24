@@ -461,7 +461,14 @@ namespace CloudRedirect.Services.Patching
                 // Write payload first (less dangerous if interrupted: patched payload
                 // without patched DLL just means cloud features don't work yet, while
                 // patched DLL with original payload would bypass SteamTools activation)
-                Backup(cachePath);
+                //
+                // Take BOTH backups up front before either write. If we backed
+                // up cachePath, wrote the patched payload, then failed to back
+                // up dllPath, the user would be left with a patched payload + a
+                // .bak for cachePath but NO current .bak for dllPath — Revert
+                // could not cleanly undo this state.
+                BackupBoth(cachePath, dllPath);
+
                 if (plApplied > 0)
                 {
                     ReEncryptAndWrite(cachePath, patchedPayload, iv);
@@ -473,7 +480,6 @@ namespace CloudRedirect.Services.Patching
                 }
                 result.CachePatched = true;
 
-                Backup(dllPath);
                 if (dllApplied > 0)
                 {
                     FileUtils.AtomicWriteAllBytes(dllPath, patchedDll);
@@ -561,9 +567,16 @@ namespace CloudRedirect.Services.Patching
                     return result.Fail("Byte mismatch in payload");
                 }
 
+                // Backup both files up front so a partial-revert state still
+                // has current .bak files for both halves; see ApplyOfflineSetup
+                // comment for the failure mode this prevents.
+                if (plReverted > 0 || dllReverted > 0)
+                {
+                    BackupBoth(cachePath, dllPath);
+                }
+
                 if (plReverted > 0)
                 {
-                    Backup(cachePath);
                     ReEncryptAndWrite(cachePath, revertedPayload, iv);
                     Log($"  {plReverted} patch(es) reverted in payload" + (plSkipped > 0 ? $", {plSkipped} already original" : ""));
                 }
@@ -574,7 +587,6 @@ namespace CloudRedirect.Services.Patching
 
                 if (dllReverted > 0)
                 {
-                    Backup(dllPath);
                     FileUtils.AtomicWriteAllBytes(dllPath, revertedDll);
                     Log($"  {dllReverted} patch(es) reverted in {hijackDll}" + (dllSkipped > 0 ? $", {dllSkipped} already original" : ""));
                 }
@@ -790,13 +802,32 @@ namespace CloudRedirect.Services.Patching
             var orig = path + ".orig";
             if (!File.Exists(orig))
             {
-                File.Copy(path, orig);
+                // .orig captures the very first pre-patch state and is never
+                // overwritten. Use atomic copy so a kill during this write does
+                // not leave a partial .orig that the user might later treat as
+                // a recovery point.
+                FileUtils.AtomicCopy(path, orig);
                 Log($"  Original saved to {orig}");
             }
 
+            // .bak is the rolling backup taken every patch/revert cycle. A torn
+            // .bak from a non-atomic File.Copy would silently overwrite a working
+            // binary on subsequent Restore — atomic copy eliminates that.
             var bak = path + ".bak";
-            File.Copy(path, bak, overwrite: true);
+            FileUtils.AtomicCopy(path, bak);
             Log($"  Backed up to {bak}");
+        }
+
+        // Take both backups before either is consumed by a write. The patcher
+        // applies coordinated changes to two files (payload cache + DLL); if a
+        // single Backup throws between writes, one half is patched and the
+        // other has no current .bak — Revert/Restore cannot cleanly undo the
+        // partial install. Up-front bracketing means either both backups
+        // succeed (writes can proceed) or we throw before mutating anything.
+        void BackupBoth(string firstPath, string secondPath)
+        {
+            Backup(firstPath);
+            Backup(secondPath);
         }
 
         void ReEncryptAndWrite(string cachePath, byte[] patchedPayload, byte[] iv)
@@ -1210,7 +1241,12 @@ namespace CloudRedirect.Services.Patching
                 }
 
                 Log("Patching payload (CloudRedirect namespace mode)..");
-                Backup(cachePath);
+                // Backup BOTH files up front before any write — see the
+                // comment in ApplyOfflineSetup. Without this, an exception
+                // between the payload and DLL writes would leave the user
+                // with a patched payload + a .bak for cachePath but no
+                // current .bak for dllPath, blocking clean revert.
+                BackupBoth(cachePath, dllPath);
 
                 var (payload, iv, plErr) = ReadAndDecryptPayload(cachePath);
                 if (payload == null)
@@ -1270,7 +1306,6 @@ namespace CloudRedirect.Services.Patching
                 Log($"  {total} cave change(s) applied" + (plSkipped > 0 ? $", {plSkipped} already done" : ""));
                 result.CachePatched = true;
 
-                Backup(dllPath);
                 if (dllApplied > 0)
                 {
                     FileUtils.AtomicWriteAllBytes(dllPath, patchedDll);
@@ -1361,14 +1396,15 @@ namespace CloudRedirect.Services.Patching
                     afterP123Revert = reverted;
                 }
 
-                // Write files (payload first, DLL second — matches apply order)
-                Backup(cachePath);
+                // Write files (payload first, DLL second — matches apply order).
+                // Backup BOTH files before either write so a partial revert
+                // still has current .bak files for both halves.
+                BackupBoth(cachePath, dllPath);
                 ReEncryptAndWrite(cachePath, afterP123Revert, iv);
                 Log("  Payload written.");
 
                 if (dllReverted > 0)
                 {
-                    Backup(dllPath);
                     FileUtils.AtomicWriteAllBytes(dllPath, revertedDll);
                     Log($"  {dllReverted} core patch(es) reverted in {hijackDll}");
                 }
