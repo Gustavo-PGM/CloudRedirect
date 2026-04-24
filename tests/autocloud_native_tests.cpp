@@ -413,5 +413,51 @@ int main() {
         std::filesystem::remove_all(tmp, ec);
     }
 
+    // FileUtil::IsPathRedirectingReparsePoint:
+    //   - regular dir/file/missing: NOT redirecting.
+    //   - NTFS junction: IS redirecting (the attack primitive).
+    //   - other reparse tags (e.g. OneDrive placeholders): NOT redirecting
+    //     (covered implicitly — the detector only matches MOUNT_POINT and
+    //     SYMLINK tags; we can't easily synthesize a CLOUD_* placeholder
+    //     without a sync engine, so this is a contract test by inspection).
+    // Junctions need no admin (unlike symlinks), so this works on a CI
+    // runner without elevation. If the mklink command fails for any reason
+    // (cmd.exe missing on PATH, FAT32 temp dir, sandbox), the junction
+    // case is skipped and the negative cases still exercise the detector.
+    {
+        std::error_code ec;
+        auto tmp = std::filesystem::temp_directory_path() / "cr_reparse_test";
+        std::filesystem::remove_all(tmp, ec);
+        std::filesystem::create_directories(tmp, ec);
+        Expect(!ec, "test temp dir creation must succeed");
+
+        auto realDir = tmp / "real";
+        auto targetDir = tmp / "target";
+        auto regularFile = tmp / "plain.dat";
+        std::filesystem::create_directories(realDir, ec);
+        std::filesystem::create_directories(targetDir, ec);
+        { std::ofstream f(regularFile); f << "x"; }
+
+        Expect(!FileUtil::IsPathRedirectingReparsePoint(realDir.string()),
+               "regular directory must not be flagged as redirecting");
+        Expect(!FileUtil::IsPathRedirectingReparsePoint(regularFile.string()),
+               "regular file must not be flagged as redirecting");
+        Expect(!FileUtil::IsPathRedirectingReparsePoint((tmp / "does_not_exist").string()),
+               "missing path must not be flagged as redirecting");
+
+        auto junctionPath = tmp / "junction";
+        std::string cmd = "cmd.exe /c mklink /J \"" + junctionPath.string() +
+                          "\" \"" + targetDir.string() + "\" >nul 2>&1";
+        int rc = std::system(cmd.c_str());
+        if (rc == 0 && std::filesystem::exists(junctionPath, ec)) {
+            Expect(FileUtil::IsPathRedirectingReparsePoint(junctionPath.string()),
+                   "NTFS junction must be flagged as redirecting");
+        } else {
+            std::cerr << "  (skipped junction-positive case: mklink rc=" << rc << ")\n";
+        }
+
+        std::filesystem::remove_all(tmp, ec);
+    }
+
     return 0;
 }

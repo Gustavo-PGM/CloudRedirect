@@ -1752,8 +1752,23 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
             scanRoot /= rel;
         }
 
-        if (!std::filesystem::exists(scanRoot) || !std::filesystem::is_directory(scanRoot)) {
+        std::error_code scanRootEc;
+        if (!std::filesystem::exists(scanRoot, scanRootEc) || scanRootEc ||
+            !std::filesystem::is_directory(scanRoot, scanRootEc) || scanRootEc) {
             LOG("GetAutoCloudFileList: app %u rule path missing: root='%s' path='%s' resolved='%s'",
+                appId, rule.root.c_str(), rule.path.c_str(), scanRoot.string().c_str());
+            continue;
+        }
+        // Reject path-redirecting reparse points at the rule's resolved
+        // scan root. Steam's AutoCloud walks attacker-influenced paths
+        // (game saves under %USERPROFILE%\Documents\...) and a junction
+        // here would silently redirect the walk into an arbitrary tree —
+        // exfiltrating its contents into the cloud blob upload. Refuse to
+        // walk and let the app boot without AutoCloud rather than
+        // uploading the wrong tree. OneDrive cloud-placeholder dirs are
+        // explicitly NOT rejected — see IsPathRedirectingReparsePoint.
+        if (FileUtil::IsPathRedirectingReparsePoint(scanRoot.string())) {
+            LOG("GetAutoCloudFileList: app %u rule scan root is a junction/symlink, refusing to walk: root='%s' path='%s' resolved='%s'",
                 appId, rule.root.c_str(), rule.path.c_str(), scanRoot.string().c_str());
             continue;
         }
@@ -1764,6 +1779,19 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
 
         auto considerFile = [&](const std::filesystem::directory_entry& entry) {
             std::error_code fileEc;
+            // Junction/symlink gate before is_regular_file: directory_entry's
+            // stat-style queries follow reparse points (a file symlink to
+            // C:\Windows\System32\config\SAM would be reported as a regular
+            // file). Refuse path-redirecting entries outright so the upload
+            // pipeline never sees a redirected path. Cheap FindFirstFileW;
+            // only fires when the iterator actually yields a reparse entry.
+            // OneDrive cloud-placeholder files are intentionally allowed
+            // through — they read as their real bytes via the cloud filter.
+            if (FileUtil::IsPathRedirectingReparsePoint(entry.path().string())) {
+                LOG("GetAutoCloudFileList: app %u skipping junction/symlink entry under '%s': %s",
+                    appId, scanRoot.string().c_str(), entry.path().string().c_str());
+                return;
+            }
             if (!entry.is_regular_file(fileEc)) return;
             ++visitedFiles;
             std::string relFromRoot = NormalizeSlashes(std::filesystem::relative(entry.path(), scanRoot, fileEc).string());
@@ -1830,6 +1858,16 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
                 siblingPath.replace_extension(siblingExt);
                 std::error_code sibEc;
                 if (!std::filesystem::exists(siblingPath, sibEc) || sibEc) continue;
+                // Same junction/symlink gate as the primary considerFile path:
+                // the synthesized sibling lives in the same directory as a
+                // primary that already passed the gate, but a malicious save
+                // tree can still drop a file symlink with the matching
+                // sibling extension (e.g. save.thumb -> C:\path\to\secret).
+                if (FileUtil::IsPathRedirectingReparsePoint(siblingPath.string())) {
+                    LOG("GetAutoCloudFileList: app %u skipping junction/symlink sibling: %s",
+                        appId, siblingPath.string().c_str());
+                    continue;
+                }
                 if (!std::filesystem::is_regular_file(siblingPath, sibEc) || sibEc) continue;
                 std::string siblingRel = NormalizeSlashes(
                     std::filesystem::relative(siblingPath, scanRoot, sibEc).string());

@@ -82,6 +82,67 @@ inline void CleanupEmptyDirsUpTo(const std::string& startDir,
     }
 }
 
+// Path-redirecting reparse-point detection: returns true ONLY for reparse
+// tags that let an attacker redirect a recursive scan to a path of their
+// choosing — NTFS junctions (IO_REPARSE_TAG_MOUNT_POINT) and symlinks
+// (IO_REPARSE_TAG_SYMLINK). Returns false for benign reparse tags
+// (OneDrive Files-on-Demand cloud placeholders, AppExecLink, WSL, WIM,
+// dedup, etc.) so legitimate cloud-synced saves are not refused.
+//
+// Threat model: AutoCloud rules walk %USERPROFILE%\Documents\... and other
+// locations a malicious save file or game patcher can write to. A junction
+// dropped under the rule's resolved scan path would otherwise let the walk
+// follow it into e.g. C:\Users\<u>\.aws\ and exfiltrate the contents into the
+// cloud blob upload. Junctions don't need SeCreateSymbolicLinkPrivilege
+// (mklink /J runs unprivileged), so this is a realistic primitive.
+//
+// Why explicit tag inspection instead of FILE_ATTRIBUTE_REPARSE_POINT alone:
+//   - OneDrive Files-on-Demand placeholders set FILE_ATTRIBUTE_REPARSE_POINT
+//     with IO_REPARSE_TAG_CLOUD_* — opening reads them through the cloud
+//     filter and returns the real bytes. Refusing all reparse points would
+//     silently break AutoCloud for every OneDrive user with synced saves.
+//   - AppExecLink (Microsoft Store apps), WSL, dedup, WIM and similar tags
+//     are not under attacker control in the AutoCloud scan paths and don't
+//     redirect to attacker-chosen targets.
+//
+// Why is_symlink() doesn't work:
+//   - MSVC STL classifies NTFS junctions as file_type::junction (a non-
+//     standard extension), not file_type::symlink. is_symlink() returns
+//     false for junctions. Filtering only via is_symlink misses the most
+//     common attacker primitive on Windows.
+//
+// Why FindFirstFileW and not GetFileAttributesW:
+//   - GetFileAttributesW reports the reparse attribute bit but not the tag.
+//   - FindFirstFileW returns the tag in WIN32_FIND_DATAW::dwReserved0 for
+//     reparse-point entries (documented contract), in a single syscall.
+//
+// Returns false on any error (path missing, ACL denied) — callers treat
+// "unknown" as "not a reparse point" and let the subsequent open/walk fail
+// naturally with its own error path. This avoids a denial-of-service where a
+// transiently unreadable directory permanently blocks AutoCloud.
+inline bool IsPathRedirectingReparsePoint(const std::string& path) {
+    int wideLen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    if (wideLen <= 0) return false;
+    std::wstring wide(static_cast<size_t>(wideLen - 1), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wide.data(), wideLen) <= 0) {
+        return false;
+    }
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW(wide.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FindClose(h);
+    if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) return false;
+    // dwReserved0 carries the reparse tag for entries that are reparse points.
+    switch (fd.dwReserved0) {
+        case IO_REPARSE_TAG_MOUNT_POINT: // NTFS junction — unprivileged primitive
+        case IO_REPARSE_TAG_SYMLINK:     // file/dir symlink — privileged primitive
+            return true;
+        default:
+            // CLOUD_*, APPEXECLINK, WCI*, WIM, DEDUP, HSM, GVFS, ONEDRIVE, etc.
+            return false;
+    }
+}
+
 inline bool AtomicWriteBinary(const std::string& path, const void* data, size_t len) {
     std::string tmpPath = path + ".tmp";
     std::ofstream f(tmpPath, std::ios::binary);
