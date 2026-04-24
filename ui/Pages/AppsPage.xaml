@@ -129,8 +129,16 @@
                                     </ui:CardControl.Header>
                                 </ui:CardControl>
 
+                                <!--
+                                    Detail panel is a sibling of the CardControl, not a child,
+                                    so it inherits the ItemsControl's full horizontal bounds.
+                                    The symmetric 16px left/right margin keeps content inside
+                                    the card's visual footprint; without a right margin the
+                                    Prune button pokes past the card's right edge and, when
+                                    the page's vertical scrollbar appears, past the viewport.
+                                -->
                                 <StackPanel Visibility="Collapsed"
-                                            Margin="16,8,0,0">
+                                            Margin="16,8,16,0">
                                     <Grid Margin="0,0,0,8">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
