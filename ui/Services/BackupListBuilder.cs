@@ -107,15 +107,21 @@ internal static class BackupListBuilder
                 Stretch = Stretch.UniformToFill,
                 Margin = new Thickness(0, 0, 10, 0)
             };
-            if (!string.IsNullOrEmpty(headerUrl) && SteamStoreClient.IsValidSteamCdnUrl(headerUrl))
+            if (!string.IsNullOrEmpty(headerUrl) && SteamStoreClient.IsValidImageUrl(headerUrl))
             {
                 try
                 {
                     var bitmap = new BitmapImage();
                     bitmap.BeginInit();
+                    // OnLoad decodes immediately and releases the backing file
+                    // handle; without it a file:// URI keeps the cached JPEG
+                    // locked, blocking cache eviction and overwrite on asset
+                    // hash rotation.
+                    bitmap.CacheOption = BitmapCacheOption.OnLoad;
                     bitmap.UriSource = new Uri(headerUrl);
                     bitmap.DecodePixelWidth = 64;
                     bitmap.EndInit();
+                    bitmap.Freeze();
                     iconImage.Source = bitmap;
                 }
                 catch { /* icon load failure is fine */ }

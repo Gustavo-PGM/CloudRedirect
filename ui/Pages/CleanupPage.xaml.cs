@@ -752,15 +752,22 @@ public partial class CleanupPage : Page
                 Stretch = Stretch.UniformToFill,
                 Margin = new Thickness(0, 0, 10, 0)
             };
-            if (_storeCache.TryGetValue(app.AppId, out var storeInfo2) && SteamStoreClient.IsValidSteamCdnUrl(storeInfo2.HeaderUrl))
+            if (_storeCache.TryGetValue(app.AppId, out var storeInfo2) && SteamStoreClient.IsValidImageUrl(storeInfo2.HeaderUrl))
             {
                 try
                 {
                     var bitmap = new BitmapImage();
                     bitmap.BeginInit();
+                    // OnLoad decodes immediately and releases the backing file
+                    // handle; without it a file:// URI keeps the cached JPEG
+                    // locked for the lifetime of this BitmapImage, which
+                    // blocks the cache eviction sweep and a fresh overwrite
+                    // when the Steam asset hash rotates.
+                    bitmap.CacheOption = BitmapCacheOption.OnLoad;
                     bitmap.UriSource = new Uri(storeInfo2.HeaderUrl);
                     bitmap.DecodePixelWidth = 64;
                     bitmap.EndInit();
+                    bitmap.Freeze();
                     iconImage.Source = bitmap;
                 }
                 catch { /* icon load failure is fine */ }
