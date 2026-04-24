@@ -280,10 +280,29 @@ static void HandleClient(SOCKET client) {
                 bodyData = std::move(decompressed);
             }
 
-            // write blob to disk
+            // write blob to disk. create_directories is the ec overload so a
+            // failed mkdir (bad ACL, disk full, junction loop) returns an
+            // error we can report as 500 instead of letting filesystem_error
+            // escape HandleClient — which would leak the client socket and
+            // leave doneFlag un-set, so PruneClientThreads never reaps the
+            // slot and the 16-thread cap eventually wedges the whole server.
             std::string blobPath = BlobPath(accountId, appId, filename);
             auto parent = std::filesystem::path(blobPath).parent_path();
-            std::filesystem::create_directories(parent);
+            std::error_code mkEc;
+            std::filesystem::create_directories(parent, mkEc);
+            if (mkEc) {
+                LOG("[HTTP] PUT %s -> create_directories '%s' FAILED: %s",
+                    path, parent.string().c_str(), mkEc.message().c_str());
+                const char* errResponse =
+                    "HTTP/1.1 500 Internal Server Error\r\n"
+                    "Content-Length: 0\r\n"
+                    "Connection: close\r\n"
+                    "\r\n";
+                send(client, errResponse, (int)strlen(errResponse), 0);
+                shutdown(client, SD_SEND);
+                closesocket(client);
+                return;
+            }
 
             // Atomic write blob to disk
             if (!FileUtil::AtomicWriteBinary(blobPath, bodyData.data(), bodyData.size())) {
@@ -490,9 +509,15 @@ static void AcceptLoop() {
             continue;
         }
 
-        // Set receive timeout to prevent slow/stalled clients from blocking a thread
-        DWORD rcvTimeout = 30000; // 30 seconds
+        // Set send+receive timeouts so a slow/stalled client cannot pin a
+        // thread indefinitely. Without SO_SNDTIMEO, the final send() of the
+        // 200-OK response (or a 4xx/5xx error) can wedge if the peer's recv
+        // buffer is full and never drained — 16 such stuck threads saturate
+        // the accept pool (cap at g_clientSlots.size() >= 16 below).
+        DWORD rcvTimeout = 30000; // 30s
+        DWORD sndTimeout = 30000; // 30s
         setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcvTimeout, sizeof(rcvTimeout));
+        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char*)&sndTimeout, sizeof(sndTimeout));
 
         // handle each connection on its own thread so parallel uploads don't queue up
         {
@@ -522,7 +547,12 @@ bool Start(const std::string& blobRoot, uint32_t accountId) {
     g_accountId.store(accountId);
     if (!g_blobRoot.empty() && g_blobRoot.back() != '\\')
         g_blobRoot += '\\';
-    std::filesystem::create_directories(g_blobRoot);
+    std::error_code rootEc;
+    std::filesystem::create_directories(g_blobRoot, rootEc);
+    if (rootEc) {
+        LOG("[HTTP] create_directories '%s' FAILED: %s (continuing — later PUT writes will retry)",
+            g_blobRoot.c_str(), rootEc.message().c_str());
+    }
     LOG("[HTTP] Blob storage root: %s (accountId=%u)", g_blobRoot.c_str(), g_accountId.load());
 
     WSADATA wsa;
@@ -627,7 +657,9 @@ static bool ValidateBlobPath(const std::string& blobPath) {
 bool HasBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return false;
-    return std::filesystem::exists(path);
+    std::error_code ec;
+    bool ex = std::filesystem::exists(path, ec);
+    return !ec && ex;
 }
 
 uint64_t GetBlobSize(uint32_t accountId, uint32_t appId, const std::string& filename) {
@@ -661,7 +693,13 @@ bool WriteBlob(uint32_t accountId, uint32_t appId, const std::string& filename,
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return false;
     auto parent = std::filesystem::path(path).parent_path();
-    std::filesystem::create_directories(parent);
+    std::error_code ec;
+    std::filesystem::create_directories(parent, ec);
+    if (ec) {
+        LOG("[HTTP] WriteBlob create_directories '%s' FAILED: %s",
+            parent.string().c_str(), ec.message().c_str());
+        return false;
+    }
     return FileUtil::AtomicWriteBinary(path, data, len);
 }
 
