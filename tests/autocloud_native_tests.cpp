@@ -1,6 +1,9 @@
 #include "local_storage.h"
+#include "file_util.h"
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -72,6 +75,81 @@ int main() {
         auto s = LocalStorage::TestParseAutoCloudSiblings(".meta meta");
         Expect(s.size() == 1 && s[0] == "meta",
                "siblings splitter should reject leading-dot tokens");
+    }
+
+    // CleanupEmptyDirsUpTo: removes empty dir chain but preserves stopAt root.
+    {
+        std::error_code ec;
+        auto tmp = std::filesystem::temp_directory_path(ec) /
+                   "cloudredirect_cleanup_test_1";
+        std::filesystem::remove_all(tmp, ec);
+        auto leaf = tmp / "a" / "b" / "c";
+        std::filesystem::create_directories(leaf, ec);
+        Expect(!ec, "test-1 setup: create_directories");
+
+        FileUtil::CleanupEmptyDirsUpTo(leaf.string(), tmp.string());
+
+        Expect(!std::filesystem::exists(tmp / "a", ec),
+               "CleanupEmptyDirsUpTo should remove entire empty chain");
+        Expect(std::filesystem::exists(tmp, ec),
+               "CleanupEmptyDirsUpTo must preserve the stopAt root");
+        std::filesystem::remove_all(tmp, ec);
+    }
+
+    // CleanupEmptyDirsUpTo: stops at first non-empty ancestor.
+    {
+        std::error_code ec;
+        auto tmp = std::filesystem::temp_directory_path(ec) /
+                   "cloudredirect_cleanup_test_2";
+        std::filesystem::remove_all(tmp, ec);
+        auto leaf = tmp / "a" / "b" / "c";
+        std::filesystem::create_directories(leaf, ec);
+        // Put a sibling file inside 'a' so it cannot be removed.
+        std::ofstream(tmp / "a" / "keep.txt") << "x";
+
+        FileUtil::CleanupEmptyDirsUpTo(leaf.string(), tmp.string());
+
+        Expect(!std::filesystem::exists(tmp / "a" / "b", ec),
+               "CleanupEmptyDirsUpTo should remove empty 'b' subtree");
+        Expect(std::filesystem::exists(tmp / "a", ec),
+               "CleanupEmptyDirsUpTo must not remove non-empty ancestor");
+        Expect(std::filesystem::exists(tmp / "a" / "keep.txt", ec),
+               "CleanupEmptyDirsUpTo must not touch files in non-empty ancestor");
+        std::filesystem::remove_all(tmp, ec);
+    }
+
+    // CleanupEmptyDirsUpTo: no-op when startDir equals stopAt.
+    {
+        std::error_code ec;
+        auto tmp = std::filesystem::temp_directory_path(ec) /
+                   "cloudredirect_cleanup_test_3";
+        std::filesystem::remove_all(tmp, ec);
+        std::filesystem::create_directory(tmp, ec);
+
+        FileUtil::CleanupEmptyDirsUpTo(tmp.string(), tmp.string());
+
+        Expect(std::filesystem::exists(tmp, ec),
+               "CleanupEmptyDirsUpTo must never remove the stopAt root itself");
+        std::filesystem::remove_all(tmp, ec);
+    }
+
+    // CleanupEmptyDirsUpTo: no-op when startDir is outside stopAt.
+    {
+        std::error_code ec;
+        auto tmpBase = std::filesystem::temp_directory_path(ec);
+        auto stopRoot = tmpBase / "cloudredirect_cleanup_test_4_stop";
+        auto outside  = tmpBase / "cloudredirect_cleanup_test_4_outside";
+        std::filesystem::remove_all(stopRoot, ec);
+        std::filesystem::remove_all(outside, ec);
+        std::filesystem::create_directory(stopRoot, ec);
+        std::filesystem::create_directory(outside, ec);
+
+        FileUtil::CleanupEmptyDirsUpTo(outside.string(), stopRoot.string());
+
+        Expect(std::filesystem::exists(outside, ec),
+               "CleanupEmptyDirsUpTo must not touch dirs outside stopAt");
+        std::filesystem::remove_all(stopRoot, ec);
+        std::filesystem::remove_all(outside, ec);
     }
 
     return 0;

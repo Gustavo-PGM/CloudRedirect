@@ -1427,6 +1427,29 @@ bool RestoreFileIfUnchanged(uint32_t accountId, uint32_t appId,
     return true;
 }
 
+void CleanupEmptyCacheDirs(uint32_t accountId, uint32_t appId,
+                           std::vector<std::string> startDirs) {
+    if (startDirs.empty()) return;
+
+    // Acquire the storage mutex exclusively so the walk is serialized
+    // against WriteFileNoIncrement's create_directories + AtomicWriteBinary
+    // sequence. Without this, a writer's parent dir could be deleted
+    // between create_directories() returning and ofstream opening its
+    // temp file, causing a spurious write failure.
+    std::lock_guard<std::shared_mutex> lock(g_mutex);
+    std::string appRoot = GetAppPathInternal(accountId, appId);
+
+    // Process deepest first so upward walks cascade correctly when multiple
+    // deletes share parent paths. String-length sort is a valid depth proxy
+    // because all paths share the same appRoot prefix.
+    std::sort(startDirs.begin(), startDirs.end(),
+              [](const std::string& a, const std::string& b) { return a.size() > b.size(); });
+
+    for (const auto& startDir : startDirs) {
+        FileUtil::CleanupEmptyDirsUpTo(startDir, appRoot);
+    }
+}
+
 bool SetFileTimestamp(uint32_t accountId, uint32_t appId, const std::string& filename, uint64_t unixSeconds) {
     if (unixSeconds == 0) return false;
     std::lock_guard<std::shared_mutex> lock(g_mutex);

@@ -36,6 +36,18 @@ bool RestoreFileIfUnchanged(uint32_t accountId, uint32_t appId,
                             const std::string& backupPath,
                             bool hadOriginal);
 bool SetFileTimestamp(uint32_t accountId, uint32_t appId, const std::string& filename, uint64_t unixSeconds);
+
+// Remove empty cache subdirectories above files that were just deleted,
+// bounded by the app root. Serialized against WriteFileNoIncrement /
+// RestoreFileIfUnchanged / DeleteFile under the storage mutex so concurrent
+// writers never observe a create_directories() + AtomicWriteBinary() pair
+// where the parent dir disappears between the two calls. Best-effort: any
+// filesystem error silently stops the walk. Caller passes the absolute
+// parent directory of the file(s) that were just removed. For batch
+// deletions, passing multiple paths avoids one lock acquisition per file
+// and processes deepest-first so upward walks can cascade in one pass.
+void CleanupEmptyCacheDirs(uint32_t accountId, uint32_t appId,
+                           std::vector<std::string> startDirs);
 uint64_t GetChangeNumber(uint32_t accountId, uint32_t appId);
 void SetChangeNumber(uint32_t accountId, uint32_t appId, uint64_t cn);
 uint64_t IncrementChangeNumber(uint32_t accountId, uint32_t appId);

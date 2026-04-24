@@ -269,6 +269,11 @@ static void RemoveLocalBlobsNotInCloud(uint32_t accountId, uint32_t appId,
     if (!std::filesystem::exists(localBlobDir, ec) || !std::filesystem::is_directory(localBlobDir, ec)) return;
 
     int removed = 0;
+    // Collect parents of removed files for post-iteration empty-dir cleanup.
+    // We cannot remove dirs during the recursive_directory_iterator walk: MSVC
+    // caches dir handles and removing a dir mid-traversal produces undefined
+    // iterator state. Defer cleanup until the iterator is destroyed.
+    std::unordered_set<std::string> removedParents;
     for (auto& entry : std::filesystem::recursive_directory_iterator(localBlobDir, ec)) {
         if (ec) break;
         if (!entry.is_regular_file(ec)) continue;
@@ -281,12 +286,26 @@ static void RemoveLocalBlobsNotInCloud(uint32_t accountId, uint32_t appId,
         if (cloudBlobNames.count(rel)) continue;
 
         if (!PreserveLocalConflictCopy(accountId, appId, rel, entry.path().string())) continue;
+        std::filesystem::path parentPath = entry.path().parent_path();
         std::filesystem::remove(entry.path(), ec);
-        if (!ec) ++removed;
+        if (!ec) {
+            ++removed;
+            removedParents.insert(parentPath.string());
+        }
     }
     if (removed > 0) {
         LOG("[CloudStorage] SyncFromCloud app %u: removed %d stale local blob(s) absent from newer cloud CN",
             appId, removed);
+    }
+
+    // Post-iteration empty-dir cleanup: serialized under LocalStorage's mutex
+    // and processed deepest-first (LocalStorage::CleanupEmptyCacheDirs sorts
+    // internally). Serialization prevents a concurrent WriteFileNoIncrement
+    // from observing a disappearing parent between create_directories() and
+    // AtomicWriteBinary().
+    if (!removedParents.empty()) {
+        std::vector<std::string> parents(removedParents.begin(), removedParents.end());
+        LocalStorage::CleanupEmptyCacheDirs(accountId, appId, std::move(parents));
     }
 }
 
@@ -890,6 +909,15 @@ bool DeleteBlob(uint32_t accountId, uint32_t appId,
     if (localPath.empty()) return false; // path traversal blocked
     std::error_code ec;
     std::filesystem::remove(localPath, ec);
+
+    // Best-effort: clean up empty parent dirs so the cache doesn't accumulate
+    // empty session subtrees (observed with Unity's per-launch Analytics/
+    // ArchivedEvents/<session-id>/ groups). Routed through LocalStorage so it
+    // acquires the same mutex WriteFileNoIncrement uses, preventing a TOCTOU
+    // where a concurrent writer's parent dir disappears between that call's
+    // create_directories() and its AtomicWriteBinary().
+    std::filesystem::path fileParent = std::filesystem::path(localPath).parent_path();
+    LocalStorage::CleanupEmptyCacheDirs(accountId, appId, {fileParent.string()});
 
     LOG("[CloudStorage] DeleteBlob: removed local cache: %s", filename.c_str());
 
