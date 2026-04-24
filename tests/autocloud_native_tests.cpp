@@ -31,6 +31,8 @@ int main() {
     Expect(!LocalStorage::TestIsSafeAutoCloudRelativePath("../Saves"), "parent traversal should be rejected");
     Expect(!LocalStorage::TestIsSafeAutoCloudRelativePath("C:/Users/Save"), "absolute drive paths should be rejected");
     Expect(LocalStorage::TestParseMinimalAutoCloudKVFixture(), "native appinfo KV parser should extract UFS savefile rules");
+    Expect(LocalStorage::TestAutoCloudPlatformAndExcludeFilters(),
+           "savefiles platforms/exclude filters should be honored");
 
     return 0;
 }

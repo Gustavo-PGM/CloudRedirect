@@ -158,7 +158,26 @@ struct AutoCloudRuleNative {
     std::string resolvedPath;
     std::string pattern;
     bool recursive = false;
+    // Steam UFS platforms bitmask. -1 (all) when absent; 0 when explicitly empty.
+    // Windows=1, MacOS=2, Linux=8 (see IDA dump of Steam platform table).
+    uint32_t platforms = 0xFFFFFFFFu;
+    std::vector<std::string> excludes;
 };
+
+static uint32_t ParseAutoCloudPlatformMask(const std::string& name) {
+    std::string lower = ToLowerAscii(name);
+    if (lower == "windows" || lower == "win") return 1;
+    if (lower == "macos" || lower == "osx" || lower == "mac") return 2;
+    if (lower == "linux") return 8;
+    if (lower == "all") return 0xFFFFFFFFu;
+    if (lower == "none") return 0;
+    return 0;
+}
+
+static bool AutoCloudRuleMatchesCurrentPlatform(uint32_t mask) {
+    // We run on Windows; Steam's Windows platform bit is 1.
+    return (mask & 1u) != 0;
+}
 
 struct AutoCloudRootOverrideNative {
     std::string root;
@@ -292,6 +311,8 @@ static void ApplyRootOverridesForCurrentOS(AutoCloudRuleNative& rule,
 }
 
 #ifdef CLOUDREDIRECT_TESTING
+static bool WildcardMatchInsensitive(const std::string& pattern, const std::string& text);
+
 bool TestResolveAutoCloudRootOverride(const std::string& root, const std::string& path,
                                       const std::string& overrideRoot,
                                       const std::string& useInstead,
@@ -400,6 +421,98 @@ bool TestParseMinimalAutoCloudKVFixture() {
         pattern && pattern->stringValue == "*.sav" &&
         recursive && recursive->hasInt && recursive->intValue == 1 &&
         rule.root == "WinSavedGames" && rule.resolvedPath == "Migrated/Saves";
+}
+
+bool TestAutoCloudPlatformAndExcludeFilters() {
+    // String table: indices referenced below.
+    std::vector<std::string> strings = {
+        "root", "path", "pattern", "recursive",   // 0-3
+        "platforms", "exclude",                    // 4-5
+        "Windows", "Linux",                        // 6-7
+        "WinAppDataLocal", "Saves", "*",           // 8-10
+        "*.log"                                    // 11
+    };
+
+    std::vector<uint8_t> data;
+    auto u32 = [&](uint32_t v) {
+        data.push_back((uint8_t)(v & 0xFF));
+        data.push_back((uint8_t)((v >> 8) & 0xFF));
+        data.push_back((uint8_t)((v >> 16) & 0xFF));
+        data.push_back((uint8_t)((v >> 24) & 0xFF));
+    };
+    auto section = [&](uint32_t key) { data.push_back(0x00); u32(key); };
+    auto str = [&](uint32_t key, uint32_t valueIdx) {
+        data.push_back(0x01); u32(key);
+        const std::string& v = strings[valueIdx];
+        data.insert(data.end(), v.begin(), v.end());
+        data.push_back(0x00);
+    };
+    auto i32 = [&](uint32_t key, int32_t value) {
+        data.push_back(0x02); u32(key); u32((uint32_t)value);
+    };
+    auto end = [&]() { data.push_back(0x08); };
+
+    // Build rule with root/path/pattern/recursive, platforms=[Windows], exclude=[*.log].
+    str(0, 8);     // root = "WinAppDataLocal"
+    str(1, 9);     // path = "Saves"
+    str(2, 10);    // pattern = "*"
+    i32(3, 1);     // recursive = 1
+    section(4);    // platforms {
+    str(0, 6);     //   [anon] = "Windows"
+    end();         // }
+    section(5);    // exclude {
+    str(0, 11);    //   [anon] = "*.log"
+    end();         // }
+
+    size_t offset = 0;
+    auto tree = ParseAppInfoKV(data, offset, strings);
+
+    AutoCloudRuleNative rule;
+    const auto* root = FindChild(tree, "root");
+    const auto* path = FindChild(tree, "path");
+    const auto* pattern = FindChild(tree, "pattern");
+    const auto* recursive = FindChild(tree, "recursive");
+    const auto* platforms = FindChild(tree, "platforms");
+    const auto* excludes = FindChild(tree, "exclude");
+    rule.root = root && root->hasString ? root->stringValue : "";
+    rule.path = path && path->hasString ? path->stringValue : "";
+    rule.pattern = pattern && pattern->hasString ? pattern->stringValue : "*";
+    rule.recursive = recursive && recursive->hasInt && recursive->intValue != 0;
+    if (platforms) {
+        uint32_t mask = 0;
+        for (const auto& plat : platforms->children) {
+            if (plat.hasString) mask |= ParseAutoCloudPlatformMask(plat.stringValue);
+        }
+        rule.platforms = mask;
+    }
+    if (excludes) {
+        for (const auto& ex : excludes->children) {
+            if (ex.hasString && !ex.stringValue.empty()) rule.excludes.push_back(ex.stringValue);
+        }
+    }
+
+    // Rule parsed with Windows-only platform mask and exclude "*.log".
+    bool basics = rule.root == "WinAppDataLocal" && rule.path == "Saves" &&
+        rule.pattern == "*" && rule.recursive &&
+        rule.platforms == 1u && rule.excludes.size() == 1 &&
+        rule.excludes.front() == "*.log";
+    if (!basics) return false;
+
+    // Windows rule matches current platform; a Linux-only mask (8) would not.
+    if (!AutoCloudRuleMatchesCurrentPlatform(rule.platforms)) return false;
+    if (AutoCloudRuleMatchesCurrentPlatform(8u)) return false;
+
+    // Exclude pattern "*.log" drops log files but keeps save files.
+    auto excluded = [&](const char* leaf) {
+        for (const auto& ex : rule.excludes) {
+            if (WildcardMatchInsensitive(ex, std::string(leaf))) return true;
+        }
+        return false;
+    };
+    if (!excluded("debug.log")) return false;
+    if (excluded("slot1.sav")) return false;
+
+    return true;
 }
 #endif
 
@@ -554,6 +667,27 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
             rule.resolvedPath = rule.path;
             rule.pattern = pattern && pattern->hasString ? pattern->stringValue : "*";
             rule.recursive = recursive && recursive->hasInt && recursive->intValue != 0;
+
+            // platforms: optional sub-section of platform names (e.g. "Windows", "Linux").
+            // Absent = match all; present = bitmask OR of listed platforms.
+            const auto* platforms = FindChild(entry.children, "platforms");
+            if (platforms) {
+                uint32_t mask = 0;
+                for (const auto& plat : platforms->children) {
+                    if (plat.hasString) mask |= ParseAutoCloudPlatformMask(plat.stringValue);
+                }
+                rule.platforms = mask;
+            }
+
+            const auto* excludes = FindChild(entry.children, "exclude");
+            if (excludes) {
+                for (const auto& ex : excludes->children) {
+                    if (ex.hasString && !ex.stringValue.empty()) {
+                        rule.excludes.push_back(ex.stringValue);
+                    }
+                }
+            }
+
             ApplyRootOverridesForCurrentOS(rule, overrides);
             rules.push_back(std::move(rule));
         }
@@ -1166,6 +1300,11 @@ std::vector<FileEntry> GetAutoCloudFileList(const std::string& steamPath, uint32
         return false;
     };
     for (const auto& rule : rules) {
+        if (!AutoCloudRuleMatchesCurrentPlatform(rule.platforms)) {
+            LOG("GetAutoCloudFileList: skipping app %u rule root='%s' path='%s' (platforms mask=0x%x excludes Windows)",
+                appId, rule.root.c_str(), rule.path.c_str(), rule.platforms);
+            continue;
+        }
         const RootMapping* mapping = nullptr;
         std::string ruleRootLower = ToLowerAscii(rule.root);
         for (const auto& candidate : mappings) {
@@ -1230,6 +1369,12 @@ std::vector<FileEntry> GetAutoCloudFileList(const std::string& steamPath, uint32
             std::string pattern = NormalizeSlashes(rule.pattern.empty() ? "*" : rule.pattern);
             const std::string& matchTarget = pattern.find('/') == std::string::npos ? leaf : relFromRoot;
             if (!WildcardMatchInsensitive(pattern, matchTarget)) return;
+
+            for (const auto& excludePattern : rule.excludes) {
+                std::string exPat = NormalizeSlashes(excludePattern);
+                const std::string& exTarget = exPat.find('/') == std::string::npos ? leaf : relFromRoot;
+                if (WildcardMatchInsensitive(exPat, exTarget)) return;
+            }
 
             std::string cloudPath = normalizedCloudPath.empty() ? relFromRoot : normalizedCloudPath + "/" + relFromRoot;
             std::string collisionKey = ToLowerAscii(NormalizeSlashes(cloudPath));

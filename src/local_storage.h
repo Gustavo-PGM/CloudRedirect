@@ -62,6 +62,10 @@ bool TestResolveAutoCloudRootOverride(const std::string& root, const std::string
                                       std::string& outResolvedPath);
 bool TestIsSafeAutoCloudRelativePath(const std::string& path);
 bool TestParseMinimalAutoCloudKVFixture();
+// Exercises platforms-mask filter and exclude-list filter on a savefiles rule.
+// Returns true when the Windows rule is kept (platforms=Windows), the Linux-only
+// rule is dropped, and the exclude pattern "*.log" filters leaves correctly.
+bool TestAutoCloudPlatformAndExcludeFilters();
 #endif
 
 } // namespace LocalStorage
