@@ -209,14 +209,20 @@ inline void CleanupEmptyDirsUpTo(const std::string& startDir,
 // naturally with its own error path. This avoids a denial-of-service where a
 // transiently unreadable directory permanently blocks AutoCloud.
 inline bool IsPathRedirectingReparsePoint(const std::string& path) {
-    int wideLen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
-    if (wideLen <= 0) return false;
-    std::wstring wide(static_cast<size_t>(wideLen - 1), L'\0');
-    if (MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wide.data(), wideLen) <= 0) {
-        return false;
-    }
+    // Route through Utf8ToPath rather than open-coding MultiByteToWideChar.
+    // The previous open-coded version sized its destination wstring at
+    // wideLen-1 (the count without the null) and then asked
+    // MultiByteToWideChar to write wideLen characters (count *with* the
+    // null) into wstring::data(). That overwrote the wstring's own
+    // trailing-null slot with another null — accidentally correct on
+    // every Microsoft STL we've shipped against, but writing past
+    // wstring::size() is fragile to change. Utf8ToPath sizes correctly
+    // and gives us a path::native() (wchar_t*) that FindFirstFileW
+    // accepts directly.
+    auto wpath = Utf8ToPath(path);
+    if (wpath.empty()) return false;
     WIN32_FIND_DATAW fd{};
-    HANDLE h = FindFirstFileW(wide.c_str(), &fd);
+    HANDLE h = FindFirstFileW(wpath.c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return false;
     FindClose(h);
     if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) return false;

@@ -1659,8 +1659,32 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
 
     std::string localLow;
     {
-        std::string tmp = getEnvUtf8(L"LOCALAPPDATA");
-        if (!tmp.empty()) localLow = tmp + "\\..\\LocalLow\\";
+        // Resolve LocalLow via SHGetKnownFolderPath (FOLDERID_LocalAppDataLow)
+        // rather than synthesizing it as "%LOCALAPPDATA%\..\LocalLow". The
+        // synthetic path embeds a literal ".." segment, which the recursive
+        // directory walker dereferences through whatever %LOCALAPPDATA%
+        // currently resolves to. If %LOCALAPPDATA% is itself a junction
+        // (uncommon, but legitimate on relocated user profiles or junction-
+        // based folder redirection), the ".." traversal hops through that
+        // junction without IsPathRedirectingReparsePoint ever inspecting it
+        // — the gate only checks the literal path string, and the literal
+        // path doesn't carry the reparse attribute itself. The knownfolder
+        // ID returns the canonical LocalLow path directly with no ".."
+        // segments, so the gate sees the actual target.
+        std::string known = GetKnownFolderPathString(FOLDERID_LocalAppDataLow);
+        if (!known.empty()) {
+            localLow = known + "\\";
+        } else {
+            // Pre-Vista is unreachable here (we require Win10+), but the
+            // knownfolder API can still fail for restricted process tokens
+            // or a corrupted user profile. Synthetic fallback preserves
+            // legacy behavior for those edge cases — junction redirection
+            // through %LOCALAPPDATA% remains a theoretical concern in the
+            // fallback path, but it requires a token that already cannot
+            // resolve LocalAppDataLow, which is itself a misconfiguration.
+            std::string tmp = getEnvUtf8(L"LOCALAPPDATA");
+            if (!tmp.empty()) localLow = tmp + "\\..\\LocalLow\\";
+        }
     }
 
     std::string localAppData;
