@@ -852,12 +852,50 @@ static std::string CanonicalizeUploadRootToken(uint32_t accountId, uint32_t appI
 // Capture a root token for an app from a filename containing a %Token% prefix.
 // Tracked at two levels: g_appRootTokens (all tokens per app) and g_fileTokens
 // (per-file -> token mapping for changelist). Returns true if new token added.
+//
+// RACE NOTE: the naive "insert into in-memory set, save in-memory set to disk"
+// pattern truncates disk when a concurrent bootstrap worker has just
+// invalidated our in-memory view. Timeline:
+//   1. Worker (line ~464) erases g_appRootTokens[key] under g_rootTokenMutex
+//      (inside its g_autoCloudImportMutex hold), releases g_rootTokenMutex.
+//   2. Worker starts ~100ms of blob writes, still holding import mutex.
+//   3. Concurrent Steam upload hits TryCaptureRootToken("A"): sees empty
+//      in-memory set (post-invalidation), inserts A -> singleton {A},
+//      saves {A} to disk — TRUNCATING whatever was there.
+//   4. Worker finishes at line 522 with SaveRootTokens(its_set) — overwrites
+//      disk again with its pre-invalidation-loaded set. If A was not in
+//      that set, A is lost from disk. Either way memory stays at {A} (neither
+//      worker nor TryCapture re-publishes the merged view).
+//   5. Next HandleGetChangelist reads {A} from memory, emits files under A
+//      only — Steam rootoverrides treats all other-rooted files as stale
+//      cross-platform copies and issues deletes. Data loss.
+//
+// Fix has two parts:
+//   (a) Hold g_autoCloudImportMutex across the full capture so the worker's
+//       import region and our disk write are strictly serialized. This is
+//       the same outer lock InvalidateTokenCaches uses (line 933) and
+//       respects the existing DAG.
+//   (b) Before writing disk, union the in-memory snapshot with the current
+//       on-disk state. This prevents a singleton memory view from truncating
+//       disk even if the worker's SaveRootTokens has already landed. Also
+//       re-publish the union to memory so subsequent readers observe the
+//       complete set instead of the pre-merge singleton.
+//
+// Returns true if a NEW token was added (either to memory or, via the
+// rehydrate path, to an otherwise-empty memory view).
 static bool TryCaptureRootToken(uint32_t accountId, uint32_t appId, const std::string& token) {
     if (token.empty()) return false;
 
-    bool isNew = false;
-    std::unordered_set<std::string> tokensCopy;
     uint64_t key = MakeAppAccountKey(accountId, appId);
+
+    // (a) Serialize against the bootstrap worker's import region. The worker
+    // holds this from g_fileTokens invalidation (line ~464) through its
+    // SaveRootTokens + SaveFileTokens at ~522-523 and releases at ~530, so
+    // the worst-case wait is one import's worth of blob writes.
+    std::lock_guard<std::mutex> importLock(g_autoCloudImportMutex);
+
+    bool isNew = false;
+    std::unordered_set<std::string> memorySnapshot;
     {
         std::lock_guard<std::mutex> lock(g_rootTokenMutex);
         auto& tokenSet = g_appRootTokens[key];
@@ -866,13 +904,33 @@ static bool TryCaptureRootToken(uint32_t accountId, uint32_t appId, const std::s
         if (isNew) {
             LOG("[NS-TOK] Captured root token for account %u app %u: %s (now %zu tokens)",
                 accountId, appId, token.c_str(), tokenSet.size());
-            tokensCopy = tokenSet;  // copy under lock
+            memorySnapshot = tokenSet;  // copy under lock
         }
     }
-    // Perform disk I/O + cloud upload outside the lock
-    if (isNew) {
-        CloudStorage::SaveRootTokens(accountId, appId, tokensCopy);
+    if (!isNew) return false;
+
+    // (b) Load-merge-save: our in-memory set may have been invalidated by a
+    // recent InvalidateTokenCaches, leaving us with a singleton view that
+    // would truncate the on-disk set. Union with the disk snapshot before
+    // persisting, then re-publish the union to memory so future readers
+    // observe the complete set. SaveRootTokens delegates to
+    // LocalStorage::SaveRootTokens + a cloud upload; both happen outside
+    // g_rootTokenMutex per the DAG invariant.
+    auto diskTokens = LocalStorage::LoadRootTokens(accountId, appId);
+    size_t memoryOnlyCount = memorySnapshot.size();
+    memorySnapshot.insert(diskTokens.begin(), diskTokens.end());
+    if (memorySnapshot.size() > memoryOnlyCount) {
+        LOG("[NS-TOK] Merged %zu extra root token(s) from disk for account %u app %u during capture",
+            memorySnapshot.size() - memoryOnlyCount, accountId, appId);
+        std::lock_guard<std::mutex> lock(g_rootTokenMutex);
+        // Compare-and-set: another TryCaptureRootToken may have rehydrated
+        // in the tiny window between our memorySnapshot copy and this
+        // re-acquire. Keep the superset either way.
+        auto& tokenSet = g_appRootTokens[key];
+        tokenSet.insert(memorySnapshot.begin(), memorySnapshot.end());
+        memorySnapshot = tokenSet;
     }
+    CloudStorage::SaveRootTokens(accountId, appId, memorySnapshot);
     return isNew;
 }
 
@@ -907,12 +965,68 @@ static void RemoveFileToken(uint32_t accountId, uint32_t appId, const std::strin
 }
 
 // Save in-memory file token map to disk and cloud for a given app.
+//
+// Symmetric to TryCaptureRootToken's truncation-race fix: a concurrent
+// bootstrap worker invalidates g_fileTokens[key] early (line ~464), then
+// does ~100ms of blob writes before its own SaveFileTokens at ~523. If
+// PersistFileTokens snapshots in that window, the in-memory map is empty
+// (or missing entries the worker's scan saw), and SaveFileTokens(snapshot)
+// truncates disk. The worker's later SaveFileTokens may or may not restore
+// the entries the batch just recorded — concurrent HandleCompleteBatch
+// additions happen AFTER invalidation and would be absent from the
+// worker's pre-invalidation load.
+//
+// Fix (mirrors TryCaptureRootToken):
+//   (a) Hold g_autoCloudImportMutex across the full persist, serializing
+//       with the worker's import region.
+//   (b) Load-merge-save: union the memory snapshot with the current disk
+//       contents, preferring MEMORY on key conflicts (memory holds the
+//       most recent RecordFileToken writes; disk is the fallback for
+//       entries memory doesn't know about, e.g. after an invalidation).
+//       Re-publish the union to memory so subsequent readers observe the
+//       complete mapping.
 static void PersistFileTokens(uint32_t accountId, uint32_t appId) {
+    uint64_t key = MakeAppAccountKey(accountId, appId);
+
+    // (a) Serialize against the bootstrap worker's import region.
+    std::lock_guard<std::mutex> importLock(g_autoCloudImportMutex);
+
     std::unordered_map<std::string, std::string> snapshot;
     {
         std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-        auto it = g_fileTokens.find(MakeAppAccountKey(accountId, appId));
+        auto it = g_fileTokens.find(key);
         if (it != g_fileTokens.end()) snapshot = it->second;
+    }
+
+    // (b) Union with disk, preferring memory on conflicts. If a filename
+    // exists in memory (from a just-committed RecordFileToken) and also on
+    // disk (from the worker's or an earlier sync's save), memory's token
+    // wins because it reflects the most recent upload. Entries that exist
+    // only on disk (e.g. the worker's pre-invalidation scan results that
+    // never got re-added to memory) are preserved in the union so the
+    // upcoming SaveFileTokens doesn't drop them.
+    auto diskTokens = CloudStorage::LoadFileTokens(accountId, appId);
+    size_t mergedFromDisk = 0;
+    for (auto& kv : diskTokens) {
+        if (snapshot.find(kv.first) == snapshot.end()) {
+            snapshot.emplace(kv.first, kv.second);
+            ++mergedFromDisk;
+        }
+    }
+    if (mergedFromDisk > 0) {
+        LOG("[NS-FT] PersistFileTokens account %u app %u: merged %zu extra entries from disk",
+            accountId, appId, mergedFromDisk);
+        std::lock_guard<std::mutex> lock(g_fileTokensMutex);
+        // Re-publish the union so future HandleGetChangelist readers see
+        // the complete mapping instead of the truncated snapshot. Merge
+        // again under the lock in case another RecordFileToken landed
+        // between our snapshot and the re-acquire — that entry should win
+        // over its disk-loaded counterpart.
+        auto& mapRef = g_fileTokens[key];
+        for (auto& kv : snapshot) {
+            mapRef.emplace(kv.first, kv.second); // no-op if memory already has it
+        }
+        snapshot = mapRef;
     }
     CloudStorage::SaveFileTokens(accountId, appId, snapshot);
 }
@@ -1321,12 +1435,50 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
             rootTokens = it->second;
         }
     }
-    // If not in memory, try loading from disk (persisted from previous session)
+    // If not in memory, try loading from disk (persisted from previous session).
+    //
+    // RACE GUARD: mirrors the file-token pattern below. A concurrent
+    // RestoreAppMetadata on another thread can call InvalidateTokenCaches
+    // (which erases g_appRootTokens[key] and clears bootstrap-attempted),
+    // then BootstrapAutoCloudFiles(wait=true) on its own RPC, spawning a
+    // new worker for the same (accountId, appId). That worker invalidates
+    // caches early, then does slow blob writes, and only SaveRootTokens's
+    // at the end of its import (line 522 of the worker).
+    //
+    // During the worker's import window, a concurrent HandleGetChangelist
+    // that already cleared its own line 1295 wait (the wait landed before
+    // the InvalidateTokenCaches→new bootstrap transition) observes empty
+    // in-memory root tokens, reads the STALE disk file_tokens.dat, and
+    // would cache it into g_appRootTokens — silently overwriting the
+    // worker's upcoming fresh write once the worker finishes but leaving
+    // readers on stale disk contents until the next InvalidateTokenCaches.
+    //
+    // Sample IsAutoCloudBootstrapActive before AND after the disk read:
+    // if a worker is live at either edge, use the loaded tokens locally
+    // for this response but do NOT cache them. The next changelist after
+    // the worker finishes will observe the empty cache, do a clean
+    // LoadRootTokens under a quiet bootstrap state, and cache the fresh
+    // result.
     if (rootTokens.empty()) {
+        bool bootstrapActiveBefore = IsAutoCloudBootstrapActive(accountId, appId);
         rootTokens = CloudStorage::LoadRootTokens(accountId, appId);
-        if (!rootTokens.empty()) {
+        bool bootstrapActiveAfter = IsAutoCloudBootstrapActive(accountId, appId);
+        bool bootstrapTouchedLoad = bootstrapActiveBefore || bootstrapActiveAfter;
+        if (!rootTokens.empty() && !bootstrapTouchedLoad) {
             std::lock_guard<std::mutex> lock(g_rootTokenMutex);
-            g_appRootTokens[appKey] = rootTokens;
+            // Re-check: another caller may have populated the in-memory map
+            // while we were reading from disk. Prefer the in-memory entry
+            // in that case because it reflects any TryCaptureRootToken
+            // updates that ran during our I/O.
+            auto it = g_appRootTokens.find(appKey);
+            if (it != g_appRootTokens.end()) {
+                rootTokens = it->second;
+            } else {
+                g_appRootTokens[appKey] = rootTokens;
+            }
+        } else if (bootstrapTouchedLoad && !rootTokens.empty()) {
+            LOG("[NS-CL] Skipping root-token cache-write for account %u app %u "
+                "— bootstrap worker was active during disk read", accountId, appId);
         }
     }
     // If still empty, use empty string (no root token prefix -- legacy behavior)
