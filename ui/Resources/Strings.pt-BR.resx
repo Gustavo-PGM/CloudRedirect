@@ -821,6 +821,16 @@ Você pode restaurar pelo painel Restaurar Saves.</value>
   <data name="Apps_ScanForOrphans" xml:space="preserve">
     <value>Buscar órfãos na nuvem</value>
   </data>
+  <data name="Apps_ScanOrphansExplainTitle" xml:space="preserve">
+    <value>Buscar órfãos na nuvem</value>
+  </data>
+  <data name="Apps_ScanOrphansExplainMessage" xml:space="preserve">
+    <value>Um "órfão" é um arquivo de save no seu armazenamento em nuvem que nenhum aplicativo deste PC ainda referencia -- fica para trás quando um save é renomeado, um aplicativo é desinstalado ou uma sincronização é interrompida. Eles ocupam espaço e podem encobrir saves mais novos em caso de conflito.
+
+Esta varredura apenas lê as listagens da nuvem; nada é apagado. Após a varredura, cada aplicativo afetado ganha um botão "Revisar órfãos" para você inspecionar os arquivos e decidir se quer apagá-los.
+
+O Steam precisa estar fechado durante a varredura para que um upload em andamento não seja confundido com um órfão. Continuar?</value>
+  </data>
   <data name="Apps_ScanningOrphansFormat" xml:space="preserve">
     <value>Escaneando... ({0}/{1})</value>
   </data>

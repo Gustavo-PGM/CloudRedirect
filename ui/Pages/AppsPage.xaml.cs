@@ -523,6 +523,16 @@ public partial class AppsPage : Page
                 return;
             }
 
+            // Explain what an orphan is up front. The button alone said nothing
+            // about what would happen, so a user who clicked out of curiosity
+            // got handed a "close Steam" warning with no context.
+            if (!await Dialog.ConfirmAsync(
+                    S.Get("Apps_ScanOrphansExplainTitle"),
+                    S.Get("Apps_ScanOrphansExplainMessage")))
+            {
+                return;
+            }
+
             // Single Steam-closed gate for the whole batch; no point
             // scanning the rest if the user refuses.
             if (!await SteamDetector.EnsureSteamClosedAsync()) return;

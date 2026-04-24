@@ -846,6 +846,16 @@ You can restore from the Restore Saves panel.</value>
   <data name="Apps_ScanForOrphans" xml:space="preserve">
     <value>Scan Cloud for Orphans</value>
   </data>
+  <data name="Apps_ScanOrphansExplainTitle" xml:space="preserve">
+    <value>Scan Cloud for Orphans</value>
+  </data>
+  <data name="Apps_ScanOrphansExplainMessage" xml:space="preserve">
+    <value>An "orphan" is a save file in your cloud storage that no app on this PC still references -- left behind when a save was renamed, an app was uninstalled, or a sync was interrupted. They take up space and can shadow newer saves on conflict.
+
+This scan only reads your cloud listings; nothing is deleted. After the scan, each affected app gets a "Review Orphans" button so you can inspect the files and decide whether to prune them.
+
+Steam must be closed during the scan so an in-flight upload can't be misread as an orphan. Continue?</value>
+  </data>
   <data name="Apps_ScanningOrphansFormat" xml:space="preserve">
     <value>Scanning... ({0}/{1})</value>
   </data>

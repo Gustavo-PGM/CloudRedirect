@@ -821,6 +821,16 @@ Puedes restaurar desde el panel de Restaurar partidas.</value>
   <data name="Apps_ScanForOrphans" xml:space="preserve">
     <value>Buscar huérfanos en la nube</value>
   </data>
+  <data name="Apps_ScanOrphansExplainTitle" xml:space="preserve">
+    <value>Buscar huérfanos en la nube</value>
+  </data>
+  <data name="Apps_ScanOrphansExplainMessage" xml:space="preserve">
+    <value>Un "huérfano" es un archivo de partida guardada en tu almacenamiento en la nube al que ninguna aplicación de este PC sigue haciendo referencia: queda rezagado cuando se renombra una partida, se desinstala una aplicación o se interrumpe una sincronización. Ocupan espacio y pueden eclipsar partidas más nuevas al resolver conflictos.
+
+Esta exploración solo lee los listados de tu nube; no se elimina nada. Tras la exploración, cada aplicación afectada mostrará un botón "Revisar huérfanos" para que puedas inspeccionar los archivos y decidir si los eliminas.
+
+Steam debe estar cerrado durante la exploración para que una subida en curso no se confunda con un huérfano. ¿Continuar?</value>
+  </data>
   <data name="Apps_ScanningOrphansFormat" xml:space="preserve">
     <value>Escaneando... ({0}/{1})</value>
   </data>
