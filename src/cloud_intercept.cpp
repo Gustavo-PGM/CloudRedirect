@@ -901,6 +901,31 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
     delete ctx;
 }
 
+// Drain g_injectQueue at shutdown without touching Steam internals.
+// RecvPktMonitorHook short-circuits on g_shuttingDown and OnSendPkt now
+// rejects new pushes, but anything already in the queue when Shutdown()
+// began would otherwise leak its VirtualAlloc'd pktBuf, malloc'd
+// pktStruct, and the new'd ctx itself. We do NOT call BRouteMsgToJob
+// here — Steam's networking is tearing down, and the receive thread
+// may already be gone, so there is no safe consumer.
+static void DrainInjectQueueOnShutdown() {
+    std::vector<QueuedInjection*> leftovers;
+    {
+        std::lock_guard<std::mutex> lock(g_injectMutex);
+        while (!g_injectQueue.empty()) {
+            leftovers.push_back(g_injectQueue.front());
+            g_injectQueue.pop();
+        }
+    }
+    if (leftovers.empty()) return;
+    LOG("Shutdown: dropping %zu undelivered injection(s)", leftovers.size());
+    for (auto* ctx : leftovers) {
+        if (ctx->pktBuf) VirtualFree(ctx->pktBuf, 0, MEM_RELEASE);
+        if (ctx->pktStruct) free(ctx->pktStruct);
+        delete ctx;
+    }
+}
+
 static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
                            int32_t eresult, const PB::Writer& body) {
     if (!g_wrapPacket || !g_bRouteMsgToJob || !g_releaseWrapped || !g_cmInterface) {
@@ -3097,6 +3122,13 @@ void SetSendPktAddr(void* recvPktGlobalAddr) {
 bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
     if (!g_cloudRedirectEnabled.load(std::memory_order_relaxed)) return false;
     if (g_proxySending) return false;
+    // The DLL is module-pinned, so OnSendPkt remains a valid call target
+    // even after Shutdown() runs (in-process restart path: FreeLibrary
+    // returns but the code cave still dispatches here). Refuse to push
+    // anything new into g_injectQueue once shutdown has begun, otherwise
+    // RecvPktMonitorHook (which short-circuits on g_shuttingDown) never
+    // drains and the queued pktBuf/pktStruct/ctx leak per RPC.
+    if (g_shuttingDown.load(std::memory_order_acquire)) return false;
 
     // Try to discover the real CCMInterface via CSteamEngine global.
     // This also installs the vtable hook once CCMInterface is found.
@@ -3315,6 +3347,12 @@ void Shutdown() {
             LOG("Shutdown: VirtualProtect failed restoring vtable (%u)", GetLastError());
         }
     }
+
+    // After vtable restoration + hook-ref spin, no new InjectResponse
+    // pushes can land (OnSendPkt also gates on g_shuttingDown). Drop any
+    // injections that were enqueued before shutdown latched, since
+    // RecvPktMonitorHook bails on g_shuttingDown and never drains them.
+    DrainInjectQueueOnShutdown();
 
     // Restore inline detour on steamclient64 (manifest pinning)
     if (g_bddOrigAddr && g_bddTrampoline) {
