@@ -64,8 +64,24 @@ public:
     // Same as List(), but returns false when the provider could not verify the
     // listing due to an API/filesystem error. A missing prefix is a successful
     // empty listing.
-    virtual bool ListChecked(const std::string& prefix, std::vector<FileInfo>& outFiles) {
+    //
+    // When `outComplete` is non-null, the provider writes `true` iff the
+    // returned listing is known-complete. Providers that hit a recursion cap,
+    // tolerated pagination failure, or silently-skipped entries must write
+    // `false` even when the function returns `true`. Callers use this flag
+    // to refuse destructive operations (e.g. pruning local blobs that
+    // "aren't in cloud") on listings they can't fully trust.
+    //
+    // Convention: overrides MUST initialize `*outComplete = false` at entry
+    // and write `true` only on a code path that has verified full
+    // enumeration. A forgotten early-return therefore leaves the listing
+    // marked incomplete (safe default: caller skips prune) rather than
+    // falsely complete (unsafe: caller may delete real data).
+    virtual bool ListChecked(const std::string& prefix, std::vector<FileInfo>& outFiles,
+                             bool* outComplete = nullptr) {
+        if (outComplete) *outComplete = false;
         outFiles = List(prefix);
+        if (outComplete) *outComplete = true;
         return true;
     }
 };

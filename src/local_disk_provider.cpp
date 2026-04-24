@@ -96,30 +96,50 @@ std::vector<ICloudProvider::FileInfo> LocalDiskProvider::List(const std::string&
     return result;
 }
 
-bool LocalDiskProvider::ListChecked(const std::string& prefix, std::vector<FileInfo>& result) {
+bool LocalDiskProvider::ListChecked(const std::string& prefix, std::vector<FileInfo>& result,
+                                    bool* outComplete) {
     result.clear();
+    // Pessimistic default: any early-return path below except explicit success
+    // must leave outComplete as false so the caller doesn't trust a partial
+    // listing for destructive operations.
+    if (outComplete) *outComplete = false;
     std::string dir = ToFullPath(prefix);
     if (dir.empty()) return false;
     std::error_code ec;
     bool exists = std::filesystem::exists(dir, ec);
     if (ec) return false;
-    if (!exists) return true;
+    if (!exists) { if (outComplete) *outComplete = true; return true; }
     bool isDir = std::filesystem::is_directory(dir, ec);
     if (ec) return false;
-    if (!isDir) return true;
+    if (!isDir) { if (outComplete) *outComplete = true; return true; }
 
     // Capture both clocks once to avoid jitter from calling now() per file
     auto fileClockNow = std::filesystem::file_time_type::clock::now();
     auto sysClockNow = std::chrono::system_clock::now();
 
-    std::filesystem::recursive_directory_iterator it(
-        dir, std::filesystem::directory_options::skip_permission_denied, ec);
+    // Do NOT use skip_permission_denied: it silently omits unreadable
+    // subtrees from the listing while the iterator reports success. That
+    // would let the caller (SyncFromCloud) treat the listing as a verified
+    // inventory and delete local blobs the provider actually still holds.
+    // A permission error is a listing failure for our purposes.
+    std::filesystem::recursive_directory_iterator it(dir, ec);
     std::filesystem::recursive_directory_iterator end;
+    // Per-entry filesystem errors (stale handle, concurrent deletion, AV
+    // lock, reparse point race) must not silently drop files from the
+    // listing. If any single stat fails, flag the listing as incomplete
+    // so destructive prunes are suppressed; individual failures don't
+    // collapse the whole sync to an error but they also don't pretend to
+    // be authoritative.
+    bool sawSkippedEntries = false;
     for (; !ec && it != end; it.increment(ec)) {
         const auto& entry = *it;
-        if (!entry.is_regular_file(ec)) continue;
-        std::string rel = std::filesystem::relative(entry.path(), m_root, ec).string();
-        if (ec) return false;
+        std::error_code ec2;
+        bool isFile = entry.is_regular_file(ec2);
+        if (ec2) { sawSkippedEntries = true; continue; }
+        if (!isFile) continue;
+
+        std::string rel = std::filesystem::relative(entry.path(), m_root, ec2).string();
+        if (ec2) { sawSkippedEntries = true; continue; }
         // normalize to forward slashes (ICloudProvider convention)
         for (auto& c : rel) {
             if (c == '\\') c = '/';
@@ -127,16 +147,18 @@ bool LocalDiskProvider::ListChecked(const std::string& prefix, std::vector<FileI
 
         FileInfo fi;
         fi.path = rel;
-        fi.size = entry.file_size(ec);
-        if (ec) return false;
+        fi.size = entry.file_size(ec2);
+        if (ec2) { sawSkippedEntries = true; continue; }
 
-        auto ftime = std::filesystem::last_write_time(entry.path(), ec);
-        if (ec) return false;
+        auto ftime = std::filesystem::last_write_time(entry.path(), ec2);
+        if (ec2) { sawSkippedEntries = true; continue; }
         auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(
             ftime - fileClockNow + sysClockNow);
         fi.modifiedTime = (uint64_t)sctp.time_since_epoch().count();
 
         result.push_back(std::move(fi));
     }
-    return !ec;
+    bool ok = !ec;
+    if (ok && outComplete) *outComplete = !sawSkippedEntries;
+    return ok;
 }

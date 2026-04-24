@@ -1135,7 +1135,12 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     std::string blobPrefix = std::to_string(accountId) + "/" +
                              std::to_string(appId) + "/blobs/";
     std::vector<ICloudProvider::FileInfo> cloudBlobs;
-    bool cloudListSucceeded = g_provider->ListChecked(blobPrefix, cloudBlobs);
+    // cloudListComplete distinguishes a success-but-truncated listing (e.g.
+    // GDrive hit MAX_RECURSION_DEPTH) from a verified-complete listing.
+    // Prune decisions below refuse to run on incomplete listings to avoid
+    // deleting local blobs that exist in cloud but weren't observed.
+    bool cloudListComplete = false;
+    bool cloudListSucceeded = g_provider->ListChecked(blobPrefix, cloudBlobs, &cloudListComplete);
     if (!cloudListSucceeded) {
         if (cloudHadNewerCN) {
             rollbackNewerCloudState("blob listing failed");
@@ -1143,6 +1148,11 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         LOG("[CloudStorage] SyncFromCloud app %u: provider blob listing failed; skipping blob download/prune/recovery",
             appId);
         cloudBlobs.clear();
+        cloudListComplete = false;
+    } else if (!cloudListComplete) {
+        LOG("[CloudStorage] SyncFromCloud app %u: provider blob listing returned partial results "
+            "(e.g. recursion cap); downloads proceed but prune/gap-repair are skipped",
+            appId);
     }
     std::unordered_set<std::string> cloudBlobNames;
     for (auto& fi : cloudBlobs) {
@@ -1321,10 +1331,17 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                 appId, downloaded, skipped);
             hadNewer = true;
         }
-        if (cloudHadNewerCN && cloudListSucceeded && !cloudBlobNames.empty()) {
+        // Prune guard: require a verified-complete listing. A success return
+        // with cloudListComplete == false (e.g. GDrive recursion cap) must not
+        // trigger RemoveLocalBlobsNotInCloud — files below the cap would be
+        // silently deleted locally despite still existing in cloud.
+        if (cloudHadNewerCN && cloudListSucceeded && cloudListComplete && !cloudBlobNames.empty()) {
             RemoveLocalBlobsNotInCloud(accountId, appId, cloudBlobNames);
-        } else if (cloudHadNewerCN && cloudListSucceeded && cloudBlobNames.empty()) {
+        } else if (cloudHadNewerCN && cloudListSucceeded && cloudListComplete && cloudBlobNames.empty()) {
             LOG("[CloudStorage] SyncFromCloud app %u: empty blob listing is not explicit enough to prune local blobs",
+                appId);
+        } else if (cloudHadNewerCN && cloudListSucceeded && !cloudListComplete) {
+            LOG("[CloudStorage] SyncFromCloud app %u: skipping local-blob prune because provider listing was incomplete",
                 appId);
         }
     }
@@ -1333,9 +1350,15 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     // fill provider gaps from the local CloudRedirect cache. This preserves
     // existing users who link an empty provider or hit a partial provider upload
     // failure, while never overwriting a blob that already exists in cloud.
-    bool providerLooksUninitialized = cloudListSucceeded && !cloudCNFound && !cloudRootTokensFound &&
+    // Gap-repair is a recovery path that trusts "cloud shows nothing" as
+    // evidence of an uninitialized provider. A truncated listing (incomplete)
+    // can look identically empty for a sub-tree while real data exists above
+    // the recursion cap — never run recovery on an incomplete listing.
+    bool providerLooksUninitialized = cloudListSucceeded && cloudListComplete &&
+                                      !cloudCNFound && !cloudRootTokensFound &&
                                       !cloudFileTokensFound && cloudBlobNames.empty();
-    bool canRepairProviderGaps = cloudListSucceeded && localCN > 0 && providerLooksUninitialized;
+    bool canRepairProviderGaps = cloudListSucceeded && cloudListComplete &&
+                                 localCN > 0 && providerLooksUninitialized;
     if (canRepairProviderGaps) {
         std::string localBlobDir = g_localRoot + "storage\\" +
                                    std::to_string(accountId) + "\\" +

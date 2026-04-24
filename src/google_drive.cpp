@@ -252,6 +252,7 @@ GoogleDriveProvider::ListFolder(const std::string& folderId, bool* ok) {
     std::string baseUrl = "/drive/v3/files?q=" + UrlEncode(q) +
         "&fields=nextPageToken,files(id,name,mimeType,modifiedTime,size)&pageSize=1000";
     std::string pageToken;
+    bool firstPage = true;
 
     do {
         std::string url = baseUrl;
@@ -261,10 +262,24 @@ GoogleDriveProvider::ListFolder(const std::string& folderId, bool* ok) {
         auto r = ApiGet(url);
         if (r.status == 404) {
             InvalidateFolderById(folderId);
-            if (ok) *ok = true;
+            // First-page 404 = folder genuinely absent; legitimate empty
+            // listing. Mid-pagination 404 = folder was deleted between pages;
+            // we already have partial data in `result`. Returning ok=true
+            // there would hand an incomplete listing back as "complete" and
+            // cause the caller to prune local blobs for files that still
+            // existed in cloud when page 1 was fetched. Treat mid-walk 404
+            // as a failure instead.
+            if (firstPage) {
+                if (ok) *ok = true;
+            } else {
+                LOG("[GDrive] ListFolder %s: mid-pagination 404; folder removed "
+                    "between pages, reporting listing failure", folderId.c_str());
+                // *ok remains false
+            }
             return result;
         }
         if (r.status != 200) return result;
+        firstPage = false;
 
         auto j = Json::Parse(r.body);
         auto& files = j["files"];
@@ -289,10 +304,15 @@ GoogleDriveProvider::ListFolder(const std::string& folderId, bool* ok) {
 static constexpr int MAX_RECURSION_DEPTH = 32;
 
 bool GoogleDriveProvider::ListRecursive(const std::string& folderId, const std::string& prefix,
-                                          std::vector<RemoteFile>& out, int depth) {
+                                          std::vector<RemoteFile>& out,
+                                          bool* outComplete, int depth) {
     if (depth >= MAX_RECURSION_DEPTH) {
         LOG("[GDrive] ListRecursive: max depth %d reached at %s, stopping",
             MAX_RECURSION_DEPTH, prefix.c_str());
+        // Don't signal an error — we got as many files as the cap allows —
+        // but mark the listing incomplete so callers refuse destructive
+        // prune operations based on it.
+        if (outComplete) *outComplete = false;
         return true;
     }
     bool ok = false;
@@ -301,7 +321,7 @@ bool GoogleDriveProvider::ListRecursive(const std::string& folderId, const std::
     for (auto& item : items) {
         std::string path = prefix.empty() ? item.name : prefix + "/" + item.name;
         if (item.isFolder) {
-            if (!ListRecursive(item.id, path, out, depth + 1)) return false;
+            if (!ListRecursive(item.id, path, out, outComplete, depth + 1)) return false;
         } else {
             out.push_back({item.id, path, item.modifiedTime, item.size});
         }
@@ -583,13 +603,26 @@ GoogleDriveProvider::List(const std::string& prefix) {
     return result;
 }
 
-bool GoogleDriveProvider::ListChecked(const std::string& prefix, std::vector<FileInfo>& result) {
+bool GoogleDriveProvider::ListChecked(const std::string& prefix, std::vector<FileInfo>& result,
+                                       bool* outComplete) {
     result.clear();
+    // Pessimistic default per ICloudProvider::ListChecked contract: on any
+    // forgotten early-return path the caller sees incomplete and skips
+    // destructive prune operations.
+    if (outComplete) *outComplete = false;
+
+    // Missing-folder helper: a genuinely absent folder is a complete-empty
+    // listing (same semantics as LocalDisk hitting a non-existent path).
+    auto returnComplete = [&]() {
+        if (outComplete) *outComplete = true;
+        return true;
+    };
 
     uint32_t accountId, appId;
     std::string relPrefix;
-    if (!ParsePath(prefix, accountId, appId, relPrefix))
+    if (!ParsePath(prefix, accountId, appId, relPrefix)) {
         return false;
+    }
 
     std::string appFolder;
     {
@@ -601,16 +634,16 @@ bool GoogleDriveProvider::ListChecked(const std::string& prefix, std::vector<Fil
         std::string rootId;
         auto rootStatus = FindDriveFolderStatus("CloudRedirect", "", &rootId);
         if (rootStatus == LookupStatus::Error) return false;
-        if (rootStatus == LookupStatus::Missing) return true;
+        if (rootStatus == LookupStatus::Missing) return returnComplete();
 
         std::string accountFolder;
         auto accountStatus = FindDriveFolderStatus(std::to_string(accountId), rootId, &accountFolder);
         if (accountStatus == LookupStatus::Error) return false;
-        if (accountStatus == LookupStatus::Missing) return true;
+        if (accountStatus == LookupStatus::Missing) return returnComplete();
 
         auto appStatus = FindDriveFolderStatus(std::to_string(appId), accountFolder, &appFolder);
         if (appStatus == LookupStatus::Error) return false;
-        if (appStatus == LookupStatus::Missing) return true;
+        if (appStatus == LookupStatus::Missing) return returnComplete();
 
         std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
         m_folders["app_" + std::to_string(accountId) + "_" + std::to_string(appId)] = appFolder;
@@ -629,15 +662,21 @@ bool GoogleDriveProvider::ListChecked(const std::string& prefix, std::vector<Fil
             std::string nextId;
             auto status = FindDriveFolderStatus(part, listRoot, &nextId);
             if (status == LookupStatus::Error) return false;
-            if (status == LookupStatus::Missing) return true;
+            if (status == LookupStatus::Missing) return returnComplete();
             listRoot = std::move(nextId);
         }
         pathPrefix = relPrefix;
         if (!pathPrefix.empty() && pathPrefix.back() != '/') pathPrefix += '/';
     }
 
+    // Use a local completeness flag so the recursion can downgrade it
+    // without us having to worry about the order of a final outComplete
+    // write vs. early pessimistic-default.
     std::vector<RemoteFile> remoteFiles;
-    if (!ListRecursive(listRoot, "", remoteFiles)) return false;
+    bool recursiveComplete = true;
+    if (!ListRecursive(listRoot, "", remoteFiles, &recursiveComplete)) {
+        return false;
+    }
 
     std::string basePrefix = std::to_string(accountId) + "/" + std::to_string(appId) + "/";
     if (!pathPrefix.empty()) basePrefix += pathPrefix;
@@ -651,6 +690,8 @@ bool GoogleDriveProvider::ListChecked(const std::string& prefix, std::vector<Fil
         result.push_back(std::move(fi));
     }
 
-    LOG("[GDriveProvider] List '%s': %zu files", prefix.c_str(), result.size());
+    LOG("[GDriveProvider] List '%s': %zu files (complete=%d)",
+        prefix.c_str(), result.size(), (int)recursiveComplete);
+    if (outComplete) *outComplete = recursiveComplete;
     return true;
 }
