@@ -111,17 +111,25 @@ internal static class BackupListBuilder
             {
                 try
                 {
+                    var uri = new Uri(headerUrl);
                     var bitmap = new BitmapImage();
                     bitmap.BeginInit();
-                    // OnLoad decodes immediately and releases the backing file
-                    // handle; without it a file:// URI keeps the cached JPEG
-                    // locked, blocking cache eviction and overwrite on asset
-                    // hash rotation.
-                    bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                    bitmap.UriSource = new Uri(headerUrl);
+                    if (uri.IsFile)
+                    {
+                        // OnLoad decodes immediately and releases the backing
+                        // file handle; without it a file:// URI keeps the
+                        // cached JPEG locked, blocking eviction and the
+                        // File.Move(overwrite:true) that installs a refreshed
+                        // asset after a Steam CDN hash rotation.
+                        bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                    }
+                    // HTTP URIs: leave CacheOption at Default so the download
+                    // streams async rather than blocking the UI thread.
+                    bitmap.UriSource = uri;
                     bitmap.DecodePixelWidth = 64;
                     bitmap.EndInit();
-                    bitmap.Freeze();
+                    if (uri.IsFile)
+                        bitmap.Freeze();
                     iconImage.Source = bitmap;
                 }
                 catch { /* icon load failure is fine */ }

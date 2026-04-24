@@ -756,18 +756,27 @@ public partial class CleanupPage : Page
             {
                 try
                 {
+                    var uri = new Uri(storeInfo2.HeaderUrl);
                     var bitmap = new BitmapImage();
                     bitmap.BeginInit();
-                    // OnLoad decodes immediately and releases the backing file
-                    // handle; without it a file:// URI keeps the cached JPEG
-                    // locked for the lifetime of this BitmapImage, which
-                    // blocks the cache eviction sweep and a fresh overwrite
-                    // when the Steam asset hash rotates.
-                    bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                    bitmap.UriSource = new Uri(storeInfo2.HeaderUrl);
+                    if (uri.IsFile)
+                    {
+                        // OnLoad decodes immediately and releases the backing
+                        // file handle; without it a file:// URI keeps the
+                        // cached JPEG locked, blocking eviction and the
+                        // File.Move(overwrite:true) that installs a refreshed
+                        // asset after a Steam CDN hash rotation.
+                        bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                    }
+                    // HTTP URIs: leave CacheOption at Default so the download
+                    // streams async rather than blocking the UI thread with a
+                    // synchronous fetch (which was causing cold-cache renders
+                    // to drop images silently).
+                    bitmap.UriSource = uri;
                     bitmap.DecodePixelWidth = 64;
                     bitmap.EndInit();
-                    bitmap.Freeze();
+                    if (uri.IsFile)
+                        bitmap.Freeze();
                     iconImage.Source = bitmap;
                 }
                 catch { /* icon load failure is fine */ }

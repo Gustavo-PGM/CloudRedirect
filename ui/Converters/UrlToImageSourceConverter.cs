@@ -7,11 +7,40 @@ using CloudRedirect.Services;
 namespace CloudRedirect.Converters;
 
 /// <summary>
-/// Converts a string URL (Steam CDN https:// or a file:// path pointing at
-/// our on-disk artwork cache) into a frozen <see cref="BitmapImage"/> for
+/// Converts a string URL (Steam CDN <c>https://</c> or a <c>file://</c> path
+/// pointing at our on-disk artwork cache) into a <see cref="BitmapImage"/> for
 /// declarative binding from XAML.
 ///
-/// Behavior contract:
+/// <para>
+/// The converter deliberately behaves differently for the two URI schemes:
+/// </para>
+/// <list type="bullet">
+///   <item><description>
+///     <b>file://</b> &#8212; decoded with <see cref="BitmapCacheOption.OnLoad"/>
+///     and <see cref="System.Windows.Freezable.Freeze"/>d. OnLoad decodes
+///     immediately and releases the backing file handle; without it the cached
+///     JPEG stays locked for the lifetime of the BitmapImage, blocking both
+///     the eviction sweep in <see cref="SteamStoreClient"/> and the
+///     <c>File.Move(overwrite: true)</c> that installs a refreshed asset on
+///     CDN hash rotation. Freezing makes the bitmap safe to share across
+///     bindings without per-access dispatcher marshalling.
+///   </description></item>
+///   <item><description>
+///     <b>https://</b> &#8212; created with WPF's default
+///     (<see cref="BitmapCacheOption.Default"/>) streaming async load and
+///     left unfrozen. Setting <c>OnLoad</c> here would force a synchronous
+///     UI-thread download that (a) stalls rendering when dozens of app cards
+///     materialize at once and (b) silently failed often enough in practice
+///     that images wouldn't appear on first paint (cold cache &#8594; HeaderUrl
+///     is still the CDN URL at that point; only the second visit sees the
+///     file:// rewrite). Matching the pre-converter default behavior means
+///     first-visit images progressively appear as the CDN responds, and the
+///     ensuing background download still lands in the disk cache for the
+///     next launch.
+///   </description></item>
+/// </list>
+///
+/// <para>Behavior contract:</para>
 /// <list type="bullet">
 ///   <item><description>
 ///     Null / empty / non-string / non-URI inputs return
@@ -27,25 +56,11 @@ namespace CloudRedirect.Converters;
 ///     Anything rejected by that gate returns <see cref="Binding.DoNothing"/>.
 ///   </description></item>
 ///   <item><description>
-///     <see cref="BitmapCacheOption.OnLoad"/> is set so the image is decoded
-///     immediately and the backing file handle is released. Without it a
-///     <c>file://</c> URI keeps the cached JPEG locked for the lifetime of
-///     the <see cref="BitmapImage"/>, which would block both the cache
-///     eviction sweep in <see cref="SteamStoreClient"/> and the
-///     <c>File.Move(overwrite: true)</c> that installs a refreshed asset
-///     after a Steam CDN hash rotation.
-///   </description></item>
-///   <item><description>
-///     <see cref="System.Windows.Freezable.Freeze"/> is called so the
-///     produced bitmap is safe to hand off to the UI thread without
-///     per-access dispatcher marshalling and can be shared across bindings.
+///     No fallback image is produced. A failed decode returns
+///     <see cref="Binding.DoNothing"/> and lets the caller surface a
+///     template-level placeholder.
 ///   </description></item>
 /// </list>
-///
-/// This converter intentionally has no fallback image; a failed decode (bad
-/// JPEG, network failure on a CDN URI, cache file deleted between validation
-/// and decode) returns <see cref="Binding.DoNothing"/> and lets the caller
-/// surface a template-level placeholder.
 /// </summary>
 public sealed class UrlToImageSourceConverter : IValueConverter
 {
@@ -57,7 +72,7 @@ public sealed class UrlToImageSourceConverter : IValueConverter
         if (!SteamStoreClient.IsValidImageUrl(url))
             return Binding.DoNothing;
 
-        Uri? uri;
+        Uri uri;
         try
         {
             uri = new Uri(url);
@@ -71,13 +86,20 @@ public sealed class UrlToImageSourceConverter : IValueConverter
         {
             var bitmap = new BitmapImage();
             bitmap.BeginInit();
-            // OnLoad decodes immediately and releases the backing file handle;
-            // required so cache eviction and atomic File.Move(overwrite:true)
-            // on asset hash rotation aren't blocked by an outstanding lock.
-            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            if (uri.IsFile)
+            {
+                // Local cache file: decode now, release the handle, freeze so
+                // eviction + atomic File.Move(overwrite: true) aren't blocked.
+                bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            }
+            // HTTP: leave CacheOption at Default so the download streams in
+            // the background. Intentionally NOT frozen -- an unfinished
+            // async-loading BitmapImage is not yet in a freezable state, and
+            // freezing would throw.
             bitmap.UriSource = uri;
             bitmap.EndInit();
-            bitmap.Freeze();
+            if (uri.IsFile)
+                bitmap.Freeze();
             return bitmap;
         }
         catch
