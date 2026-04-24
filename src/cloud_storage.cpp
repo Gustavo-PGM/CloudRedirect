@@ -1033,13 +1033,19 @@ static bool WriteLocalText(const std::string& path, const std::string& content) 
 // in local_storage.cpp) and invited drift from the in-memory cache.
 
 
-void SaveRootTokens(uint32_t accountId, uint32_t appId,
+bool SaveRootTokens(uint32_t accountId, uint32_t appId,
                     const std::unordered_set<std::string>& tokens) {
-    // Delegate to LocalStorage for the actual disk write
-    LocalStorage::SaveRootTokens(accountId, appId, tokens);
+    // Delegate to LocalStorage for the actual disk write.
+    // If local persist fails we intentionally DO NOT enqueue the cloud
+    // upload: uploading a purely in-memory set that never landed on disk
+    // creates a "cloud-only, never durable locally" state that neither
+    // SyncFromCloud's merge+rollback path nor the tombstone-CN gate is
+    // prepared for — on restart LoadRootTokens would return the stale
+    // pre-update disk set and the cloud would hold orphan tokens.
+    bool localOk = LocalStorage::SaveRootTokens(accountId, appId, tokens);
 
-    // Push to cloud
-    if (g_provider) {
+    // Push to cloud only if disk is known-durable.
+    if (localOk && g_provider) {
         std::string content;
         for (auto& t : tokens) {
             content += t + "\n";
@@ -1050,6 +1056,7 @@ void SaveRootTokens(uint32_t accountId, uint32_t appId,
         wi.data.assign(content.begin(), content.end());
         EnqueueWork(std::move(wi));
     }
+    return localOk;
 }
 
 std::unordered_set<std::string> LoadRootTokens(uint32_t accountId, uint32_t appId) {
@@ -1057,13 +1064,16 @@ std::unordered_set<std::string> LoadRootTokens(uint32_t accountId, uint32_t appI
     return LocalStorage::LoadRootTokens(accountId, appId);
 }
 
-void SaveFileTokens(uint32_t accountId, uint32_t appId,
+bool SaveFileTokens(uint32_t accountId, uint32_t appId,
                     const std::unordered_map<std::string, std::string>& fileTokens) {
-    // Delegate to LocalStorage for the actual disk write
-    LocalStorage::SaveFileTokens(accountId, appId, fileTokens);
+    // Delegate to LocalStorage for the actual disk write.
+    // Mirror SaveRootTokens: skip the cloud push when local persist failed
+    // so cloud never holds a file→token mapping that disk cannot reproduce
+    // on restart.
+    bool localOk = LocalStorage::SaveFileTokens(accountId, appId, fileTokens);
 
-    // Push to cloud
-    if (g_provider) {
+    // Push to cloud only if disk is known-durable.
+    if (localOk && g_provider) {
         std::string content;
         for (auto& [cleanName, token] : fileTokens) {
             content += cleanName + "\t" + token + "\n";
@@ -1074,6 +1084,7 @@ void SaveFileTokens(uint32_t accountId, uint32_t appId,
         wi.data.assign(content.begin(), content.end());
         EnqueueWork(std::move(wi));
     }
+    return localOk;
 }
 
 std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, uint32_t appId) {
@@ -1155,19 +1166,52 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             LOG("[CloudStorage] SyncFromCloud app %u: preserving local CN=%llu during rollback; expected cloud CN=%llu",
                 appId, currentCN, cloudCN);
         }
+        // Default to "vacuously rolled back" only when there is nothing to
+        // revert. If we DID merge cloud tokens this cycle, start at false
+        // and flip to true only after a successful SaveRootTokens /
+        // SaveFileTokens — otherwise a predicate mismatch (disk drifted
+        // between merge and rollback) would silently leave merged state on
+        // disk while claiming rollback success.
+        bool rootRolledBack = !haveMergedCloudRootTokens;
+        bool fileRolledBack = !haveMergedCloudFileTokens;
         if (haveOriginalTokenMetadata) {
-            if (haveMergedCloudRootTokens && LocalStorage::LoadRootTokens(accountId, appId) == mergedCloudRootTokens) {
-                LocalStorage::SaveRootTokens(accountId, appId, originalRootTokens);
+            if (haveMergedCloudRootTokens) {
+                if (LocalStorage::LoadRootTokens(accountId, appId) == mergedCloudRootTokens) {
+                    if (LocalStorage::SaveRootTokens(accountId, appId, originalRootTokens)) {
+                        rootRolledBack = true;
+                    } else {
+                        LOG("[CloudStorage] SyncFromCloud app %u: rollback SaveRootTokens failed — merged tokens remain on disk",
+                            appId);
+                    }
+                } else {
+                    // Disk drifted since our merge; we cannot safely assume
+                    // the on-disk set is still ours to revert.
+                    LOG("[CloudStorage] SyncFromCloud app %u: rollback skipped for root tokens — disk set no longer matches merged snapshot",
+                        appId);
+                }
             }
-            if (haveMergedCloudFileTokens && LocalStorage::LoadFileTokens(accountId, appId) == mergedCloudFileTokens) {
-                LocalStorage::SaveFileTokens(accountId, appId, originalFileTokens);
+            if (haveMergedCloudFileTokens) {
+                if (LocalStorage::LoadFileTokens(accountId, appId) == mergedCloudFileTokens) {
+                    if (LocalStorage::SaveFileTokens(accountId, appId, originalFileTokens)) {
+                        fileRolledBack = true;
+                    } else {
+                        LOG("[CloudStorage] SyncFromCloud app %u: rollback SaveFileTokens failed — merged tokens remain on disk",
+                            appId);
+                    }
+                } else {
+                    LOG("[CloudStorage] SyncFromCloud app %u: rollback skipped for file tokens — disk set no longer matches merged snapshot",
+                        appId);
+                }
             }
         }
         cloudHadNewerCN = false;
         hadNewer = false;
-        rolledBackNewerCloudState = true;
-        LOG("[CloudStorage] SyncFromCloud app %u: rolled back newer cloud state because %s",
-            appId, reason);
+        // Only mark the rollback complete if the on-disk token state was
+        // actually reverted. If either persist failed, leave the flag clear
+        // so the outer sync path does not rely on the pre-rollback snapshot.
+        rolledBackNewerCloudState = rootRolledBack && fileRolledBack;
+        LOG("[CloudStorage] SyncFromCloud app %u: rolled back newer cloud state because %s (root=%d file=%d)",
+            appId, reason, (int)rootRolledBack, (int)fileRolledBack);
     };
 
     // 2. Sync root_token.dat: merge cloud tokens into local set
@@ -1210,10 +1254,18 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             if (localTokens.size() > beforeSize) {
                 LOG("[CloudStorage] SyncFromCloud app %u: merged %zu new root tokens from cloud",
                     appId, localTokens.size() - beforeSize);
-                LocalStorage::SaveRootTokens(accountId, appId, localTokens);
-                mergedCloudRootTokens = localTokens;
-                haveMergedCloudRootTokens = true;
-                hadNewer = true;
+                // Only record the merged set for rollback-predicate matching
+                // if disk persist actually succeeded. Otherwise a later
+                // LoadRootTokens() would never equal mergedCloudRootTokens
+                // and the rollback would incorrectly short-circuit.
+                if (LocalStorage::SaveRootTokens(accountId, appId, localTokens)) {
+                    mergedCloudRootTokens = localTokens;
+                    haveMergedCloudRootTokens = true;
+                    hadNewer = true;
+                } else {
+                    LOG("[CloudStorage] SyncFromCloud app %u: merged root-token persist failed — skipping rollback predicate bookkeeping",
+                        appId);
+                }
             }
 
             // If cloud had corrupted tokens, push the cleaned *cloud* set back --
@@ -1279,10 +1331,16 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                 if (changed) {
                     LOG("[CloudStorage] SyncFromCloud app %u: merged/updated file-token mappings from cloud (local %zu -> %zu)",
                         appId, beforeSize, localFileTokens.size());
-                    LocalStorage::SaveFileTokens(accountId, appId, localFileTokens);
-                    mergedCloudFileTokens = localFileTokens;
-                    haveMergedCloudFileTokens = true;
-                    hadNewer = true;
+                    // Mirror SaveRootTokens merge path: only commit the
+                    // rollback-predicate bookkeeping if disk persist succeeded.
+                    if (LocalStorage::SaveFileTokens(accountId, appId, localFileTokens)) {
+                        mergedCloudFileTokens = localFileTokens;
+                        haveMergedCloudFileTokens = true;
+                        hadNewer = true;
+                    } else {
+                        LOG("[CloudStorage] SyncFromCloud app %u: merged file-token persist failed — skipping rollback predicate bookkeeping",
+                            appId);
+                    }
                 }
             }
         }

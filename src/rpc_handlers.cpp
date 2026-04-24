@@ -519,8 +519,18 @@ static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
             finish(true, publishGeneration);
             return;
         }
-        if (!rootTokens.empty()) CloudStorage::SaveRootTokens(accountId, appId, rootTokens);
-        if (!fileTokens.empty() || tokenMetadataChanged) CloudStorage::SaveFileTokens(accountId, appId, fileTokens);
+        // Observe the bool return: Save*Tokens now reports local-disk
+        // persist status. If disk write fails but cloud upload succeeds
+        // (enqueued inside the wrapper), a subsequent restart will
+        // LoadRootTokens() the stale set, diverging from cloud. Log the
+        // failure so later divergence in SyncFromCloud is traceable.
+        if (!rootTokens.empty() && !CloudStorage::SaveRootTokens(accountId, appId, rootTokens)) {
+            LOG("[AutoCloudImport] root_token.dat local persist FAILED app %u — next restart will load stale set", appId);
+        }
+        if ((!fileTokens.empty() || tokenMetadataChanged) &&
+            !CloudStorage::SaveFileTokens(accountId, appId, fileTokens)) {
+            LOG("[AutoCloudImport] file_tokens.dat local persist FAILED app %u — next restart will load stale set", appId);
+        }
     }
     // Release the import mutex before any blocking network calls so unrelated
     // RPC paths that call InvalidateTokenCaches are not stalled on slow
@@ -930,7 +940,9 @@ static bool TryCaptureRootToken(uint32_t accountId, uint32_t appId, const std::s
         tokenSet.insert(memorySnapshot.begin(), memorySnapshot.end());
         memorySnapshot = tokenSet;
     }
-    CloudStorage::SaveRootTokens(accountId, appId, memorySnapshot);
+    if (!CloudStorage::SaveRootTokens(accountId, appId, memorySnapshot)) {
+        LOG("[TryCaptureRootToken] root_token.dat local persist FAILED app %u — in-memory set diverges from disk", appId);
+    }
     return isNew;
 }
 
@@ -1028,7 +1040,9 @@ static void PersistFileTokens(uint32_t accountId, uint32_t appId) {
         }
         snapshot = mapRef;
     }
-    CloudStorage::SaveFileTokens(accountId, appId, snapshot);
+    if (!CloudStorage::SaveFileTokens(accountId, appId, snapshot)) {
+        LOG("[RecordFileToken] file_tokens.dat local persist FAILED app %u — in-memory mapping diverges from disk", appId);
+    }
 }
 
 // Mark an app's file tokens as needing persistence.

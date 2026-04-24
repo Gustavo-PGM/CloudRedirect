@@ -75,12 +75,17 @@ struct AutoCloudScanResult {
 
 AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
                                          uint32_t accountId, uint32_t appId);
-void SaveRootTokens(uint32_t accountId, uint32_t appId, const std::unordered_set<std::string>& tokens);
+// Returns true if tokens were successfully persisted to disk.
+// Callers on the rollback path (cloud_storage.cpp rollbackNewerCloudState)
+// rely on this signal to detect silent persist failures that would otherwise
+// leave local disk out of sync with the in-memory rollback state.
+bool SaveRootTokens(uint32_t accountId, uint32_t appId, const std::unordered_set<std::string>& tokens);
 std::unordered_set<std::string> LoadRootTokens(uint32_t accountId, uint32_t appId);
 
 // Per-file token tracking: which root token each file was uploaded under.
 // Prevents changelist from duplicating files across all tokens.
-void SaveFileTokens(uint32_t accountId, uint32_t appId,
+// Returns true on successful persist (see SaveRootTokens rationale).
+bool SaveFileTokens(uint32_t accountId, uint32_t appId,
                     const std::unordered_map<std::string, std::string>& fileTokens);
 std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, uint32_t appId);
 

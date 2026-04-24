@@ -1064,13 +1064,26 @@ void Init(const std::string& baseRoot) {
     g_baseRoot = baseRoot;
     if (!g_baseRoot.empty() && g_baseRoot.back() != '\\')
         g_baseRoot += '\\';
-    std::filesystem::create_directories(g_baseRoot);
+    // ec overload: a filesystem_error escaping here would unwind through
+    // the hooked Steam callsite and terminate the process. Log + continue;
+    // downstream WriteFile paths will surface individual failures.
+    std::error_code ec;
+    std::filesystem::create_directories(g_baseRoot, ec);
+    if (ec) {
+        LOG("LocalStorage Init: create_directories failed for '%s': %s",
+            g_baseRoot.c_str(), ec.message().c_str());
+    }
     LOG("LocalStorage initialized at: %s", g_baseRoot.c_str());
 }
 
 void InitApp(uint32_t accountId, uint32_t appId) {
     auto appPath = GetAppPathInternal(accountId, appId);
-    std::filesystem::create_directories(appPath);
+    std::error_code ec;
+    std::filesystem::create_directories(appPath, ec);
+    if (ec) {
+        LOG("LocalStorage InitApp: create_directories failed for '%s': %s",
+            appPath.c_str(), ec.message().c_str());
+    }
     LOG("LocalStorage: account %u app %u path: %s", accountId, appId, appPath.c_str());
 }
 
@@ -1213,30 +1226,82 @@ std::vector<FileEntry> GetFileList(uint32_t accountId, uint32_t appId) {
     {
         std::shared_lock<std::shared_mutex> lock(g_mutex);
         std::string appRoot = GetAppPathInternal(accountId, appId);
-        if (!std::filesystem::exists(appRoot)) return result;
+        std::error_code ec;
+        if (!std::filesystem::exists(appRoot, ec) || ec) return result;
 
-        for (auto& entry : std::filesystem::recursive_directory_iterator(appRoot)) {
-            if (!entry.is_regular_file()) continue;
+        // ec overload with skip_permission_denied: GetFileList runs on
+        // the Cloud RPC hot path. A transient I/O fault (OneDrive reparse,
+        // AV lock, disconnected drive) must not unwind through the DLL
+        // boundary — bail out with whatever we have and let the caller
+        // treat the app as empty this cycle.
+        std::filesystem::recursive_directory_iterator it(
+            appRoot,
+            std::filesystem::directory_options::skip_permission_denied,
+            ec);
+        if (ec) {
+            LOG("GetFileList: iterator init failed for '%s': %s",
+                appRoot.c_str(), ec.message().c_str());
+            return result;
+        }
+        const std::filesystem::recursive_directory_iterator end;
+        while (it != end) {
+            const auto& entry = *it;
+            std::error_code fileEc;
+            if (!entry.is_regular_file(fileEc) || fileEc) {
+                it.increment(ec);
+                if (ec) break;
+                continue;
+            }
 
-            std::string relPath = std::filesystem::relative(entry.path(), appRoot).string();
+            std::string relPath = std::filesystem::relative(entry.path(), appRoot, fileEc).string();
+            if (fileEc) {
+                it.increment(ec);
+                if (ec) break;
+                continue;
+            }
             for (auto& c : relPath) { if (c == '\\') c = '/'; }
 
             // Skip our internal metadata files
             if (relPath == "cn.dat" || relPath == "root_token.dat" ||
-                relPath == "file_tokens.dat" || relPath == "deleted.dat") continue;
+                relPath == "file_tokens.dat" || relPath == "deleted.dat") {
+                it.increment(ec);
+                if (ec) break;
+                continue;
+            }
 
             std::string fullPath = appRoot + relPath;
             for (auto& c : fullPath) { if (c == '/') c = '\\'; }
 
-            auto ftime = std::filesystem::last_write_time(entry.path());
+            auto ftime = std::filesystem::last_write_time(entry.path(), fileEc);
+            if (fileEc) {
+                it.increment(ec);
+                if (ec) break;
+                continue;
+            }
             uint64_t ts = FileTimeToUnixSeconds(ftime);
+
+            uint64_t rawSize = 0;
+            auto sz = entry.file_size(fileEc);
+            if (!fileEc) rawSize = (uint64_t)sz;
+            else {
+                it.increment(ec);
+                if (ec) break;
+                continue;
+            }
 
             PendingFile pf;
             pf.relPath = std::move(relPath);
             pf.fullPath = std::move(fullPath);
-            pf.rawSize = (uint64_t)entry.file_size();
+            pf.rawSize = rawSize;
             pf.timestamp = ts;
             pending.push_back(std::move(pf));
+
+            it.increment(ec);
+            if (ec) break;
+        }
+        if (ec) {
+            LOG("GetFileList: iteration aborted for '%s': %s (kept %zu entries)",
+                appRoot.c_str(), ec.message().c_str(), pending.size());
         }
     }
     // Lock released — hash files without blocking writers
@@ -1320,7 +1385,13 @@ bool WriteFile(uint32_t accountId, uint32_t appId, const std::string& filename, 
     }
 
     auto parent = std::filesystem::path(fullPath).parent_path();
-    std::filesystem::create_directories(parent);
+    std::error_code dirEc;
+    std::filesystem::create_directories(parent, dirEc);
+    if (dirEc) {
+        LOG("WriteFile: create_directories failed for '%s': %s",
+            parent.string().c_str(), dirEc.message().c_str());
+        return false;
+    }
 
     // Atomic write: write to .tmp then rename to avoid partial reads on crash
     if (!FileUtil::AtomicWriteBinary(fullPath, data, len)) {
@@ -1344,7 +1415,13 @@ bool WriteFileNoIncrement(uint32_t accountId, uint32_t appId, const std::string&
     }
 
     auto parent = std::filesystem::path(fullPath).parent_path();
-    std::filesystem::create_directories(parent);
+    std::error_code dirEc;
+    std::filesystem::create_directories(parent, dirEc);
+    if (dirEc) {
+        LOG("WriteFileNoIncrement: create_directories failed for '%s': %s",
+            parent.string().c_str(), dirEc.message().c_str());
+        return false;
+    }
 
     if (!FileUtil::AtomicWriteBinary(fullPath, data, len)) {
         LOG("WriteFileNoIncrement failed: %s (%zu bytes)", fullPath.c_str(), len);
@@ -1364,7 +1441,14 @@ bool DeleteFile(uint32_t accountId, uint32_t appId, const std::string& filename)
         return false;
     }
 
-    if (std::filesystem::remove(fullPath)) {
+    std::error_code ec;
+    bool removed = std::filesystem::remove(fullPath, ec);
+    if (ec) {
+        LOG("DeleteFile: remove failed for '%s': %s",
+            fullPath.c_str(), ec.message().c_str());
+        return false;
+    }
+    if (removed) {
         ++g_changeNumbers[MakeKey(accountId, appId)];
         SaveChangeNumberLocked(accountId, appId);
         LOG("DeleteFile: app %u %s", appId, filename.c_str());
@@ -1824,10 +1908,16 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
     return outResult;
 }
 
-void SaveRootTokens(uint32_t accountId, uint32_t appId, const std::unordered_set<std::string>& tokens) {
+bool SaveRootTokens(uint32_t accountId, uint32_t appId, const std::unordered_set<std::string>& tokens) {
     std::lock_guard<std::shared_mutex> lock(g_mutex);
     std::string appDir = GetAppPathInternal(accountId, appId);
-    std::filesystem::create_directories(appDir);
+    std::error_code dirEc;
+    std::filesystem::create_directories(appDir, dirEc);
+    if (dirEc) {
+        LOG("SaveRootTokens: create_directories failed for '%s': %s",
+            appDir.c_str(), dirEc.message().c_str());
+        return false;
+    }
     std::string path = appDir + "root_token.dat";
     std::string content;
     for (auto& t : tokens) {
@@ -1835,8 +1925,10 @@ void SaveRootTokens(uint32_t accountId, uint32_t appId, const std::unordered_set
     }
     if (FileUtil::AtomicWriteText(path, content)) {
         LOG("SaveRootTokens: persisted %zu tokens for app %u", tokens.size(), appId);
+        return true;
     } else {
         LOG("SaveRootTokens: failed for app %u", appId);
+        return false;
     }
 }
 
@@ -1872,17 +1964,29 @@ std::unordered_set<std::string> LoadRootTokens(uint32_t accountId, uint32_t appI
     // Rewrite phase: upgrade to exclusive lock via SaveRootTokens if cleanup needed
     if (needsRewrite && !tokens.empty()) {
         LOG("LoadRootTokens: cleaning corrupted tokens for app %u", appId);
-        SaveRootTokens(accountId, appId, tokens);
+        if (!SaveRootTokens(accountId, appId, tokens)) {
+            // Persist failed (disk full / ACL / etc). The in-memory `tokens`
+            // returned to the caller is still correct for this call, but the
+            // next LoadRootTokens will re-trigger the same failing rewrite.
+            // Log once here so the retry storm is at least visible.
+            LOG("LoadRootTokens: cleanup rewrite FAILED app %u — will retry on next load", appId);
+        }
     }
 
     return tokens;
 }
 
-void SaveFileTokens(uint32_t accountId, uint32_t appId,
+bool SaveFileTokens(uint32_t accountId, uint32_t appId,
                     const std::unordered_map<std::string, std::string>& fileTokens) {
     std::lock_guard<std::shared_mutex> lock(g_mutex);
     std::string appDir = GetAppPathInternal(accountId, appId);
-    std::filesystem::create_directories(appDir);
+    std::error_code dirEc;
+    std::filesystem::create_directories(appDir, dirEc);
+    if (dirEc) {
+        LOG("SaveFileTokens: create_directories failed for '%s': %s",
+            appDir.c_str(), dirEc.message().c_str());
+        return false;
+    }
     std::string path = appDir + "file_tokens.dat";
     std::string content;
     for (auto& [cleanName, token] : fileTokens) {
@@ -1890,8 +1994,10 @@ void SaveFileTokens(uint32_t accountId, uint32_t appId,
     }
     if (FileUtil::AtomicWriteText(path, content)) {
         LOG("SaveFileTokens: persisted %zu entries for app %u", fileTokens.size(), appId);
+        return true;
     } else {
         LOG("SaveFileTokens: failed for app %u", appId);
+        return false;
     }
 }
 

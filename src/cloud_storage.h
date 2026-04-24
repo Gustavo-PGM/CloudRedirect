@@ -50,13 +50,16 @@ ICloudProvider::ExistsStatus CheckBlobExists(uint32_t accountId, uint32_t appId,
                                              const std::string& filename);
 
 // Root token persistence — same as before but also syncs to cloud.
-void SaveRootTokens(uint32_t accountId, uint32_t appId,
+// Returns true if local disk persist succeeded (cloud upload is async
+// and its result is reported separately via the work queue).
+bool SaveRootTokens(uint32_t accountId, uint32_t appId,
                     const std::unordered_set<std::string>& tokens);
 std::unordered_set<std::string> LoadRootTokens(uint32_t accountId, uint32_t appId);
 
 // Per-file token tracking: which root token each file was uploaded under.
 // Synced to cloud alongside root_token.dat and cn.dat.
-void SaveFileTokens(uint32_t accountId, uint32_t appId,
+// Returns true if local disk persist succeeded.
+bool SaveFileTokens(uint32_t accountId, uint32_t appId,
                     const std::unordered_map<std::string, std::string>& fileTokens);
 std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, uint32_t appId);
 
