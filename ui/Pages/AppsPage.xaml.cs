@@ -17,6 +17,7 @@ namespace CloudRedirect.Pages;
 public partial class AppsPage : Page
 {
     private bool _hasDeletedThisSession;
+    private bool _hasPrunedThisSession;
     private bool _backupsLoaded;
     private List<BackupInfo> _backups;
     private string _steamPath;
@@ -436,6 +437,272 @@ public partial class AppsPage : Page
         {
             await Dialog.ShowErrorAsync(S.Get("Apps_DeleteFailedTitle"), $"Error: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Per-app "prune orphan cloud blobs" action. Deletes cloud blobs that
+    /// are not referenced by this app's local <c>file_tokens.dat</c>.
+    ///
+    /// UX flow: Steam-closed gate -> scan with listing-complete guard ->
+    /// preview dialog with first-N filenames -> countdown confirmation ->
+    /// prune -> result dialog (success / partial / failure) -> refresh.
+    ///
+    /// SAFETY: <see cref="OrphanBlobService.ScanAsync"/> refuses to compute
+    /// an orphan set when the cloud listing is incomplete or when
+    /// <c>file_tokens.dat</c> cannot be read, so a transient cloud error
+    /// can never mislead this handler into pruning live saves. We still
+    /// surface "listing incomplete" as a distinct error state (separate
+    /// from "zero orphans found") to avoid user confusion.
+    /// </summary>
+    private async void PruneOrphans_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: AppInfo app } fe) return;
+        if (fe is not System.Windows.Controls.Button btn) return;
+
+        // Entry guard: disable the button BEFORE any await so a
+        // triple-click cannot race past the Steam-closed gate or the
+        // scan call. Restore in finally.
+        btn.IsEnabled = false;
+        var originalTooltip = btn.ToolTip;
+
+        try
+        {
+            // Short-circuit: no cloud configured means no cloud to prune.
+            var providerName = CloudProviderClient.GetProviderDisplayName();
+            if (providerName == null)
+            {
+                await Dialog.ShowInfoAsync(
+                    S.Get("Apps_PruneLocalOnlyTitle"),
+                    S.Get("Apps_PruneLocalOnlyMessage"));
+                return;
+            }
+
+            // Belt-and-suspenders: the DLL may be writing file_tokens.dat
+            // or uploading a blob concurrently if Steam is running. We
+            // already defend against concurrent-write via the atomic-rename
+            // parser and the ListChecked completeness contract, but
+            // matching the restore-flow's Steam-closed gate removes a
+            // class of confusing race outcomes (e.g. a blob upload
+            // completing mid-scan causing a "new" orphan to appear on the
+            // next scan).
+            if (!await SteamDetector.EnsureSteamClosedAsync()) return;
+
+            var steamPath = SteamDetector.FindSteamPath();
+            if (steamPath == null) return;
+
+            // Reuse a single CloudProviderClient across scan + prune so
+            // the shared HttpClient stays warm and auth state is consistent
+            // across the two calls. `using` scopes disposal to the handler.
+            using var client = new CloudProviderClient();
+            var svc = new OrphanBlobService(client, steamPath);
+
+            btn.ToolTip = S.Get("Apps_PruneButtonScanning");
+
+            OrphanBlobService.ScanResult scan;
+            try
+            {
+                scan = await svc.ScanAsync(app.AccountId, app.AppId);
+            }
+            catch (OperationCanceledException)
+            {
+                return; // user cancelled (future cancel source); no UI
+            }
+            catch (Exception ex)
+            {
+                await Dialog.ShowErrorAsync(
+                    S.Get("Apps_PruneFailedTitle"),
+                    S.Format("Apps_PruneFailedMessageFormat", 0, app.DisplayName, ex.Message));
+                return;
+            }
+
+            // HARD SAFETY GATE: refuse to prune on partial data. The
+            // service itself returns Orphans=empty in this case, so
+            // Orphans.Count == 0 could mean "clean" OR "couldn't verify".
+            // Distinguish by checking ListingComplete + Error so the user
+            // isn't shown a misleading "no orphans" dialog on a network
+            // failure.
+            if (!scan.ListingComplete || scan.Error != null)
+            {
+                await Dialog.ShowErrorAsync(
+                    S.Get("Apps_PruneListingIncompleteTitle"),
+                    S.Format("Apps_PruneListingIncompleteMessage", scan.Error ?? "(no details)"));
+                return;
+            }
+
+            if (scan.Orphans.Count == 0)
+            {
+                await Dialog.ShowInfoAsync(
+                    S.Get("Apps_PruneNoOrphansTitle"),
+                    S.Format("Apps_PruneNoOrphansMessageFormat", scan.TotalCloudBlobs, app.DisplayName));
+                return;
+            }
+
+            // Build rich preview with first N filenames. The entire orphan
+            // list can run into thousands for abandoned saves; cap the
+            // inline preview at a reasonable count and show "and N more".
+            const int kPreviewCap = 20;
+            var previewCount = Math.Min(scan.Orphans.Count, kPreviewCap);
+            var tb = new TextBlock { TextWrapping = TextWrapping.Wrap };
+            tb.Inlines.Add(new Run(S.Format(
+                "Apps_PruneConfirmHeaderFormat",
+                scan.Orphans.Count, app.DisplayName, app.AppId)));
+            tb.Inlines.Add(new Run(S.Format("Apps_PruneConfirmExplanation", providerName)));
+            tb.Inlines.Add(new Bold(new Run(S.Get("Apps_PruneConfirmPreviewHeader"))));
+            for (int i = 0; i < previewCount; i++)
+            {
+                // Sanitize for display only: cloud providers happily store
+                // filenames containing control characters (newlines, tabs,
+                // NUL) and bidi-override codepoints like U+202E (RTL
+                // override), which could either break the preview layout
+                // (a blob name with '\n' becomes two visual rows, throwing
+                // off our 20-line cap) or visually reorder what the user
+                // sees so they approve a filename that is not what it
+                // appears ("benign.sav" vs "evil\u202Evas.exe"). The prune
+                // operation itself is cloud-only and non-recoverable, so
+                // the user must be shown the true filename.
+                tb.Inlines.Add(new Run($"  {SanitizeForPreview(scan.Orphans[i])}\n"));
+            }
+            if (scan.Orphans.Count > kPreviewCap)
+                tb.Inlines.Add(new Run(S.Format(
+                    "Apps_PruneConfirmMoreFormat", scan.Orphans.Count - kPreviewCap)));
+            tb.Inlines.Add(new Run("\n"));
+            tb.Inlines.Add(new Bold(new Run(S.Get("Apps_PruneConfirmWarning"))));
+
+            var confirmed = await Dialog.ConfirmDangerAsync(
+                S.Get("Apps_PruneConfirmTitle"), tb);
+            if (!confirmed) return;
+
+            // Second gate with countdown. Countdown length matches the
+            // existing DeleteApp flow (3s on first prune this session,
+            // then 0 for later invocations per the same convention).
+            var countdown = _hasPrunedThisSession ? 0 : 3;
+            var reallyConfirmed = await Dialog.ConfirmDangerCountdownAsync(
+                S.Get("Apps_PruneFinalConfirmTitle"),
+                S.Format("Apps_PruneFinalConfirmMessageFormat",
+                    scan.Orphans.Count, app.DisplayName),
+                countdown);
+            if (!reallyConfirmed) return;
+
+            btn.ToolTip = S.Get("Apps_PruneButtonPruning");
+
+            OrphanBlobService.PruneResult result;
+            try
+            {
+                result = await svc.PruneAsync(app.AccountId, app.AppId, scan.Orphans);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                await Dialog.ShowErrorAsync(
+                    S.Get("Apps_PruneFailedTitle"),
+                    S.Format("Apps_PruneFailedMessageFormat",
+                        scan.Orphans.Count, app.DisplayName, ex.Message));
+                return;
+            }
+
+            if (result.Failed == 0)
+            {
+                await Dialog.ShowInfoAsync(
+                    S.Get("Apps_PruneCompleteTitle"),
+                    S.Format("Apps_PruneCompleteMessageFormat",
+                        result.Deleted, app.DisplayName));
+            }
+            else if (result.Deleted > 0)
+            {
+                // Partial success: show counts + the first 20 failed
+                // filenames so the user knows exactly what remains.
+                var failedSample = string.Join("\n",
+                    result.FailedFilenames.Take(20).Select(f => $"  {f}"));
+                if (result.FailedFilenames.Count > 20)
+                    failedSample += $"\n  ...and {result.FailedFilenames.Count - 20} more";
+                await Dialog.ShowWarningAsync(
+                    S.Get("Apps_PrunePartialTitle"),
+                    S.Format("Apps_PrunePartialMessageFormat",
+                        result.Deleted,
+                        scan.Orphans.Count,
+                        app.DisplayName,
+                        result.Failed,
+                        failedSample,
+                        result.Error ?? "(no details)"));
+            }
+            else
+            {
+                await Dialog.ShowErrorAsync(
+                    S.Get("Apps_PruneFailedTitle"),
+                    S.Format("Apps_PruneFailedMessageFormat",
+                        scan.Orphans.Count, app.DisplayName, result.Error ?? "(no details)"));
+            }
+
+            // Gate the session-skip flag on verified progress. If prune
+            // deleted zero blobs (total-failure branch), the user hasn't
+            // actually performed the destructive action yet, so the next
+            // invocation should still pay the 3-second confirmation tax.
+            // Mirrors DeleteApp_Click's convention of setting
+            // _hasDeletedThisSession only on successful paths.
+            if (result.Deleted > 0)
+                _hasPrunedThisSession = true;
+            // Nothing in the AppInfo view-model changes as a result of a
+            // cloud-only prune (local file counts / CN / root tokens are
+            // unaffected), but refresh anyway for consistency with the
+            // delete flow and in case a future enhancement surfaces
+            // cloud-blob counts in the row.
+            await LoadAppsAsync();
+        }
+        catch (Exception ex)
+        {
+            await Dialog.ShowErrorAsync(S.Get("Apps_PruneFailedTitle"), $"Error: {ex.Message}");
+        }
+        finally
+        {
+            btn.IsEnabled = true;
+            btn.ToolTip = originalTooltip;
+        }
+    }
+
+    /// <summary>
+    /// Sanitize a cloud-returned filename for UI preview display: strips
+    /// control characters (which would break WrapPanel layout) and bidi-
+    /// override codepoints (which could visually reorder the filename so
+    /// the user approves something different from what it actually
+    /// deletes). The sanitized form is for display only &#8212; the prune
+    /// path uses the original filename from the scan result.
+    /// </summary>
+    private static string SanitizeForPreview(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return "";
+        // Fast path: the common case is ASCII-printable filenames.
+        bool needsSanitize = false;
+        foreach (var c in name)
+        {
+            if (char.IsControl(c) || c == '\u202A' || c == '\u202B' ||
+                c == '\u202C' || c == '\u202D' || c == '\u202E' ||
+                c == '\u2066' || c == '\u2067' || c == '\u2068' || c == '\u2069')
+            {
+                needsSanitize = true;
+                break;
+            }
+        }
+        if (!needsSanitize) return name;
+        var sb = new System.Text.StringBuilder(name.Length);
+        foreach (var c in name)
+        {
+            if (char.IsControl(c)) { sb.Append('?'); continue; }
+            // Explicit bidi overrides (LRE/RLE/PDF/LRO/RLO) and bidi
+            // isolates (LRI/RLI/FSI/PDI) can reorder surrounding text
+            // visually -- replace with a visible placeholder.
+            if (c == '\u202A' || c == '\u202B' || c == '\u202C' ||
+                c == '\u202D' || c == '\u202E' ||
+                c == '\u2066' || c == '\u2067' || c == '\u2068' || c == '\u2069')
+            {
+                sb.Append('?');
+                continue;
+            }
+            sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     private async void LoadBackups()

@@ -92,6 +92,16 @@
                                         <StackPanel Grid.Column="2"
                                                     Orientation="Horizontal"
                                                     VerticalAlignment="Center">
+                                            <Button Click="PruneOrphans_Click"
+                                                    ToolTip="{res:Loc Apps_PruneTooltip}"
+                                                    Padding="8,6"
+                                                    Margin="4,0,0,0"
+                                                    Background="Transparent"
+                                                    BorderBrush="Transparent">
+                                                <ui:SymbolIcon Symbol="Broom24"
+                                                               FontSize="18"
+                                                               Foreground="#F4A442" />
+                                            </Button>
                                             <Button Click="DeleteApp_Click"
                                                     ToolTip="{res:Loc Apps_DeleteTooltip}"
                                                     Padding="8,6"

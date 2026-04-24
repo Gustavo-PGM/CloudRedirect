@@ -816,6 +816,98 @@ Puedes restaurar desde el panel de Restaurar partidas.</value>
   <data name="Apps_DeleteFailedTitle" xml:space="preserve">
     <value>La eliminación falló</value>
   </data>
+
+  <!-- AppsPage orphan-blob prune -->
+  <data name="Apps_PruneTooltip" xml:space="preserve">
+    <value>Eliminar blobs huérfanos en la nube que ya no estén referenciados por esta aplicación</value>
+  </data>
+  <data name="Apps_PruneScanningTitle" xml:space="preserve">
+    <value>Analizando blobs en la nube...</value>
+  </data>
+  <data name="Apps_PruneButton" xml:space="preserve">
+    <value>Limpiar</value>
+  </data>
+  <data name="Apps_PruneButtonScanning" xml:space="preserve">
+    <value>Analizando...</value>
+  </data>
+  <data name="Apps_PruneButtonPruning" xml:space="preserve">
+    <value>Limpiando...</value>
+  </data>
+  <data name="Apps_PruneLocalOnlyTitle" xml:space="preserve">
+    <value>Sin proveedor en la nube</value>
+  </data>
+  <data name="Apps_PruneLocalOnlyMessage" xml:space="preserve">
+    <value>CloudRedirect está configurado para almacenamiento local únicamente. No hay ningún proveedor en la nube del que eliminar blobs huérfanos.</value>
+  </data>
+  <data name="Apps_PruneNoOrphansTitle" xml:space="preserve">
+    <value>Sin blobs huérfanos</value>
+  </data>
+  <data name="Apps_PruneNoOrphansMessageFormat" xml:space="preserve">
+    <value>Los {0} blob(s) en la nube de {1} están referenciados por el índice local de partidas. No hay nada que limpiar.</value>
+  </data>
+  <data name="Apps_PruneListingIncompleteTitle" xml:space="preserve">
+    <value>Listado de la nube incompleto</value>
+  </data>
+  <data name="Apps_PruneListingIncompleteMessage" xml:space="preserve">
+    <value>No se pudo obtener la lista completa de blobs en la nube. Limpiar con datos parciales podría eliminar partidas legítimas, así que la operación se ha cancelado. Inténtalo de nuevo cuando la conexión con el proveedor en la nube sea estable.
+
+Detalles: {0}</value>
+  </data>
+  <data name="Apps_PruneConfirmTitle" xml:space="preserve">
+    <value>Limpiar blobs huérfanos de la nube</value>
+  </data>
+  <data name="Apps_PruneConfirmHeaderFormat" xml:space="preserve">
+    <value>¿Eliminar {0} blob(s) huérfano(s) de la nube para {1} ({2})?
+
+</value>
+  </data>
+  <data name="Apps_PruneConfirmExplanation" xml:space="preserve">
+    <value>Estos blobs existen en tu proveedor en la nube ({0}) pero NO están referenciados por el índice local de partidas (file_tokens.dat). Quedaron de una sesión anterior, un borrado fallido o una intervención manual, y nunca se descargarán ni se limpiarán por la vía de sincronización normal.
+
+</value>
+  </data>
+  <data name="Apps_PruneConfirmPreviewHeader" xml:space="preserve">
+    <value>Archivos a eliminar:
+</value>
+  </data>
+  <data name="Apps_PruneConfirmMoreFormat" xml:space="preserve">
+    <value>  ...y {0} más
+</value>
+  </data>
+  <data name="Apps_PruneConfirmWarning" xml:space="preserve">
+    <value>Esta operación no se puede deshacer. Las partidas locales NO se verán afectadas.</value>
+  </data>
+  <data name="Apps_PruneFinalConfirmTitle" xml:space="preserve">
+    <value>Confirmar limpieza</value>
+  </data>
+  <data name="Apps_PruneFinalConfirmMessageFormat" xml:space="preserve">
+    <value>¿Eliminar permanentemente {0} blob(s) huérfano(s) de la nube para {1}? Esto no se puede deshacer.</value>
+  </data>
+  <data name="Apps_PruneCompleteTitle" xml:space="preserve">
+    <value>Limpieza completada</value>
+  </data>
+  <data name="Apps_PruneCompleteMessageFormat" xml:space="preserve">
+    <value>Se eliminaron {0} blob(s) huérfano(s) de la nube para {1}.</value>
+  </data>
+  <data name="Apps_PrunePartialTitle" xml:space="preserve">
+    <value>Limpieza parcialmente completada</value>
+  </data>
+  <data name="Apps_PrunePartialMessageFormat" xml:space="preserve">
+    <value>Se eliminaron {0} de {1} blob(s) huérfano(s) de la nube para {2}. No se pudieron eliminar {3} archivo(s):
+
+{4}
+
+Detalles: {5}</value>
+  </data>
+  <data name="Apps_PruneFailedTitle" xml:space="preserve">
+    <value>La limpieza falló</value>
+  </data>
+  <data name="Apps_PruneFailedMessageFormat" xml:space="preserve">
+    <value>No se pudo eliminar ninguno de los {0} blob(s) huérfano(s) para {1}.
+
+Detalles: {2}</value>
+  </data>
+
   <data name="Apps_SteamNotFound" xml:space="preserve">
     <value>Steam no encontrado</value>
   </data>
