@@ -63,10 +63,18 @@ static bool TryInvalidateTokenCachesForGeneration(uint32_t accountId, uint32_t a
                                                   uint64_t generation,
                                                   uint64_t& nextGeneration);
 
+// Mutex map for AutoCloud state. Each guards a distinct piece of data, and
+// multi-mutex sequences below take their inner locks in sequential scopes,
+// never nested, so the single nested pair is:
+//   g_autoCloudImportMutex  ->  <any inner token-cache mutex>
+// Acquire order is stable across all call sites (see InvalidateTokenCaches
+// and TryInvalidateTokenCachesForGeneration): token cache, root tokens,
+// file tokens, batch tokens, bootstrap set. The generation counter in
+// g_autoCloudCanonicalTokenGeneration is the actual race guard for the
+// import -> publish handoff; no dedicated publish mutex is needed.
 static std::mutex g_autoCloudTokenCacheMutex;
 static std::unordered_map<uint64_t, std::unordered_map<std::string, std::string>> g_autoCloudCanonicalTokenCache;
 static std::unordered_map<uint64_t, uint64_t> g_autoCloudCanonicalTokenGeneration;
-static std::mutex g_autoCloudPublishMutex;
 static std::mutex g_autoCloudImportMutex;
 static std::mutex g_autoCloudBootstrapMutex;
 static std::condition_variable g_autoCloudBootstrapCV;
@@ -314,12 +322,9 @@ static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
     // generation check after the drains detects any concurrent
     // invalidation that may have raced in during the unlocked window.
     std::unique_lock<std::mutex> importLock(g_autoCloudImportMutex);
-    {
-        std::lock_guard<std::mutex> publishLock(g_autoCloudPublishMutex);
-        if (!TryInvalidateTokenCachesForGeneration(accountId, appId, cacheGeneration, publishGeneration)) {
-            finish(false, cacheGeneration);
-            return;
-        }
+    if (!TryInvalidateTokenCachesForGeneration(accountId, appId, cacheGeneration, publishGeneration)) {
+        finish(false, cacheGeneration);
+        return;
     }
     {
         for (auto& pending : pendingImports) {
@@ -384,15 +389,14 @@ static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
     CloudStorage::CommitCNWithRetry(accountId, appId, cn);
     // Re-check generation before publishing canonical tokens; any concurrent
     // InvalidateTokenCaches during the unlocked drain window bumps the
-    // generation and invalidates our cached candidates.
+    // generation and invalidates our cached candidates. The generation
+    // compare-and-swap inside CacheAutoCloudCanonicalTokens is the actual
+    // race guard; no additional publish mutex is needed.
     if (GetAutoCloudCanonicalTokenGeneration(accountId, appId) != publishGeneration) {
         finish(false, publishGeneration);
         return;
     }
-    {
-        std::lock_guard<std::mutex> publishLock(g_autoCloudPublishMutex);
-        CacheAutoCloudCanonicalTokens(accountId, appId, candidates, publishGeneration);
-    }
+    CacheAutoCloudCanonicalTokens(accountId, appId, candidates, publishGeneration);
     LOG("[AutoCloudImport] Imported %zu AutoCloud file(s), updatedTokens=%u for app %u, CN=%llu",
         imported, tokenMetadataChanged ? 1 : 0, appId, cn);
     finish(true, publishGeneration);
@@ -691,8 +695,11 @@ static void MarkFileTokensDirty(uint32_t accountId, uint32_t appId) {
 }
 
 static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId) {
+    // Hold the import mutex so this cannot race with the import critical
+    // region in BootstrapAutoCloudFilesWorker. Inner token-cache mutexes
+    // are acquired in sequential scopes, matching the order documented at
+    // the mutex-definitions block.
     std::lock_guard<std::mutex> importLock(g_autoCloudImportMutex);
-    std::lock_guard<std::mutex> publishLock(g_autoCloudPublishMutex);
     uint64_t key = MakeAppAccountKey(accountId, appId);
     {
         std::lock_guard<std::mutex> lock(g_rootTokenMutex);
