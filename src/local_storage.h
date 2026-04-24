@@ -91,12 +91,25 @@ std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, 
 // Tombstones are cleared on successful cloud Remove (worker) or when the user
 // re-creates the file via StoreBlob. The latter also covers user-initiated
 // writes that resurface the same filename after a stuck Delete.
+//
+// The CN alone does not safely distinguish "another machine wrote after my
+// delete" (tombstone should clear) from "my own later batches advanced cloud
+// CN while my Delete was poisoned in flight" (tombstone must stay). We also
+// stamp the tombstone with a wall-clock creation time and let the cloud-side
+// sync check the blob's modified time against it — the blob mtime only
+// advances when someone actually wrote to the file, which is the real signal.
+// Legacy tombstones with createTimeUnix=0 fall back to CN-only comparison.
+struct TombstoneInfo {
+    uint64_t cn = 0;               // local CN at MarkDeleted time
+    uint64_t createTimeUnix = 0;   // wall-clock unix seconds; 0 means "legacy/unknown"
+};
+
 void MarkDeleted(uint32_t accountId, uint32_t appId, const std::string& filename,
                  uint64_t cnAtDelete);
 void ClearDeleted(uint32_t accountId, uint32_t appId, const std::string& filename);
 bool IsDeleted(uint32_t accountId, uint32_t appId, const std::string& filename);
-std::unordered_map<std::string, uint64_t> LoadDeleted(uint32_t accountId,
-                                                      uint32_t appId);
+std::unordered_map<std::string, TombstoneInfo> LoadDeleted(uint32_t accountId,
+                                                           uint32_t appId);
 
 #ifdef CLOUDREDIRECT_TESTING
 bool TestResolveAutoCloudRootOverride(const std::string& root, const std::string& path,

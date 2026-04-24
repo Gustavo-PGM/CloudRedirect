@@ -1272,12 +1272,20 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     // original queued Delete finally succeeds or the user re-saves the
     // same filename (StoreBlob clears it).
     //
-    // Each tombstone carries the local CN it was stamped with. If the
-    // provider's CN is strictly greater, a different machine modified this
-    // file after our local delete, and Steam's "newer CN wins" semantics
-    // override the tombstone: we clear it and download normally. Otherwise
-    // the tombstone stands.
-    std::unordered_map<std::string, uint64_t> deletedTombstones =
+    // Each tombstone carries the local CN it was stamped with AND the
+    // wall-clock time of the delete. CN alone can't tell "cross-machine
+    // wrote this file after my delete" (should override) from "my own
+    // later batches advanced cloud CN while my Delete was poisoned"
+    // (must not override). The second signal closes that gap: the cloud
+    // blob's mtime only advances when SOMETHING actually wrote the file,
+    // so requiring `blob.mtime > tombstone.createTime` blocks the
+    // poisoned-delete same-machine resurrection path while still letting
+    // a genuine cross-machine write win.
+    //
+    // Legacy tombstones with createTime=0 fall back to CN-only behavior
+    // (identical to pre-upgrade semantics). Providers that don't populate
+    // blob.modifiedTime likewise fall back to CN-only.
+    std::unordered_map<std::string, LocalStorage::TombstoneInfo> deletedTombstones =
         LocalStorage::LoadDeleted(accountId, appId);
 
     {
@@ -1310,27 +1318,50 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
 
             // Honor local delete tombstones — don't resurrect files the user
             // deleted locally just because a not-yet-processed cloud Delete
-            // hasn't flushed through the provider yet. Exception: if the
-            // cloud CN is strictly newer than the tombstone CN, a different
-            // machine wrote to this file after our delete and cloud wins.
+            // hasn't flushed through the provider yet. Override requires
+            // evidence of a real cross-machine write: cloud CN strictly
+            // newer AND the blob's mtime newer than the tombstone's creation
+            // time (with a 5-minute skew grace to forgive cross-machine
+            // clock drift). If either signal is missing (legacy tombstone
+            // with createTimeUnix=0, or provider that doesn't populate
+            // modifiedTime), we fall back to CN-only — same as pre-upgrade.
             auto tombIt = deletedTombstones.find(filename);
             if (tombIt != deletedTombstones.end()) {
-                if (cloudCNFound && cloudCN > tombIt->second) {
-                    LOG("[CloudStorage] SyncFromCloud app %u: tombstone for %s "
-                        "overridden by newer cloud CN (%llu > %llu) — clearing and downloading",
+                constexpr uint64_t kTombstoneSkewSec = 300;
+                bool cnAdvanced = cloudCNFound && cloudCN > tombIt->second.cn;
+                bool haveBlobTime = tombIt->second.createTimeUnix > 0 && fi.modifiedTime > 0;
+                bool blobNewerThanTombstone = haveBlobTime &&
+                    fi.modifiedTime > tombIt->second.createTimeUnix + kTombstoneSkewSec;
+                bool overrideTomb = false;
+                if (cnAdvanced) {
+                    if (haveBlobTime) {
+                        overrideTomb = blobNewerThanTombstone;
+                    } else {
+                        // Legacy tombstone or provider without mtime — CN-only fallback.
+                        overrideTomb = true;
+                    }
+                }
+                if (overrideTomb) {
+                    LOG("[CloudStorage] SyncFromCloud app %u: tombstone for %s overridden "
+                        "(cloudCn=%llu > tombCn=%llu, blobMtime=%llu > tombCreate=%llu) — clearing and downloading",
                         appId, filename.c_str(),
                         (unsigned long long)cloudCN,
-                        (unsigned long long)tombIt->second);
+                        (unsigned long long)tombIt->second.cn,
+                        (unsigned long long)fi.modifiedTime,
+                        (unsigned long long)tombIt->second.createTimeUnix);
                     LocalStorage::ClearDeleted(accountId, appId, filename);
                     deletedTombstones.erase(tombIt);
                     // fall through to normal download path
                 } else {
                     skipped++;
                     LOG("[CloudStorage] SyncFromCloud app %u: skipping tombstoned blob %s "
-                        "(tombstoneCn=%llu, cloudCn=%llu)",
+                        "(tombCn=%llu tombCreate=%llu cloudCn=%llu blobMtime=%llu cnAdvanced=%d blobNewer=%d)",
                         appId, filename.c_str(),
-                        (unsigned long long)tombIt->second,
-                        (unsigned long long)cloudCN);
+                        (unsigned long long)tombIt->second.cn,
+                        (unsigned long long)tombIt->second.createTimeUnix,
+                        (unsigned long long)cloudCN,
+                        (unsigned long long)fi.modifiedTime,
+                        cnAdvanced ? 1 : 0, blobNewerThanTombstone ? 1 : 0);
                     continue;
                 }
             }

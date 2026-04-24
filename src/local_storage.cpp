@@ -8,6 +8,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstring>
+#include <ctime>
 #include <shared_mutex>
 #include <sstream>
 #include <stdexcept>
@@ -1908,25 +1909,48 @@ std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, 
 // contention between a slow delete and a fresh save of the same filename on
 // another machine.
 //
-// The CN is the local change number at the moment of MarkDeleted. SyncFromCloud
-// compares it against the cloud CN to decide whether a tombstoned entry should
-// still suppress download: if cloud's CN is strictly newer than the tombstone
-// CN, a different machine wrote after our delete, and Steam's "newer wins"
-// semantics prevail — the tombstone is bypassed.
+// The CN is the local change number at the moment of MarkDeleted; createTimeUnix
+// is the wall-clock time of the same MarkDeleted. SyncFromCloud uses BOTH
+// signals to decide whether a tombstoned entry should still suppress download:
+// cloud CN must exceed the tombstone CN (otherwise the cloud state is no
+// newer than our local state at delete time), AND the cloud blob's mtime must
+// exceed the tombstone creation time plus a clock-skew grace (otherwise we
+// saw cloud CN advance but nobody actually wrote this file — it's stale
+// content from before our delete that the cloud provider couldn't purge).
 //
-// Legacy lines without a tab are loaded with cn=0 (suppressing any nonzero
-// cloud CN never arises in practice since CN starts at 2 — so a cn=0 tombstone
-// behaves identically to the pre-CN behavior of "always suppress").
+// File format evolved:
+//   v1 (legacy, pre-tombstone-CN): "filename\n"                  → cn=0, createTime=0
+//   v2 (CN only):                  "filename\tcn\n"              → createTime=0
+//   v3 (CN + createTime):          "filename\tcn\tcreateTime\n"  current
+//
+// Legacy rows (createTime=0) fall back to CN-only comparison at sync time,
+// preserving pre-upgrade behavior. Upgrade-on-read rewrites the file verbatim
+// but does NOT synthesize a createTime for legacy entries — we genuinely
+// don't know when those tombstones were set.
 
-static std::unordered_map<std::string, uint64_t> LoadDeletedLocked(uint32_t accountId,
-                                                                   uint32_t appId,
-                                                                   bool* outNeedsRewrite = nullptr) {
+static std::unordered_map<std::string, TombstoneInfo> LoadDeletedLocked(uint32_t accountId,
+                                                                        uint32_t appId,
+                                                                        bool* outNeedsRewrite = nullptr) {
     // Caller holds g_mutex (shared or exclusive).
-    std::unordered_map<std::string, uint64_t> deleted;
+    std::unordered_map<std::string, TombstoneInfo> deleted;
     if (outNeedsRewrite) *outNeedsRewrite = false;
     std::string path = GetAppPathInternal(accountId, appId) + "deleted.dat";
     std::ifstream f(path);
     if (!f) return deleted;
+
+    auto parseUnsigned = [](const std::string& s, uint64_t& out) -> bool {
+        if (s.empty()) return false;
+        for (char c : s) {
+            if (c < '0' || c > '9') return false;
+        }
+        try {
+            out = static_cast<uint64_t>(std::stoull(s));
+            return true;
+        } catch (...) {
+            return false;
+        }
+    };
+
     std::string line;
     while (std::getline(f, line)) {
         std::string original = line;
@@ -1934,40 +1958,57 @@ static std::unordered_map<std::string, uint64_t> LoadDeletedLocked(uint32_t acco
             line.pop_back();
         if (line != original && outNeedsRewrite) *outNeedsRewrite = true;
         if (line.empty()) continue;
-        auto tab = line.find('\t');
+
         std::string fname;
-        uint64_t cn = 0;
-        if (tab == std::string::npos) {
+        TombstoneInfo info;
+        auto firstTab = line.find('\t');
+        if (firstTab == std::string::npos) {
+            // v1 (filename only)
             fname = line;
-            if (outNeedsRewrite) *outNeedsRewrite = true; // legacy row, upgrade on rewrite
+            if (outNeedsRewrite) *outNeedsRewrite = true;
         } else {
-            fname = line.substr(0, tab);
-            std::string cnStr = line.substr(tab + 1);
-            // Parse unsigned-decimal only; reject sign, whitespace, overflow.
-            bool ok = !cnStr.empty();
-            for (char c : cnStr) {
-                if (c < '0' || c > '9') { ok = false; break; }
+            fname = line.substr(0, firstTab);
+            std::string rest = line.substr(firstTab + 1);
+            auto secondTab = rest.find('\t');
+            std::string cnStr = (secondTab == std::string::npos) ? rest : rest.substr(0, secondTab);
+            if (!parseUnsigned(cnStr, info.cn)) {
+                info.cn = 0;
+                if (outNeedsRewrite) *outNeedsRewrite = true;
             }
-            if (ok) {
-                try {
-                    unsigned long long v = std::stoull(cnStr);
-                    cn = static_cast<uint64_t>(v);
-                } catch (...) { ok = false; }
+            if (secondTab == std::string::npos) {
+                // v2 (filename\tcn) — legacy, createTime stays 0
+                if (outNeedsRewrite) *outNeedsRewrite = true;
+            } else {
+                std::string ctStr = rest.substr(secondTab + 1);
+                if (!parseUnsigned(ctStr, info.createTimeUnix)) {
+                    info.createTimeUnix = 0;
+                    if (outNeedsRewrite) *outNeedsRewrite = true;
+                }
             }
-            if (!ok && outNeedsRewrite) *outNeedsRewrite = true;
         }
         if (fname.empty()) continue;
-        // Keep the highest CN for a filename if duplicates exist on disk.
+
+        // Keep the richest-looking entry if duplicates exist on disk. Prefer
+        // the one with a higher CN; tie-break on higher createTime; a
+        // non-zero createTime beats zero at the same CN.
         auto it = deleted.find(fname);
-        if (it == deleted.end() || it->second < cn) {
-            deleted[fname] = cn;
+        if (it == deleted.end()) {
+            deleted[fname] = info;
+        } else {
+            TombstoneInfo& kept = it->second;
+            bool replace = false;
+            if (info.cn > kept.cn) replace = true;
+            else if (info.cn == kept.cn) {
+                if (info.createTimeUnix > kept.createTimeUnix) replace = true;
+            }
+            if (replace) kept = info;
         }
     }
     return deleted;
 }
 
 static bool SaveDeletedLocked(uint32_t accountId, uint32_t appId,
-                              const std::unordered_map<std::string, uint64_t>& deleted) {
+                              const std::unordered_map<std::string, TombstoneInfo>& deleted) {
     // Caller holds g_mutex exclusively. Returns true on successful persistence.
     std::string appDir = GetAppPathInternal(accountId, appId);
     std::error_code mkEc;
@@ -1987,7 +2028,9 @@ static bool SaveDeletedLocked(uint32_t accountId, uint32_t appId,
     for (auto& kv : deleted) {
         content += kv.first;
         content += '\t';
-        content += std::to_string(kv.second);
+        content += std::to_string(kv.second.cn);
+        content += '\t';
+        content += std::to_string(kv.second.createTimeUnix);
         content += '\n';
     }
     if (!FileUtil::AtomicWriteText(path, content)) {
@@ -1998,9 +2041,9 @@ static bool SaveDeletedLocked(uint32_t accountId, uint32_t appId,
     return true;
 }
 
-std::unordered_map<std::string, uint64_t> LoadDeleted(uint32_t accountId, uint32_t appId) {
+std::unordered_map<std::string, TombstoneInfo> LoadDeleted(uint32_t accountId, uint32_t appId) {
     bool needsRewrite = false;
-    std::unordered_map<std::string, uint64_t> deleted;
+    std::unordered_map<std::string, TombstoneInfo> deleted;
     {
         std::shared_lock<std::shared_mutex> lock(g_mutex);
         deleted = LoadDeletedLocked(accountId, appId, &needsRewrite);
@@ -2030,26 +2073,36 @@ std::unordered_map<std::string, uint64_t> LoadDeleted(uint32_t accountId, uint32
 void MarkDeleted(uint32_t accountId, uint32_t appId, const std::string& filename,
                  uint64_t cnAtDelete) {
     if (filename.empty()) return;
+    // Record wall-clock time once, OUTSIDE the lock. std::time() is cheap
+    // and thread-safe; the exact microsecond doesn't matter because the
+    // sync-side comparison uses a 5-minute clock-skew grace anyway.
+    uint64_t now = static_cast<uint64_t>(std::time(nullptr));
     std::lock_guard<std::shared_mutex> lock(g_mutex);
     auto deleted = LoadDeletedLocked(accountId, appId, nullptr);
     auto it = deleted.find(filename);
     bool inserted = (it == deleted.end());
-    if (!inserted && it->second >= cnAtDelete) {
-        // Already tombstoned at equal-or-higher CN; no-op avoids redundant I/O.
+    // An existing tombstone at equal-or-higher CN is a no-op to avoid redundant
+    // I/O, UNLESS the existing entry has a zero createTime (legacy/v2) and we
+    // can now supply a real one. Upgrading in place gives SyncFromCloud the
+    // blob-mtime gate on the next sync rather than making the user wait for
+    // the next delete of the same file.
+    if (!inserted && it->second.cn >= cnAtDelete && it->second.createTimeUnix > 0) {
         return;
     }
-    deleted[filename] = cnAtDelete;
+    deleted[filename] = TombstoneInfo{ cnAtDelete, now };
     if (!SaveDeletedLocked(accountId, appId, deleted)) {
         // Persistence failed — the in-memory snapshot is now ahead of disk.
         // The next LoadDeletedLocked will reflect only what's on disk, so
         // functionally we've rolled back. Caller is already informed via LOG
         // from SaveDeletedLocked; just log the site context.
-        LOG("MarkDeleted: app %u tombstone for %s (cn=%llu) NOT persisted",
-            appId, filename.c_str(), (unsigned long long)cnAtDelete);
+        LOG("MarkDeleted: app %u tombstone for %s (cn=%llu createTime=%llu) NOT persisted",
+            appId, filename.c_str(),
+            (unsigned long long)cnAtDelete, (unsigned long long)now);
         return;
     }
-    LOG("MarkDeleted: app %u tombstoned %s at cn=%llu (%zu total)",
-        appId, filename.c_str(), (unsigned long long)cnAtDelete, deleted.size());
+    LOG("MarkDeleted: app %u tombstoned %s at cn=%llu createTime=%llu (%zu total)",
+        appId, filename.c_str(),
+        (unsigned long long)cnAtDelete, (unsigned long long)now, deleted.size());
 }
 
 void ClearDeleted(uint32_t accountId, uint32_t appId, const std::string& filename) {
