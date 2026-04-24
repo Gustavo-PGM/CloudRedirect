@@ -82,6 +82,14 @@ static std::unordered_set<uint64_t> g_autoCloudBootstrapAttemptedApps;
 static std::unordered_set<uint64_t> g_autoCloudBootstrapActiveApps;
 static std::vector<std::future<void>> g_autoCloudBootstrapFutures;
 static bool g_autoCloudBootstrapShuttingDown = false;
+// Number of BootstrapAutoCloudFiles frames currently between TryBegin and
+// return. Incremented by the async spawn path once the frame has taken
+// ownership of an active-set entry, decremented by RAII at return. Exists
+// because the worker's Finish clears `active` the moment it aborts — which
+// can happen BEFORE the spawner's frame has finished touching the mutex/
+// futures vector. Shutdown must wait on this in addition to active.empty()
+// so ShutdownRpcHandlers cannot return while a spawner is still live.
+static int g_autoCloudBootstrapOrchestratorCount = 0;
 
 static void CacheAutoCloudCanonicalTokens(uint32_t accountId, uint32_t appId,
                                           const std::vector<LocalStorage::FileEntry>& candidates,
@@ -489,19 +497,76 @@ static void BootstrapAutoCloudFiles(uint32_t accountId, uint32_t appId, bool wai
         BootstrapAutoCloudFilesWorker(accountId, appId, cacheGeneration);
         return;
     }
-    std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
-    if (g_autoCloudBootstrapShuttingDown) {
-        g_autoCloudBootstrapActiveApps.erase(MakeAppAccountKey(accountId, appId));
-        g_autoCloudBootstrapCV.notify_all();
+
+    // Fast-path shutdown check so we don't pay thread-creation cost right
+    // before the worker would self-abort anyway. This is an optimization,
+    // not a correctness fence — shutdown can still be signaled between
+    // here and the spawn below, in which case the worker aborts at its
+    // first IsAutoCloudBootstrapShuttingDown() probe.
+    if (IsAutoCloudBootstrapShuttingDown()) {
+        FinishAutoCloudBootstrap(accountId, appId, /*markAttempted=*/false, cacheGeneration);
         return;
     }
+
+    // Claim an orchestrator slot BEFORE spawning. This pins
+    // ShutdownRpcHandlers' CV predicate false for the lifetime of this
+    // frame, so shutdown cannot return while we still have mutex/vector
+    // operations pending — eliminating the window where the worker's
+    // Finish (which clears `active`) races against our own post-spawn
+    // push_back. RAII decrement on every exit path below.
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+        ++g_autoCloudBootstrapOrchestratorCount;
+    }
+    struct OrchestratorGuard {
+        ~OrchestratorGuard() {
+            std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+            --g_autoCloudBootstrapOrchestratorCount;
+            g_autoCloudBootstrapCV.notify_all();
+        }
+    } orchestratorGuard;
+
+    // Spawn OUTSIDE g_autoCloudBootstrapMutex. std::async(launch::async)
+    // creates a thread, which on Windows can block on the loader lock or
+    // allocator under memory pressure for hundreds of ms. Holding the
+    // bootstrap mutex during that window stalls:
+    //   - every running worker polling IsAutoCloudBootstrapShuttingDown
+    //     at its abort points,
+    //   - TryBeginAutoCloudBootstrap for other apps (so no concurrent
+    //     bootstraps get queued),
+    //   - ShutdownRpcHandlers (which needs the same mutex to flip the
+    //     shutdown flag and drain futures).
+    std::future<void> future;
     try {
-        g_autoCloudBootstrapFutures.push_back(std::async(std::launch::async, [accountId, appId, cacheGeneration]() {
+        future = std::async(std::launch::async, [accountId, appId, cacheGeneration]() {
             BootstrapAutoCloudFilesWorker(accountId, appId, cacheGeneration);
-        }));
+        });
     } catch (...) {
-        g_autoCloudBootstrapActiveApps.erase(MakeAppAccountKey(accountId, appId));
-        g_autoCloudBootstrapCV.notify_all();
+        // Thread creation failed (resource exhaustion / system limits).
+        // Release the active slot so a subsequent call can retry. Don't
+        // mark attempted — we never ran the scan, and marking would
+        // permanently suppress retries for this session.
+        LOG("[AutoCloudImport] Failed to spawn bootstrap worker for app %u", appId);
+        FinishAutoCloudBootstrap(accountId, appId, /*markAttempted=*/false, cacheGeneration);
+        return;
+    }
+
+    // Stash the future so ShutdownRpcHandlers can join it. Re-check the
+    // shutdown flag under the mutex: if shutdown began during the spawn,
+    // our future isn't in the drained batch, so we must join it locally
+    // before returning. The worker self-aborts at its first abort point
+    // so this wait is short-bounded. The orchestrator counter above
+    // keeps ShutdownRpcHandlers blocked until we return.
+    {
+        std::unique_lock<std::mutex> lock(g_autoCloudBootstrapMutex);
+        if (!g_autoCloudBootstrapShuttingDown) {
+            g_autoCloudBootstrapFutures.push_back(std::move(future));
+            return;
+        }
+    }
+    try {
+        future.wait();
+    } catch (...) {
     }
 }
 
@@ -517,7 +582,8 @@ void ShutdownRpcHandlers() {
     }
     std::unique_lock<std::mutex> lock(g_autoCloudBootstrapMutex);
     g_autoCloudBootstrapCV.wait(lock, [] {
-        return g_autoCloudBootstrapActiveApps.empty();
+        return g_autoCloudBootstrapActiveApps.empty() &&
+               g_autoCloudBootstrapOrchestratorCount == 0;
     });
 }
 
