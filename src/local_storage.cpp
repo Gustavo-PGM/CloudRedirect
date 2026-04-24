@@ -19,6 +19,19 @@ namespace LocalStorage {
 
 static std::string g_baseRoot;
 static std::unordered_map<uint64_t, uint64_t> g_changeNumbers;
+// LOCK ORDER: this is a SINK in the AutoCloud DAG — LocalStorage never
+// calls back into CloudStorage, RpcHandlers, or any other subsystem
+// while holding this mutex. Public entry points either take it directly
+// (exclusive for writes, shared for reads) or, for the hashing/stat
+// phases of GetFileList/GetFileEntry, explicitly drop it before walking
+// the filesystem so concurrent writers aren't starved.
+//
+// std::shared_mutex has no upgrade path: a caller holding a shared_lock
+// CANNOT atomically promote to an exclusive lock without risking
+// deadlock. Functions that need a shared-read followed by an exclusive
+// write (LoadRootTokens / LoadDeleted legacy rewrites) must drop the
+// shared lock, re-acquire exclusive, and re-read state under the new
+// lock — never pass stale snapshots into the writer path.
 static std::shared_mutex g_mutex;
 
 // Convert a file_time_type to Unix seconds using a single clock sample pair.

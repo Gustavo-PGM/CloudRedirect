@@ -104,6 +104,15 @@ struct WorkItem {
 };
 
 static std::list<WorkItem>               g_workQueue;
+// LOCK ORDER: this is a SINK in the AutoCloud DAG — never acquired while
+// any CloudRedirect mutex is already held (except transitively from
+// g_autoCloudImportMutex via EnqueueWork from the import critical region).
+// INVARIANT: never held across a provider call (network I/O) or across
+// any LocalStorage::* call. The worker drops this mutex between dequeue
+// and the provider call, and between the provider call and bookkeeping.
+// Collapsing those two disjoint scopes would serialize the worker pool
+// on network latency. LocalStorage::ClearDeleted in the worker's Delete
+// path runs in the unlocked window between the two scopes.
 static std::mutex                        g_queueMutex;
 static std::condition_variable           g_queueCV;
 // O(1) dedup index: maps cloudPath -> iterator into g_workQueue for Upload items.

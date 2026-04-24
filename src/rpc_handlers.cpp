@@ -63,15 +63,53 @@ static bool TryInvalidateTokenCachesForGeneration(uint32_t accountId, uint32_t a
                                                   uint64_t generation,
                                                   uint64_t& nextGeneration);
 
-// Mutex map for AutoCloud state. Each guards a distinct piece of data, and
-// multi-mutex sequences below take their inner locks in sequential scopes,
-// never nested, so the single nested pair is:
-//   g_autoCloudImportMutex  ->  <any inner token-cache mutex>
-// Acquire order is stable across all call sites (see InvalidateTokenCaches
-// and TryInvalidateTokenCachesForGeneration): token cache, root tokens,
-// file tokens, batch tokens, bootstrap set. The generation counter in
-// g_autoCloudCanonicalTokenGeneration is the actual race guard for the
-// import -> publish handoff; no dedicated publish mutex is needed.
+// ---------------------------------------------------------------------------
+// LOCK ORDER (AutoCloud subsystem)
+// ---------------------------------------------------------------------------
+// All multi-mutex call chains follow this partial order. Adding any edge that
+// contradicts the order below risks deadlock; add new mutexes as leaves
+// unless you have a reason to widen the DAG.
+//
+//   g_autoCloudImportMutex  (top of the AutoCloud half of the tree)
+//       |
+//       +-> g_autoCloudTokenCacheMutex    \
+//       +-> g_rootTokenMutex              |  all inner locks released
+//       +-> g_fileTokensMutex             |  before the next is taken
+//       +-> g_batchCanonicalTokensMutex   |  (sequential, never nested
+//       +-> g_autoCloudBootstrapMutex     /   pairwise)
+//       +-> LocalStorage::g_mutex        (via StoreBlob / SetFileTimestamp
+//       |                                 / SaveRootTokens / SaveFileTokens
+//       |                                 in BootstrapAutoCloudFilesWorker's
+//       |                                 critical region)
+//       +-> CloudStorage::g_queueMutex   (via EnqueueWork transitively from
+//                                         the same path)
+//
+//   g_fileTokensDirtyMutex   (held alone; never on the stack with anything)
+//
+//   Sinks (never held as an outer lock):
+//       CloudStorage::g_queueMutex, LocalStorage::g_mutex
+//
+// Generation counters in g_autoCloudCanonicalTokenGeneration act as the
+// race guard for import -> publish handoff; no dedicated publish mutex is
+// needed.
+//
+// INVARIANTS enforced by deliberate "release before I/O" patterns:
+//   - BootstrapAutoCloudFilesWorker releases g_autoCloudImportMutex before
+//     CommitCNWithRetry (network). Holding it across a slow provider would
+//     serialize every RPC-driven InvalidateTokenCaches against the publish.
+//   - BootstrapAutoCloudFiles spawns std::async OUTSIDE
+//     g_autoCloudBootstrapMutex (see orchestrator counter). Thread creation
+//     on Windows can take hundreds of ms.
+//   - TryCaptureRootToken / PersistFileTokens snapshot under their mutex,
+//     release, then perform disk I/O + cloud enqueue. HandleGetChangelist's
+//     file-token load follows the same pattern (snapshot, release, load,
+//     re-acquire, double-check).
+//   - WorkerLoop performs network I/O BETWEEN two disjoint g_queueMutex
+//     scopes. g_queueMutex never wraps a provider call.
+//   - g_queueMutex never outer to LocalStorage::g_mutex. The worker's
+//     LocalStorage::ClearDeleted call runs in the unlocked window between
+//     the two queue-mutex scopes.
+// ---------------------------------------------------------------------------
 static std::mutex g_autoCloudTokenCacheMutex;
 static std::unordered_map<uint64_t, std::unordered_map<std::string, std::string>> g_autoCloudCanonicalTokenCache;
 static std::unordered_map<uint64_t, uint64_t> g_autoCloudCanonicalTokenGeneration;
@@ -632,6 +670,8 @@ static void ParsePlaytimeBlob(const std::string& blob, uint64_t& lastPlayed,
 // Used to know which tokens exist for an app; the changelist only presents each
 // file under the specific token it was uploaded with (tracked in g_fileTokens).
 static std::unordered_map<uint64_t, std::unordered_set<std::string>> g_appRootTokens;
+// INVARIANT: never held across CloudStorage::* / LocalStorage::* calls.
+// Snapshot the set under the lock, release, then perform I/O.
 static std::mutex g_rootTokenMutex;
 
 // per-app file-to-token mapping: which root token each file was uploaded under.
@@ -640,18 +680,40 @@ static std::mutex g_rootTokenMutex;
 // caused Steam's rootoverrides to see the cross-platform copy as stale and
 // issue spurious deletes (killing the only actual blob).
 static std::unordered_map<uint64_t, std::unordered_map<std::string, std::string>> g_fileTokens;
+// INVARIANT: never held across CloudStorage::* / LocalStorage::* calls.
+// Snapshot the map under the lock, release, then perform I/O.
+//
+// HandleGetChangelist's double-checked disk load is the only site that
+// releases and re-acquires this mutex around a CloudStorage call. That
+// site MUST NOT cache the disk-loaded map into g_fileTokens if the
+// AutoCloud bootstrap worker is live for the same (accountId, appId)
+// during the load window: the worker invalidates g_fileTokens early and
+// only saves a fresh file_tokens.dat at the very end of its import, so
+// any disk read during that window returns pre-invalidation contents.
+// Caching that would silently revert the invalidation, causing Steam
+// rootoverrides to treat cross-platform copies as stale and DELETE the
+// only real blob. Use IsAutoCloudBootstrapActive (not a generation
+// counter — those bump at invalidation time, not at SaveFileTokens
+// time, and so cannot detect the wide worker window).
 static std::mutex g_fileTokensMutex;
 
 // Track which apps had file-token changes during the current batch.
 // PersistFileTokens is deferred to HandleCompleteBatch instead of being
 // called per-file, eliminating redundant file_tokens.dat cloud uploads.
 static std::unordered_set<uint64_t> g_fileTokensDirtyApps;
+// INVARIANT: held alone; never acquired while holding any other mutex,
+// and never held across any function call that could itself take a
+// mutex. Only used for trivial set insert / swap-and-clear.
 static std::mutex g_fileTokensDirtyMutex;
 
 // Per-batch AutoCloud canonical root map. Steam can upload stale local entries
 // with their old root token even after our changelist advertises the canonical
 // root. Resolve once for the batch and reuse for begin/commit handling.
 static std::unordered_map<uint64_t, std::unordered_map<std::string, std::string>> g_batchCanonicalTokens;
+// INVARIANT: never held across CloudStorage::* / LocalStorage::* calls,
+// nor across WaitForAutoCloudBootstrap (which takes
+// g_autoCloudBootstrapMutex + CV wait). PrepareBatchCanonicalTokens
+// releases before the wait and re-acquires after.
 static std::mutex g_batchCanonicalTokensMutex;
 
 
@@ -1253,20 +1315,79 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     // Load per-file token map (which token each file was uploaded under).
     // If not in memory, load from disk. Snapshot the map so we can do
     // lockless lookups in the file loop below (H5: was N lock acquisitions).
+    //
+    // LOCK ORDER: CloudStorage::LoadFileTokens performs disk I/O and takes
+    // LocalStorage::g_mutex (shared). Do not call it while holding
+    // g_fileTokensMutex — otherwise every concurrent file-token operation
+    // serializes on disk I/O, and g_fileTokensMutex becomes an outer of
+    // LocalStorage::g_mutex (the only site that would establish that
+    // edge).
+    //
+    // RACE GUARD: "release, load, re-acquire, insert-if-empty" is not
+    // safe on its own. BootstrapAutoCloudFilesWorker's import critical
+    // region invalidates g_fileTokens[key] early, does blob writes for
+    // tens to hundreds of ms (unlocked), and only at the end writes the
+    // new file_tokens.dat via SaveFileTokens. Throughout that window,
+    // memory is empty and disk is still the pre-invalidation snapshot.
+    // A concurrent HandleGetChangelist that observed the empty map would
+    // read the stale disk and RE-INSERT it, silently reverting the
+    // invalidation and causing the next changelist to emit files under
+    // stale root tokens (which Steam's rootoverrides treat as
+    // cross-platform stale copies and delete — this is a data-loss
+    // class bug, not just a staleness bug).
+    //
+    // Generation counters are not usable as a guard here: both counter
+    // bumps occur when the invalidation completes, but the on-disk file
+    // stays stale until SaveFileTokens runs much later, and the reader's
+    // two generation snapshots (around its disk read) can straddle that
+    // whole window without observing any change. Instead, gate the
+    // reinsert on IsAutoCloudBootstrapActive, which is set from
+    // TryBeginAutoCloudBootstrap through FinishAutoCloudBootstrap — i.e.
+    // true across the full worker lifetime including SaveFileTokens.
+    // If bootstrap is active for this (accountId, appId) at any point
+    // during our load, discard `loaded` and rely on a later changelist
+    // (post-bootstrap) to re-hydrate memory from the now-fresh disk.
     std::unordered_map<std::string, std::string> fileTokenSnapshot;
+    bool needsDiskLoad = false;
     {
         std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-        if (g_fileTokens.find(appKey) == g_fileTokens.end()) {
-            auto loaded = CloudStorage::LoadFileTokens(accountId, appId);
-            if (!loaded.empty()) {
-                g_fileTokens[appKey] = std::move(loaded);
-                LOG("[NS-CL] Loaded %zu file-token mappings for account %u app %u",
-                    g_fileTokens[appKey].size(), accountId, appId);
-            }
-        }
         auto it = g_fileTokens.find(appKey);
         if (it != g_fileTokens.end()) {
             fileTokenSnapshot = it->second;
+        } else {
+            needsDiskLoad = true;
+        }
+    }
+    if (needsDiskLoad) {
+        bool bootstrapActiveBefore = IsAutoCloudBootstrapActive(accountId, appId);
+        auto loaded = CloudStorage::LoadFileTokens(accountId, appId);
+        bool bootstrapActiveAfter = IsAutoCloudBootstrapActive(accountId, appId);
+        bool bootstrapTouchedLoad = bootstrapActiveBefore || bootstrapActiveAfter;
+        std::lock_guard<std::mutex> lock(g_fileTokensMutex);
+        // Re-check: another caller may have populated the in-memory map
+        // while we were reading from disk. Prefer the in-memory entry in
+        // that case because it reflects any RecordFileToken updates or
+        // later post-bootstrap repopulates that ran during our I/O.
+        auto it = g_fileTokens.find(appKey);
+        if (it != g_fileTokens.end()) {
+            fileTokenSnapshot = it->second;
+        } else if (bootstrapTouchedLoad) {
+            // Bootstrap worker was live at some point during our disk
+            // read. The on-disk file_tokens.dat may predate its eventual
+            // SaveFileTokens, so `loaded` cannot be trusted. Use it
+            // locally (below, via fileTokenSnapshot) but do NOT cache it
+            // in g_fileTokens — the next changelist after bootstrap
+            // finishes will pick up the correct post-save state.
+            if (!loaded.empty()) {
+                fileTokenSnapshot = loaded;
+            }
+            LOG("[NS-CL] Skipping file-token cache-write for account %u app %u "
+                "— bootstrap worker was active during disk read", accountId, appId);
+        } else if (!loaded.empty()) {
+            g_fileTokens[appKey] = std::move(loaded);
+            LOG("[NS-CL] Loaded %zu file-token mappings for account %u app %u",
+                g_fileTokens[appKey].size(), accountId, appId);
+            fileTokenSnapshot = g_fileTokens[appKey];
         }
     }
 
