@@ -10,6 +10,7 @@
 #include "cloud_provider.h"
 #include "json.h"
 #include "legacy_metadata_cleanup.h"
+#include "file_util.h"
 #include "miniz.h"
 #include "miniz_zip.h"
 #include <shlobj.h>
@@ -2062,13 +2063,22 @@ static void WriteSyncState(uint64_t syncTime, const std::unordered_set<std::stri
     std::string path = GetLuaSyncStatePath();
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
-    std::ofstream f(path, std::ios::trunc);
-    if (!f.is_open()) {
-        LOG("[LuaSync] Failed to write .sync_state");
-        return;
+    // Build the payload in memory and atomic-write. A crash between
+    // ofstream's trunc and the serialized write completing would leave
+    // .sync_state empty, causing every file to be re-downloaded on next
+    // startup (recoverable but wasteful). AtomicWriteText writes a .tmp
+    // sibling and MoveFileEx-replaces it so readers always see the old
+    // or new payload, never a partial one.
+    std::string content;
+    content += std::to_string(syncTime);
+    content += '\n';
+    for (auto& s : files) {
+        content += s;
+        content += '\n';
     }
-    f << syncTime << "\n";
-    for (auto& s : files) f << s << "\n";
+    if (!FileUtil::AtomicWriteText(path, content)) {
+        LOG("[LuaSync] Failed to write .sync_state");
+    }
 }
 
 struct LuaFile {
@@ -2350,13 +2360,17 @@ static void SyncLuaFiles() {
                     std::error_code ec;
                     std::filesystem::create_directories(luaDir, ec);
                     std::string destPath = luaDir + filename;
-                    std::ofstream out(destPath, std::ios::binary | std::ios::trunc);
-                    if (out.is_open()) {
-                        out.write(reinterpret_cast<const char*>(it->second.data()), it->second.size());
-                        out.close();
+                    // Atomic write: a crash during trunc+write would leave
+                    // the lua file partial, and the game would load broken
+                    // bytecode next launch. AtomicWriteBinary tmp+rename
+                    // ensures the game always sees the old absent state or
+                    // the fully-written new file.
+                    if (FileUtil::AtomicWriteBinary(destPath, it->second.data(), it->second.size())) {
                         localByName[filename] = entry.mod;
                         extracted++;
                         LOG("[LuaSync] Extracted new lua: %s (%zu bytes)", filename.c_str(), it->second.size());
+                    } else {
+                        LOG("[LuaSync] Failed to extract lua %s", filename.c_str());
                     }
                 }
             } else if (!onDisk && inSyncState) {

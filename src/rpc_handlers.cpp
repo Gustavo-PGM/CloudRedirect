@@ -1985,9 +1985,16 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
     std::vector<BkvNode> localNodes;
     if (!BkvRead(localData.data(), localData.size(), localPos, localNodes, 0, localNodeCount)) {
         LOG("[Stats] Failed to parse local stats for app %u, overwriting with cloud", appId);
-        std::ofstream f(statsPath, std::ios::binary | std::ios::trunc);
-        if (!f.is_open()) return false;
-        f.write(reinterpret_cast<const char*>(cloudData.data()), cloudData.size());
+        // Atomic write: a crash between trunc and write under the previous
+        // ofstream-trunc path would leave the stats file empty or partial,
+        // destroying achievement progress beyond recovery. AtomicWriteBinary
+        // writes a .tmp sibling and renames, so either the old or the new
+        // file is visible at every instant. Also: fail loudly on write
+        // failure instead of claiming success.
+        if (!FileUtil::AtomicWriteBinary(statsPath, cloudData.data(), cloudData.size())) {
+            LOG("[Stats] Failed to overwrite local stats with cloud for app %u", appId);
+            return false;
+        }
         return true;
     }
 
