@@ -5,6 +5,7 @@
 #include "onedrive_provider.h"
 #include "cloud_intercept.h"
 #include "file_util.h"
+#include "legacy_metadata_cleanup.h"
 #include "log.h"
 #include <fstream>
 #include <filesystem>
@@ -102,6 +103,12 @@ struct WorkItem {
     int         existsCheckRetries = 0;  // Upload-only: retries of CheckExists before skipIfExists upload
     int         transferRetries = 0;     // Upload/Delete: retries of the actual Upload/Remove call
     int         drainRequeues = 0;       // Times this item was requeued via RequeueFailedWorkForPrefixLocked
+    // Delete-only: when the Delete is an internal cleanup (e.g. removing a
+    // legacy-named cloud blob whose canonical sibling is authoritative), do
+    // NOT touch the canonical tombstone on success. Canonicalize-on-clear
+    // would otherwise erase a tombstone stamped by a concurrent user-initiated
+    // canonical DeleteBlob, resurrecting the deleted file on the next sync.
+    bool        suppressTombstoneClear = false;
 };
 
 static std::list<WorkItem>               g_workQueue;
@@ -509,7 +516,16 @@ static void WorkerLoop(int threadId) {
                 // tombstone written by DeleteBlob (and vice versa), keeping
                 // the tombstone namespace aligned with SyncFromCloud's
                 // cloudBlobNames lookup.
-                {
+                //
+                // EXCEPT: legacy-metadata cleanup deletes (flagged with
+                // suppressTombstoneClear) must never touch the canonical
+                // tombstone. They delete the legacy copy on the strength of
+                // a canonical sibling being present, not on any intent to
+                // clear the user's live deletion. Without this gate, a
+                // cleanup-delete succeeding concurrently with a user-driven
+                // canonical DeleteBlob would clobber the canonical tombstone
+                // and resurrect the file on the next sync.
+                if (!item.suppressTombstoneClear) {
                     uint32_t doneAcct = 0, doneApp = 0;
                     std::string doneFile;
                     if (ParseCloudBlobPath(item.cloudPath, doneAcct, doneApp, doneFile)) {
@@ -770,6 +786,13 @@ void Init(const std::string& localRoot, std::unique_ptr<ICloudProvider> provider
 
     // Prune stale conflict copies once per process launch (best-effort).
     PruneStaleConflictCopies(g_localRoot);
+
+    // Scrub top-level legacy-named Playtime.bin/UserGameStats.bin from our
+    // private blob cache when the canonical `.cloudredirect\{same}` sibling
+    // exists. Older DLL builds stored these under the raw filename; current
+    // builds canonicalize on read/write, so the legacy entries are dead and
+    // waste disk + pollute cross-machine sync bookkeeping.
+    LegacyMetadataCleanup::PruneLocalBlobCache(g_localRoot);
 
     // Start background workers if we have a cloud provider
     if (g_provider) {
@@ -1306,6 +1329,34 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         auto blobsPos = fi.path.find("/blobs/");
         if (blobsPos == std::string::npos) continue;
         cloudBlobNames.insert(CanonicalizeInternalMetadataName(fi.path.substr(blobsPos + 7)));
+    }
+
+    // Piggy-back cloud-side cleanup of legacy-named internal metadata blobs
+    // (raw Playtime.bin / UserGameStats.bin next to the canonical
+    // .cloudredirect/{same}). Only acts on listings we verified as complete,
+    // because the classifier needs to see the canonical sibling to confirm the
+    // legacy entry is not the only cloud copy. Deletes are enqueued, not
+    // synchronous, so launch-time sync is unaffected if the provider's Delete
+    // endpoint is slow or flaky.
+    if (cloudListSucceeded && cloudListComplete) {
+        std::vector<std::string> rawPaths;
+        rawPaths.reserve(cloudBlobs.size());
+        for (auto& fi : cloudBlobs) rawPaths.push_back(fi.path);
+        auto legacyToDelete = LegacyMetadataCleanup::ClassifyLegacyCloudBlobsToDelete(rawPaths);
+        for (auto& legacyPath : legacyToDelete) {
+            LOG("[CloudStorage] SyncFromCloud app %u: enqueueing delete of legacy "
+                "cloud blob %s (canonical sibling present)",
+                appId, legacyPath.c_str());
+            WorkItem wi;
+            wi.type = WorkItem::Delete;
+            wi.cloudPath = std::move(legacyPath);
+            // Cleanup-originated delete: the canonical sibling is the live
+            // file; this delete removes only the legacy copy. Do NOT let the
+            // worker's canonicalize-on-clear clobber a tombstone the user
+            // may have stamped for a concurrent canonical DeleteBlob.
+            wi.suppressTombstoneClear = true;
+            EnqueueWork(std::move(wi));
+        }
     }
 
     // Load tombstones once per sync. A cloud Delete whose worker never

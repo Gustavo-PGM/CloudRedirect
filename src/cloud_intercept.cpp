@@ -9,6 +9,7 @@
 #include "cloud_storage.h"
 #include "cloud_provider.h"
 #include "json.h"
+#include "legacy_metadata_cleanup.h"
 #include "miniz.h"
 #include "miniz_zip.h"
 #include <shlobj.h>
@@ -2807,6 +2808,15 @@ void Init(const std::string& steamPath) {
                 LOG("[NS] Migrated legacy blobs/ -> storage/: %d files moved, %d already existed (skipped)", migrated, skipped);
         }
     }
+
+    // Scrub legacy internal-metadata relics from Steam's userdata\{acct}\{app}\remote\
+    // directory. Older DLL builds wrote Playtime.bin/UserGameStats.bin into Steam's
+    // cloud-save view, which makes the UI contamination scanner flag them as saves
+    // and confuses users who (correctly) see metadata masquerading as game data.
+    // Current DLL never writes metadata to that location -- canonical metadata lives
+    // in our private blob cache under `cloud_redirect\storage\...` -- so anything
+    // found here is a pure relic and safe to delete unconditionally.
+    LegacyMetadataCleanup::PruneSteamUserdata(g_steamPath);
 
     // start local HTTP server for upload/download
     std::string blobRoot = g_steamPath + "cloud_redirect\\storage\\";
