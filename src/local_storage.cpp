@@ -702,13 +702,31 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
     return rules;
 }
 
-static bool WildcardMatchInsensitive(const char* pattern, const char* text) {
+// Pattern complexity caps. WildcardMatchInsensitive is a recursive
+// backtracking matcher — an adversarial pattern like "a*a*a*a*a*a*a*a*b"
+// against a long "aaaa...a" text backtracks exponentially in the number
+// of '*' segments. UFS appinfo rules come from Steam-controlled input
+// that we treat as untrusted (appinfo.vdf can be modified on disk, a
+// malicious depot/workshop tool could deliver a pathological pattern).
+// Caps below are generous for real save rules (which use 0–2 wildcards
+// over paths well under 1 KB) but refuse to enter the exponential region.
+static constexpr size_t kMaxWildcardPatternLen = 1024;
+static constexpr int    kMaxWildcardStars      = 16;
+// Iteration budget bounds the total number of recursive calls across a
+// single top-level match. Any pattern that blows through it is treated
+// as a non-match (fail-closed — a rule we can't evaluate safely is
+// better skipped than allowed to hang the bootstrap scan).
+static constexpr int    kMaxWildcardIterations = 100000;
+
+static bool WildcardMatchImpl(const char* pattern, const char* text, int& iters) {
+    if (--iters <= 0) return false;
     while (*pattern) {
         if (*pattern == '*') {
             while (*pattern == '*') ++pattern;
             if (!*pattern) return true;
             while (*text && *text != '/') {
-                if (WildcardMatchInsensitive(pattern, text)) return true;
+                if (WildcardMatchImpl(pattern, text, iters)) return true;
+                if (iters <= 0) return false;
                 ++text;
             }
             return false;
@@ -722,6 +740,25 @@ static bool WildcardMatchInsensitive(const char* pattern, const char* text) {
         ++text;
     }
     return *text == 0;
+}
+
+static bool WildcardMatchInsensitive(const char* pattern, const char* text) {
+    // Length cap: reject pathologically long patterns before any work.
+    // All current callers route through std::string::c_str() so the buffer
+    // is null-terminated; the bounded scan here just avoids linear work
+    // proportional to pattern length for the reject path.
+    size_t patLen = 0;
+    while (patLen <= kMaxWildcardPatternLen && pattern[patLen] != '\0') ++patLen;
+    if (patLen > kMaxWildcardPatternLen) return false;
+
+    // Star count cap: each '*' roughly doubles the worst-case work.
+    int stars = 0;
+    for (size_t i = 0; i < patLen; ++i) {
+        if (pattern[i] == '*' && ++stars > kMaxWildcardStars) return false;
+    }
+
+    int iters = kMaxWildcardIterations;
+    return WildcardMatchImpl(pattern, text, iters);
 }
 
 static bool WildcardMatchInsensitive(const std::string& pattern, const std::string& text) {
