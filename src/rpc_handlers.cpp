@@ -151,6 +151,15 @@ static bool IsAutoCloudBootstrapActive(uint32_t accountId, uint32_t appId) {
     return g_autoCloudBootstrapActiveApps.count(MakeAppAccountKey(accountId, appId)) != 0;
 }
 
+// Cooperative shutdown probe for BootstrapAutoCloudFilesWorker. Checked at
+// safe abort points BEFORE any blob writes have been persisted — once the
+// worker is past the local-write region it commits fully (including CN
+// publish) so on-disk state stays consistent.
+static bool IsAutoCloudBootstrapShuttingDown() {
+    std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+    return g_autoCloudBootstrapShuttingDown;
+}
+
 static bool LooksLikeForeignAppPollution(const std::string& filename, uint32_t appId) {
     size_t pos = filename.find_first_of("/\\");
     if (pos != std::string::npos && pos >= 3 && pos <= 10) {
@@ -209,6 +218,18 @@ static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
         FinishAutoCloudBootstrap(accountId, appId, markAttempted, generation);
     };
 
+    // Abort early if shutdown was signaled before the scan ran. The scan can
+    // walk thousands of files and has a 5-second wall budget; refusing here
+    // lets the process exit promptly when a user closes Steam right after
+    // launch. markAttempted=false so a subsequent session can retry if the
+    // process is somehow re-initialized without reloading the DLL.
+    if (IsAutoCloudBootstrapShuttingDown()) {
+        LOG("[AutoCloudImport] Aborting bootstrap for app %u — shutdown in progress", appId);
+        ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+        finish(false, cacheGeneration);
+        return;
+    }
+
     std::vector<LocalStorage::FileEntry> candidates;
     try {
         candidates = LocalStorage::GetAutoCloudFileList(GetSteamPath(), accountId, appId);
@@ -260,6 +281,15 @@ static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
     bool tokenMetadataChanged = false;
 
     for (const auto& fe : candidates) {
+        // Per-file shutdown probe — this loop issues CheckBlobExists calls
+        // which can each block on network I/O. Bail early without marking
+        // the app attempted so the next session can retry.
+        if (IsAutoCloudBootstrapShuttingDown()) {
+            LOG("[AutoCloudImport] Aborting existence checks for app %u — shutdown in progress", appId);
+            ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+            finish(false, cacheGeneration);
+            return;
+        }
         if (fe.filename.empty() || fe.sourcePath.empty()) continue;
         if (IsInternalMetadataFile(fe.filename)) continue;
 
@@ -324,6 +354,16 @@ static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
     std::unique_lock<std::mutex> importLock(g_autoCloudImportMutex);
     if (!TryInvalidateTokenCachesForGeneration(accountId, appId, cacheGeneration, publishGeneration)) {
         finish(false, cacheGeneration);
+        return;
+    }
+    // Last safe abort point — past this, StoreBlob writes local state and we
+    // must see the CN commit through to keep disk consistent. If shutdown was
+    // signaled during the scan/existence-check or while we waited on the
+    // import lock, don't start writing blobs we'll never get to publish.
+    if (IsAutoCloudBootstrapShuttingDown()) {
+        LOG("[AutoCloudImport] Aborting pre-commit for app %u — shutdown in progress", appId);
+        ClearAutoCloudCanonicalTokens(accountId, appId, publishGeneration);
+        finish(false, publishGeneration);
         return;
     }
     {
