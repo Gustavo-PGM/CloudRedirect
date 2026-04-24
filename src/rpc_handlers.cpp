@@ -260,7 +260,33 @@ static bool HasPersistedLocalCloudHistory(uint32_t accountId, uint32_t appId) {
 
 static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
                                           uint64_t cacheGeneration) {
+    // RAII guard: FinishAutoCloudBootstrap MUST run to release the slot in
+    // g_autoCloudBootstrapActiveApps and notify the shutdown CV. If any call
+    // in the write/drain/publish body throws (std::filesystem_error from a
+    // bad parent-path in WriteFileNoIncrement, bad_alloc under memory
+    // pressure, provider RPC exceptions), unwinding the worker without
+    // running finish() leaks the active-app slot — which hangs
+    // ShutdownRpcHandlers indefinitely and pins HandleGetChangelist on the
+    // slow disk-load path forever (the bootstrap-active guard in commit N
+    // would stay latched). Explicit finish() calls below LATCH the guard
+    // so the normal success path controls markAttempted/generation; the
+    // default-destruct path covers only the exception case.
+    struct FinishGuard {
+        uint32_t accountId;
+        uint32_t appId;
+        uint64_t generation;
+        bool markAttempted;
+        bool fired;
+        ~FinishGuard() {
+            if (!fired) {
+                LOG("[AutoCloudImport] Worker aborted via exception for app %u — releasing bootstrap slot", appId);
+                FinishAutoCloudBootstrap(accountId, appId, markAttempted, generation);
+            }
+        }
+    };
+    FinishGuard guard{accountId, appId, cacheGeneration, /*markAttempted=*/false, /*fired=*/false};
     auto finish = [&](bool markAttempted, uint64_t generation) {
+        guard.fired = true;
         FinishAutoCloudBootstrap(accountId, appId, markAttempted, generation);
     };
 
