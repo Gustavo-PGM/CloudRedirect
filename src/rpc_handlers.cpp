@@ -1977,7 +1977,27 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
     std::vector<uint8_t> localData(static_cast<size_t>(localSize));
     localFile.seekg(0);
     localFile.read(reinterpret_cast<char*>(localData.data()), localSize);
+    auto localGcount = localFile.gcount();
+    bool localReadOk = !localFile.fail() &&
+                       static_cast<std::streamsize>(localGcount) == localSize;
     localFile.close();
+
+    // If the read came back short or failed (disk error, file shrunk between
+    // tellg and read), localData would otherwise contain partially-
+    // uninitialized tail bytes that BkvRead would happily walk past, then
+    // we'd persist the merged result back to disk via AtomicWriteBinary --
+    // turning a transient I/O glitch into a permanent stats corruption.
+    // Treat a short read as a parse failure so we fall through to the
+    // cloud-overwrite branch instead.
+    if (!localReadOk) {
+        LOG("[Stats] short read on local stats for app %u (expected %lld, got %lld), overwriting with cloud",
+            appId, (long long)localSize, (long long)localGcount);
+        if (!FileUtil::AtomicWriteBinary(statsPath, cloudData.data(), cloudData.size())) {
+            LOG("[Stats] Failed to overwrite local stats with cloud for app %u", appId);
+            return false;
+        }
+        return true;
+    }
 
     // Parse local data
     size_t localPos = 0;
@@ -2243,6 +2263,10 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
                         blobPtr, blobData.size())) {
                     LOG("[NS-UP]   ERROR: failed to store blob for %s", cleanName.c_str());
                     committed = false;
+                    // Drop the staged HttpServer blob so a future retry doesn't
+                    // see stale data and so successive failures don't accumulate
+                    // orphaned files in the upload spool.
+                    HttpServer::DeleteBlob(accountId, appId, cleanName);
                 }
             }
 
@@ -2250,16 +2274,25 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
             // The changelist will only present files under their upload token,
             // preventing Steam's rootoverrides from seeing cross-platform
             // duplicates and issuing spurious deletes.
-            std::string rootToken = ExtractRootToken(filename);
-            PrepareBatchCanonicalTokens(accountId, appId);
-            rootToken = CanonicalizeUploadRootToken(accountId, appId, cleanName, rootToken);
-            RecordFileToken(accountId, appId, cleanName, rootToken);
-            MarkFileTokensDirty(accountId, appId);
+            if (committed) {
+                std::string rootToken = ExtractRootToken(filename);
+                PrepareBatchCanonicalTokens(accountId, appId);
+                rootToken = CanonicalizeUploadRootToken(accountId, appId, cleanName, rootToken);
+                RecordFileToken(accountId, appId, cleanName, rootToken);
+                MarkFileTokensDirty(accountId, appId);
+            }
         } else {
             LOG("[NS-UP]   WARNING: blob not found after PUT for %s (clean=%s)", filename.c_str(), cleanName.c_str());
         }
 
         // Cloud upload already enqueued by CloudStorage::StoreBlob above
+    } else {
+        // Steam reported the PUT failed mid-transfer. The HTTP server may
+        // still hold a partial blob from the aborted upload; clear it so a
+        // retry starts clean and the spool doesn't grow on every failure.
+        if (HttpServer::HasBlob(accountId, appId, cleanName)) {
+            HttpServer::DeleteBlob(accountId, appId, cleanName);
+        }
     }
 
     PB::Writer body;
@@ -2329,13 +2362,19 @@ PB::Writer HandleFileDownload(uint32_t appId, const std::vector<PB::Field>& reqB
 
     auto entry = LocalStorage::GetFileEntry(accountId, appId, cleanName);
     if (entry) {
+        // Use the metadata triple as a unit -- size, sha, and timestamp must
+        // describe the same snapshot, otherwise Steam will reject the download
+        // (or worse, persist a blob signed with a stale hash). A legitimately
+        // empty file (rawSize == 0) is fine here; we still emit the matching
+        // empty sha and recorded timestamp.
         fileSize = entry->rawSize;
         timestamp = entry->timestamp;
         sha = entry->sha;
-    }
-
-    // fall back to blob store if not in local storage metadata
-    if (fileSize == 0) {
+    } else {
+        // No metadata entry yet (e.g. file was just PUT but never recorded by
+        // a prior CN-tracking write path). Fall back to whatever the HTTP
+        // server has on disk for size; sha and timestamp stay zero/empty so
+        // the response describes a single coherent source.
         fileSize = HttpServer::GetBlobSize(accountId, appId, cleanName);
     }
 

@@ -2246,6 +2246,18 @@ static std::vector<LuaFile> ReadLocalLuaFiles() {
         f.seekg(0);
         f.read(reinterpret_cast<char*>(lf.content.data()), size);
 
+        // Verify the read actually delivered the expected number of bytes.
+        // A truncated read (transient I/O error, file shrinking under us,
+        // network drive hiccup) would otherwise leave trailing bytes
+        // uninitialized and we'd upload that partially-uninitialized buffer
+        // into the cloud lua zip, propagating corruption to every machine
+        // sharing the account.
+        if (f.fail() || static_cast<std::streamsize>(f.gcount()) != size) {
+            LOG("[LuaSync] short read on %s (expected %lld, got %lld); skipping",
+                name.c_str(), (long long)size, (long long)f.gcount());
+            continue;
+        }
+
         ULARGE_INTEGER uli;
         uli.LowPart = fd.ftLastWriteTime.dwLowDateTime;
         uli.HighPart = fd.ftLastWriteTime.dwHighDateTime;
