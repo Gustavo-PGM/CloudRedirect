@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text.Json;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -17,12 +18,26 @@ public partial class ChoiceModePage : Page
     public ChoiceModePage()
     {
         InitializeComponent();
-        Loaded += (_, _) => RefreshState();
+        Loaded += async (_, _) =>
+        {
+            try { await RefreshStateAsync(); }
+            catch { }
+        };
     }
 
-    private void RefreshState()
+    // M16: Move SteamDetector.ReadModeSetting() off the UI thread.
+    // It opens settings.json synchronously, so a slow disk would
+    // block Loaded long enough for the page to flash unconfigured
+    // state. Resolve the mode in Task.Run, then apply visibility.
+    private async Task RefreshStateAsync()
     {
-        _currentMode = SteamDetector.ReadModeSetting();
+        var mode = await Task.Run(() => SteamDetector.ReadModeSetting());
+        ApplyMode(mode);
+    }
+
+    private void ApplyMode(string? mode)
+    {
+        _currentMode = mode;
 
         if (_currentMode != null)
         {
