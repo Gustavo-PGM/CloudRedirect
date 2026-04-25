@@ -1,4 +1,5 @@
 #include "legacy_metadata_cleanup.h"
+#include "file_util.h"
 #include "log.h"
 
 #include <array>
@@ -143,7 +144,10 @@ SweepStats PruneSteamUserdata(const std::string& steamPath) {
     if (steamPath.empty()) return stats;
 
     try {
-        fs::path userdata = fs::path(steamPath) / "userdata";
+        // fs::path(std::string) narrows via ACP on Windows; route UTF-8
+        // through Utf8ToPath so installs under non-ASCII profile folders
+        // (Cyrillic/CJK usernames, accented paths) enumerate correctly.
+        fs::path userdata = FileUtil::Utf8ToPath(steamPath) / "userdata";
         std::error_code ec;
         if (!fs::is_directory(userdata, ec)) return stats;
 
@@ -186,7 +190,8 @@ SweepStats PruneLocalBlobCache(const std::string& localRoot) {
     if (localRoot.empty()) return stats;
 
     try {
-        fs::path storage = fs::path(localRoot) / "storage";
+        // Same ACP-narrowing rationale as PruneSteamUserdata above.
+        fs::path storage = FileUtil::Utf8ToPath(localRoot) / "storage";
         std::error_code ec;
         if (!fs::is_directory(storage, ec)) return stats;
 

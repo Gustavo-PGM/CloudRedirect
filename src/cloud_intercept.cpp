@@ -451,7 +451,11 @@ void RecordLaunchTime(uint32_t appId) {
     if (accountId) {
         std::string vdfPath = g_steamPath + "userdata\\" + std::to_string(accountId)
             + "\\config\\localconfig.vdf";
-        HANDLE hFile = CreateFileA(vdfPath.c_str(), GENERIC_READ,
+        // Wide-API: CreateFileA narrows via ACP, so a Steam install under a
+        // non-ASCII profile path (e.g. Cyrillic/CJK user folder) would fail
+        // ERROR_FILE_NOT_FOUND and silently skip the playtime baseline.
+        auto vdfPathWide = FileUtil::Utf8ToPath(vdfPath).wstring();
+        HANDLE hFile = CreateFileW(vdfPathWide.c_str(), GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hFile != INVALID_HANDLE_VALUE) {
@@ -1492,7 +1496,10 @@ static void UploadStatsOnExit(uint32_t appId) {
     std::string statsFile = g_steamPath + "appcache\\stats\\UserGameStats_"
         + std::to_string(accountId) + "_" + std::to_string(appId) + ".bin";
 
-    HANDLE hFile = CreateFileA(statsFile.c_str(), GENERIC_READ,
+    // Wide-API: CreateFileA narrows via ACP and fails for non-ASCII Steam
+    // install roots, silently skipping stats upload for affected users.
+    auto statsFileWide = FileUtil::Utf8ToPath(statsFile).wstring();
+    HANDLE hFile = CreateFileW(statsFileWide.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) {
@@ -1552,7 +1559,9 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
     {
         std::string vdfPath = g_steamPath + "userdata\\" + std::to_string(accountId)
             + "\\config\\localconfig.vdf";
-        HANDLE hFile = CreateFileA(vdfPath.c_str(), GENERIC_READ,
+        // Wide-API parity with the launch-time reader above; see UploadStatsOnExit.
+        auto vdfPathWide = FileUtil::Utf8ToPath(vdfPath).wstring();
+        HANDLE hFile = CreateFileW(vdfPathWide.c_str(), GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hFile != INVALID_HANDLE_VALUE) {
@@ -2411,7 +2420,11 @@ static void SyncLuaFiles() {
             if (onDisk && lastSync > 0 && entry.del > lastSync) {
                 // Deleted on another machine after our last sync -- delete locally
                 std::string path = luaDir + filename;
-                if (DeleteFileA(path.c_str())) {
+                // Wide-API: a non-ASCII Steam install would make DeleteFileA
+                // fail with ERROR_FILE_NOT_FOUND even when the file exists,
+                // leaving the stale lua on disk and diverging from remote.
+                auto pathWide = FileUtil::Utf8ToPath(path).wstring();
+                if (DeleteFileW(pathWide.c_str())) {
                     deletedLocally++;
                     localByName.erase(filename);
                     LOG("[LuaSync] Deleted locally (remote deletion): %s", filename.c_str());
@@ -2425,7 +2438,10 @@ static void SyncLuaFiles() {
                 auto it = cloudFiles.find(filename);
                 if (it != cloudFiles.end()) {
                     std::error_code ec;
-                    std::filesystem::create_directories(luaDir, ec);
+                    // create_directories on a std::string narrows via ACP
+                    // internally; route through Utf8ToPath for parity with
+                    // the wide callsites above.
+                    std::filesystem::create_directories(FileUtil::Utf8ToPath(luaDir), ec);
                     std::string destPath = luaDir + filename;
                     // Atomic write: a crash during trunc+write would leave
                     // the lua file partial, and the game would load broken
