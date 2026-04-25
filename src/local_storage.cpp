@@ -1032,15 +1032,19 @@ static void QuarantineCorruptCNFile(const std::string& cnPath, uint32_t appId) {
         // MoveFileExW with MOVEFILE_REPLACE_EXISTING, silently clobbering
         // a prior quarantine file. Loop on an incrementing suffix if the
         // target already exists.
+        // Path strings are UTF-8 by convention; route through Utf8ToPath
+        // so non-ACP characters in the Steam install path don't silently
+        // turn quarantine into a no-op.
         std::string quarantinePath = base;
         for (int dup = 1; dup < 1000; ++dup) {
             std::error_code existEc;
-            if (!std::filesystem::exists(quarantinePath, existEc)) break;
+            if (!std::filesystem::exists(FileUtil::Utf8ToPath(quarantinePath), existEc)) break;
             quarantinePath = base + "." + std::to_string(dup);
         }
 
         std::error_code ec;
-        std::filesystem::rename(cnPath, quarantinePath, ec);
+        std::filesystem::rename(FileUtil::Utf8ToPath(cnPath),
+                                FileUtil::Utf8ToPath(quarantinePath), ec);
         if (ec) {
             LOG("ERROR GetChangeNumber: cn.dat for app %u was corrupt and could not be "
                 "quarantined (%s); subsequent increments may overwrite it",
@@ -1083,7 +1087,7 @@ void Init(const std::string& baseRoot) {
     // the hooked Steam callsite and terminate the process. Log + continue;
     // downstream WriteFile paths will surface individual failures.
     std::error_code ec;
-    std::filesystem::create_directories(g_baseRoot, ec);
+    std::filesystem::create_directories(FileUtil::Utf8ToPath(g_baseRoot), ec);
     if (ec) {
         LOG("LocalStorage Init: create_directories failed for '%s': %s",
             g_baseRoot.c_str(), ec.message().c_str());
@@ -1094,7 +1098,7 @@ void Init(const std::string& baseRoot) {
 void InitApp(uint32_t accountId, uint32_t appId) {
     auto appPath = GetAppPathInternal(accountId, appId);
     std::error_code ec;
-    std::filesystem::create_directories(appPath, ec);
+    std::filesystem::create_directories(FileUtil::Utf8ToPath(appPath), ec);
     if (ec) {
         LOG("LocalStorage InitApp: create_directories failed for '%s': %s",
             appPath.c_str(), ec.message().c_str());
@@ -1404,22 +1408,34 @@ std::optional<FileEntry> GetFileEntry(uint32_t accountId, uint32_t appId, const 
         fullPath = appRoot + filename;
         for (auto& c : fullPath) { if (c == '/') c = '\\'; }
 
-        if (!std::filesystem::exists(fullPath) || !std::filesystem::is_regular_file(fullPath))
-            return std::nullopt;
+        // Route through Utf8ToPath so non-ACP characters in filename or
+        // appRoot don't get mis-encoded into a missing path. Use the
+        // ec-overloads so a transient race (file deleted mid-check) can't
+        // unwind through this shared_lock holder.
+        std::error_code statEc;
+        auto fp = FileUtil::Utf8ToPath(fullPath);
+        if (!std::filesystem::exists(fp, statEc) || statEc) return std::nullopt;
+        if (!std::filesystem::is_regular_file(fp, statEc) || statEc) return std::nullopt;
     }
 
     // Phase 2: SHA1 hash and stat outside the lock (expensive I/O)
     // File may be deleted between Phase 1 and Phase 2 (TOCTOU) -- catch exceptions.
     try {
         auto sha = SHA1File(fullPath);
-        auto ftime = std::filesystem::last_write_time(fullPath);
+        auto fp = FileUtil::Utf8ToPath(fullPath);
+        std::error_code statEc;
+        auto ftime = std::filesystem::last_write_time(fp, statEc);
+        if (statEc) return std::nullopt;
         uint64_t ts = FileTimeToUnixSeconds(ftime);
+
+        auto sz = std::filesystem::file_size(fp, statEc);
+        if (statEc) return std::nullopt;
 
         FileEntry fe;
         fe.filename = filename;
         fe.sha = sha;
         fe.timestamp = ts;
-        fe.rawSize = (uint64_t)std::filesystem::file_size(fullPath);
+        fe.rawSize = (uint64_t)sz;
         fe.deleted = false;
         fe.rootId = 0;
         return fe;
@@ -1541,7 +1557,7 @@ bool DeleteFile(uint32_t accountId, uint32_t appId, const std::string& filename)
     }
 
     std::error_code ec;
-    bool removed = std::filesystem::remove(fullPath, ec);
+    bool removed = std::filesystem::remove(FileUtil::Utf8ToPath(fullPath), ec);
     if (ec) {
         LOG("DeleteFile: remove failed for '%s': %s",
             fullPath.c_str(), ec.message().c_str());
@@ -1636,7 +1652,8 @@ bool RestoreFileIfUnchanged(uint32_t accountId, uint32_t appId,
 
     std::error_code ec;
     if (hadOriginal) {
-        std::filesystem::copy_file(backupPath, fullPath,
+        std::filesystem::copy_file(FileUtil::Utf8ToPath(backupPath),
+                                   FileUtil::Utf8ToPath(fullPath),
                                    std::filesystem::copy_options::overwrite_existing, ec);
         if (ec) {
             LOG("RestoreFileIfUnchanged: copy failed for %s: %s",
@@ -1644,7 +1661,7 @@ bool RestoreFileIfUnchanged(uint32_t accountId, uint32_t appId,
             return false;
         }
     } else {
-        std::filesystem::remove(fullPath, ec);
+        std::filesystem::remove(FileUtil::Utf8ToPath(fullPath), ec);
         if (ec) {
             LOG("RestoreFileIfUnchanged: remove failed for %s: %s",
                 filename.c_str(), ec.message().c_str());
@@ -1692,7 +1709,7 @@ bool SetFileTimestamp(uint32_t accountId, uint32_t appId, const std::string& fil
     auto fileTime = UnixSecondsToFileTime(unixSeconds);
 
     std::error_code ec;
-    std::filesystem::last_write_time(fullPath, fileTime, ec);
+    std::filesystem::last_write_time(FileUtil::Utf8ToPath(fullPath), fileTime, ec);
     if (ec) {
         LOG("SetFileTimestamp: failed for %s: %s", filename.c_str(), ec.message().c_str());
         return false;
@@ -2139,7 +2156,7 @@ bool SaveRootTokens(uint32_t accountId, uint32_t appId, const std::unordered_set
     std::lock_guard<std::shared_mutex> lock(g_mutex);
     std::string appDir = GetAppPathInternal(accountId, appId);
     std::error_code dirEc;
-    std::filesystem::create_directories(appDir, dirEc);
+    std::filesystem::create_directories(FileUtil::Utf8ToPath(appDir), dirEc);
     if (dirEc) {
         LOG("SaveRootTokens: create_directories failed for '%s': %s",
             appDir.c_str(), dirEc.message().c_str());
@@ -2208,7 +2225,7 @@ bool SaveFileTokens(uint32_t accountId, uint32_t appId,
     std::lock_guard<std::shared_mutex> lock(g_mutex);
     std::string appDir = GetAppPathInternal(accountId, appId);
     std::error_code dirEc;
-    std::filesystem::create_directories(appDir, dirEc);
+    std::filesystem::create_directories(FileUtil::Utf8ToPath(appDir), dirEc);
     if (dirEc) {
         LOG("SaveFileTokens: create_directories failed for '%s': %s",
             appDir.c_str(), dirEc.message().c_str());
@@ -2368,11 +2385,11 @@ static bool SaveDeletedLocked(uint32_t accountId, uint32_t appId,
     // Caller holds g_mutex exclusively. Returns true on successful persistence.
     std::string appDir = GetAppPathInternal(accountId, appId);
     std::error_code mkEc;
-    std::filesystem::create_directories(appDir, mkEc);
+    std::filesystem::create_directories(FileUtil::Utf8ToPath(appDir), mkEc);
     std::string path = appDir + "deleted.dat";
     if (deleted.empty()) {
         std::error_code ec;
-        std::filesystem::remove(path, ec);
+        std::filesystem::remove(FileUtil::Utf8ToPath(path), ec);
         if (ec && ec != std::errc::no_such_file_or_directory) {
             LOG("SaveDeletedLocked: failed to remove empty tombstone file for app %u: %s",
                 appId, ec.message().c_str());
