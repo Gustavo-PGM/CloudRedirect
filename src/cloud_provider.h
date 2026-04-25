@@ -4,12 +4,14 @@
 #include <cstdint>
 #include <memory>
 
-// ICloudProvider — abstract interface for cloud storage backends.
+// ICloudProvider -- abstract interface for cloud storage backends.
 // All paths are relative with forward slashes: "{accountId}/{appId}/blobs/{filename}"
 // Implementations: GoogleDriveProvider, OneDriveProvider, LocalDiskProvider.
 
 class ICloudProvider {
 public:
+    enum class ExistsStatus { Missing, Exists, Error };
+
     virtual ~ICloudProvider() = default;
 
     // Human-readable name ("Google Drive", "OneDrive", "Local Disk").
@@ -20,7 +22,7 @@ public:
     // For LocalDisk: path to the storage root directory.
     virtual bool Init(const std::string& configPath) = 0;
 
-    // Shut down gracefully — drain pending operations, release resources.
+    // Shut down gracefully -- drain pending operations, release resources.
     virtual void Shutdown() = 0;
 
     // True if the provider has valid credentials (or doesn't need them).
@@ -44,6 +46,9 @@ public:
     // Check if a file exists.
     virtual bool Exists(const std::string& path) = 0;
 
+    // Check if a file exists, preserving provider/API errors when available.
+    virtual ExistsStatus CheckExists(const std::string& path) = 0;
+
     // Listing
 
     struct FileInfo {
@@ -55,6 +60,30 @@ public:
     // List all files under a prefix (e.g., "54303850/1229490/blobs/").
     // Returns empty vector if the prefix doesn't exist.
     virtual std::vector<FileInfo> List(const std::string& prefix) = 0;
+
+    // Same as List(), but returns false when the provider could not verify the
+    // listing due to an API/filesystem error. A missing prefix is a successful
+    // empty listing.
+    //
+    // When `outComplete` is non-null, the provider writes `true` iff the
+    // returned listing is known-complete. Providers that hit a recursion cap,
+    // tolerated pagination failure, or silently-skipped entries must write
+    // `false` even when the function returns `true`. Callers use this flag
+    // to refuse destructive operations (e.g. pruning local blobs that
+    // "aren't in cloud") on listings they can't fully trust.
+    //
+    // Convention: overrides MUST initialize `*outComplete = false` at entry
+    // and write `true` only on a code path that has verified full
+    // enumeration. A forgotten early-return therefore leaves the listing
+    // marked incomplete (safe default: caller skips prune) rather than
+    // falsely complete (unsafe: caller may delete real data).
+    virtual bool ListChecked(const std::string& prefix, std::vector<FileInfo>& outFiles,
+                             bool* outComplete = nullptr) {
+        if (outComplete) *outComplete = false;
+        outFiles = List(prefix);
+        if (outComplete) *outComplete = true;
+        return true;
+    }
 };
 
 // Factory: create a provider by name.

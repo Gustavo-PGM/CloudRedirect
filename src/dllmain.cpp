@@ -1,20 +1,49 @@
 #include "common.h"
 #include "log.h"
 #include "cloud_intercept.h"
+#include "file_util.h"
 #include <mutex>
 
 static HMODULE g_thisModule = nullptr;
 static std::once_flag g_initFlag;
 
-// get Steam directory from the DLL's own location
+// Get Steam directory from the DLL's own location, as a UTF-8 string.
+//
+// Important: the entire DLL treats every "narrow" std::string path as UTF-8 --
+// FileUtil::Utf8ToPath / PathToUtf8, all ifstream/ofstream opens, all
+// filesystem::path construction downstream. This function is the single
+// root of g_steamPath; if it returned an ACP-encoded path (as a naive
+// GetModuleFileNameA would), every non-ASCII Steam install path
+// (e.g. "C:\Users\Владимир\Steam\", "D:\游戏\Steam\") would silently
+// corrupt downstream: save files would be written to wrong-byte paths,
+// reads would miss, libraryfolders.vdf would not be found, and
+// auto-cloud would misidentify the install as missing.
+//
+// GetModuleFileNameW returns wchar_t, which we explicitly convert via
+// WideCharToMultiByte(CP_UTF8) -- the same path every other
+// wide-to-narrow call in the codebase uses (see
+// GetKnownFolderPathString at src/local_storage.cpp:132).
 static std::string GetSteamPath() {
-    char dllPath[MAX_PATH];
-    GetModuleFileNameA(g_thisModule, dllPath, MAX_PATH);
-    std::string dir(dllPath);
-    auto pos = dir.rfind('\\');
-    if (pos != std::string::npos)
-        return dir.substr(0, pos + 1);
-    return {};
+    wchar_t wdllPath[MAX_PATH];
+    DWORD n = GetModuleFileNameW(g_thisModule, wdllPath, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return {};
+
+    // Trim to parent directory (everything up to and including the final '\').
+    // We do the trim on wide data before UTF-8 encode so we never split a
+    // multi-byte sequence. Fallback to full path if no separator found.
+    DWORD endIdx = n;
+    for (DWORD i = n; i > 0; --i) {
+        if (wdllPath[i - 1] == L'\\') { endIdx = i; break; }
+    }
+
+    // Route through FileUtil::WideToUtf8 -- the codebase's single canonical
+    // wide→UTF-8 encoder. The handcrafted block this replaces did not pass
+    // WC_ERR_INVALID_CHARS, so a malformed UTF-16 module path (lone surrogate
+    // injected by an attacker who managed to load the DLL from a hand-built
+    // junk path) would silently produce junk UTF-8 here. The helper rejects
+    // ill-formed input and returns empty, which the call_once init below
+    // tolerates (logs init failure and skips hooks, vs. corrupting the log).
+    return FileUtil::WideToUtf8(wdllPath, (size_t)endIdx);
 }
 
 // exported function called by the SteamTools payload code cave
@@ -26,7 +55,7 @@ int CloudOnSendPkt(void* thisptr, const uint8_t* data, uint32_t size, void* recv
     // one-time init on first call (we're inside the Steam process by now)
     // If call_once throws, the flag remains unset and the next call retries.
     // We catch internally to prevent partial initialization from leaving the system
-    // in an inconsistent state — if init fails, we log and mark as failed so
+    // in an inconsistent state -- if init fails, we log and mark as failed so
     // subsequent calls skip init and return 0 (let Steam handle the packet).
     static bool g_initFailed = false;
     std::call_once(g_initFlag, [&]() {
@@ -95,7 +124,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
 
     case DLL_PROCESS_DETACH:
         // reserved != NULL means process is terminating (ExitProcess).
-        // Other threads are already dead — joining them or acquiring mutexes
+        // Other threads are already dead -- joining them or acquiring mutexes
         // would deadlock. Only run cleanup on explicit FreeLibrary (reserved == NULL).
         if (reserved == nullptr) {
             CloudIntercept::Shutdown();

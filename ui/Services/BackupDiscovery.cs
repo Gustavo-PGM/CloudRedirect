@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 
 namespace CloudRedirect.Services
 {
@@ -130,6 +131,7 @@ namespace CloudRedirect.Services
         // ── Legacy migration ────────────────────────────────────────────
 
         private static bool _legacyMigrationDone;
+        private static readonly object _legacyMigrationGate = new();
 
         /// <summary>
         /// Resets the migration guard so MigrateLegacyBackups will run again.
@@ -137,7 +139,10 @@ namespace CloudRedirect.Services
         /// </summary>
         internal static void ResetMigrationState()
         {
-            _legacyMigrationDone = false;
+            lock (_legacyMigrationGate)
+            {
+                _legacyMigrationDone = false;
+            }
         }
 
         /// <summary>
@@ -145,13 +150,32 @@ namespace CloudRedirect.Services
         /// cleanup_tab_backup/ and app_tab_backup/ dirs. Also fixes any
         /// previously-migrated dirs that still have the delete_ prefix.
         /// Idempotent: no-ops if nothing needs migrating.
-        /// Guarded so the migration scan only runs once per process lifetime.
+        /// Guarded so the migration scan only runs once per process lifetime
+        /// even when CleanupPage and AppsPage initialize concurrently and
+        /// both call into BackupDiscovery on threadpool threads. Without the
+        /// lock, both callers could pass the un-set guard before either
+        /// flips it, then race on Directory.Move and surface
+        /// "destination already exists" errors as user-visible faults.
         /// </summary>
         private static void MigrateLegacyBackups(string steamPath)
         {
-            if (_legacyMigrationDone) return;
-            _legacyMigrationDone = true;
+            // Double-checked: hot-path skip without taking the lock once the
+            // migration has already completed in this process lifetime.
+            if (Volatile.Read(ref _legacyMigrationDone)) return;
 
+            lock (_legacyMigrationGate)
+            {
+                if (_legacyMigrationDone) return;
+                MigrateLegacyBackupsLocked(steamPath);
+                _legacyMigrationDone = true;
+            }
+        }
+
+        // Body of the migration. Must only be called with _legacyMigrationGate
+        // held -- concurrent execution would race on Directory.Move and surface
+        // user-visible IO errors.
+        private static void MigrateLegacyBackupsLocked(string steamPath)
+        {
             string cleanupRoot = BackupPaths.GetCleanupRoot(steamPath);
             string appDeleteRoot = BackupPaths.GetAppDeleteRoot(steamPath);
 

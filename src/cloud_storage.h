@@ -7,7 +7,7 @@
 #include <condition_variable>
 #include <unordered_set>
 
-// CloudStorage — central layer between cloud_intercept and ICloudProvider.
+// CloudStorage -- central layer between cloud_intercept and ICloudProvider.
 // Manages local blob cache, metadata sync, change number coordination,
 // and a background worker for async cloud uploads/deletes.
 // All public methods are thread-safe.
@@ -46,18 +46,20 @@ bool DeleteBlob(uint32_t accountId, uint32_t appId,
 // Check if a blob exists (local cache or cloud).
 bool BlobExists(uint32_t accountId, uint32_t appId,
                 const std::string& filename);
+ICloudProvider::ExistsStatus CheckBlobExists(uint32_t accountId, uint32_t appId,
+                                             const std::string& filename);
 
-// Get the authoritative change number (max of local and cloud).
-uint64_t GetChangeNumber(uint32_t accountId, uint32_t appId);
-
-// Root token persistence — same as before but also syncs to cloud.
-void SaveRootTokens(uint32_t accountId, uint32_t appId,
+// Root token persistence -- same as before but also syncs to cloud.
+// Returns true if local disk persist succeeded (cloud upload is async
+// and its result is reported separately via the work queue).
+bool SaveRootTokens(uint32_t accountId, uint32_t appId,
                     const std::unordered_set<std::string>& tokens);
 std::unordered_set<std::string> LoadRootTokens(uint32_t accountId, uint32_t appId);
 
 // Per-file token tracking: which root token each file was uploaded under.
 // Synced to cloud alongside root_token.dat and cn.dat.
-void SaveFileTokens(uint32_t accountId, uint32_t appId,
+// Returns true if local disk persist succeeded.
+bool SaveFileTokens(uint32_t accountId, uint32_t appId,
                     const std::unordered_map<std::string, std::string>& fileTokens);
 std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, uint32_t appId);
 
@@ -74,10 +76,19 @@ std::vector<uint32_t> SyncAllFromCloud(uint32_t accountId);
 void DrainQueue();
 
 // Block until pending background operations for one app complete.
-void DrainQueueForApp(uint32_t accountId, uint32_t appId);
+bool DrainQueueForApp(uint32_t accountId, uint32_t appId);
 
 // Push the change number to the cloud provider (uploads cn.dat).
 void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn);
+bool PushCNToCloudSync(uint32_t accountId, uint32_t appId, uint64_t cn);
+
+// End-of-batch publish policy: drain pending work, then synchronously push
+// CN. If either step fails, enqueue an async CN retry and block once more on
+// DrainQueueForApp so process exit does not drop the CN publish or leave
+// failed uploads/deletes unretried.
+// Returns true only when both the drain and the sync CN push succeeded
+// without going through the retry path.
+bool CommitCNWithRetry(uint32_t accountId, uint32_t appId, uint64_t cn);
 
 // Show an immediate error dialog for critical auth failures (e.g. token refresh broken).
 // Called by provider implementations (GDrive, OneDrive) when refresh fails.

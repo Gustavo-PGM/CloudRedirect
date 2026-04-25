@@ -99,7 +99,7 @@ public static class SteamDetector
         }
         catch
         {
-            // Version parse can fail if manifest is malformed — not critical
+            // Version parse can fail if manifest is malformed -- not critical
         }
         return null;
     }

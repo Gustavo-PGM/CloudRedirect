@@ -131,10 +131,10 @@ namespace CloudRedirect.Services.Patching
             var md5Hex = System.Text.Encoding.ASCII.GetBytes(
                 Convert.ToHexString(MD5.HashData(xored)).ToLowerInvariant());
 
-            // CRC-64 — non-standard variant (XOR-before-shift).
+            // CRC-64 -- non-standard variant (XOR-before-shift).
             // NOTE (M15): The polynomial 0x85E1C3D753D46D27 and the XOR-before-shift
             // order are specific to SteamTools' implementation. This is NOT a standard
-            // CRC-64/ECMA or CRC-64/ISO algorithm. Do not "fix" the bit ordering —
+            // CRC-64/ECMA or CRC-64/ISO algorithm. Do not "fix" the bit ordering --
             // it must match Core.dll's computation exactly.
             ulong crc = 0xFFFFFFFFFFFFFFFF;
             foreach (byte b in md5Hex)

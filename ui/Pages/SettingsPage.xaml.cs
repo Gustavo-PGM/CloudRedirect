@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Text.Json;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using CloudRedirect.Resources;
@@ -31,38 +32,69 @@ public partial class SettingsPage : Page
     public SettingsPage()
     {
         InitializeComponent();
-        Loaded += (_, _) =>
+        Loaded += async (_, _) =>
         {
             LoadAbout();
-            LoadLanguageSelector();
-
-            var mode = Services.SteamDetector.ReadModeSetting();
-            if (mode == "cloud_redirect")
-            {
-                SyncSection.Visibility = Visibility.Visible;
-                LoadSyncToggles();
-            }
-            else
-            {
-                SyncSection.Visibility = Visibility.Collapsed;
-            }
+            try { await LoadSettingsAsync(); }
+            catch { }
         };
     }
 
-    private void LoadAbout()
+    /// <summary>
+    /// Snapshot of everything LoadSettingsAsync gathers off the UI thread.
+    /// All disk reads (settings.json language, settings.json mode,
+    /// config.json sync toggles) happen in Task.Run; the dispatcher
+    /// continuation only mutates controls.
+    /// </summary>
+    private sealed record SettingsSnapshot(
+        string Language,
+        string? Mode,
+        bool? SyncAchievements,
+        bool? SyncPlaytime,
+        bool? SyncLuas);
+
+    // M15: Move language/mode/sync-toggle config reads off the UI thread.
+    // Loaded used to call ReadLanguageSetting + ReadModeSetting +
+    // LoadSyncToggles synchronously, which can stall on a slow disk
+    // (network drive, AV scan). Mirror DashboardPage.LoadStatusAsync:
+    // gather a snapshot in Task.Run, apply controls afterward.
+    private async Task LoadSettingsAsync()
     {
-        var version = Assembly.GetExecutingAssembly().GetName().Version;
-        VersionText.Text = version != null
-            ? S.Format("Settings_VersionFormat", version.Major, version.Minor, version.Build)
-            : S.Get("Settings_CloudRedirect");
+        var snapshot = await Task.Run(() =>
+        {
+            var lang = ReadLanguageSetting();
+            var mode = Services.SteamDetector.ReadModeSetting();
+
+            bool? a = null, p = null, l = null;
+            if (mode == "cloud_redirect")
+                ReadSyncTogglesInto(ref a, ref p, ref l);
+
+            return new SettingsSnapshot(lang, mode, a, p, l);
+        });
+
+        ApplySettingsSnapshot(snapshot);
     }
 
-    private void LoadLanguageSelector()
+    private void ApplySettingsSnapshot(SettingsSnapshot snap)
+    {
+        ApplyLanguageSelector(snap.Language);
+
+        if (snap.Mode == "cloud_redirect")
+        {
+            SyncSection.Visibility = Visibility.Visible;
+            ApplySyncToggles(snap.SyncAchievements, snap.SyncPlaytime, snap.SyncLuas);
+        }
+        else
+        {
+            SyncSection.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void ApplyLanguageSelector(string saved)
     {
         _languageLoading = true;
         try
         {
-            var saved = ReadLanguageSetting();
             LanguageComboBox.Items.Clear();
 
             int selectedIndex = 0;
@@ -80,6 +112,55 @@ public partial class SettingsPage : Page
         {
             _languageLoading = false;
         }
+    }
+
+    private void ApplySyncToggles(bool? achievements, bool? playtime, bool? luas)
+    {
+        _syncLoading = true;
+        try
+        {
+            if (achievements == true) SyncAchievementsToggle.IsChecked = true;
+            if (playtime == true) SyncPlaytimeToggle.IsChecked = true;
+            if (luas == true) SyncLuasToggle.IsChecked = true;
+        }
+        finally
+        {
+            _syncLoading = false;
+        }
+    }
+
+    /// <summary>
+    /// Reads the sync toggle booleans from config.json on the calling
+    /// thread. Used by LoadSettingsAsync inside Task.Run so the dispatcher
+    /// path never opens config.json synchronously.
+    /// </summary>
+    private static void ReadSyncTogglesInto(ref bool? achievements, ref bool? playtime, ref bool? luas)
+    {
+        try
+        {
+            var path = GetConfigPath();
+            if (!File.Exists(path)) return;
+
+            var json = File.ReadAllText(path);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("sync_achievements", out var a) && a.ValueKind == JsonValueKind.True)
+                achievements = true;
+            if (root.TryGetProperty("sync_playtime", out var p) && p.ValueKind == JsonValueKind.True)
+                playtime = true;
+            if (root.TryGetProperty("sync_luas", out var l) && l.ValueKind == JsonValueKind.True)
+                luas = true;
+        }
+        catch { }
+    }
+
+    private void LoadAbout()
+    {
+        var version = Assembly.GetExecutingAssembly().GetName().Version;
+        VersionText.Text = version != null
+            ? S.Format("Settings_VersionFormat", version.Major, version.Minor, version.Build)
+            : S.Get("Settings_CloudRedirect");
     }
 
     private void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -174,32 +255,6 @@ public partial class SettingsPage : Page
     private static string GetConfigPath()
     {
         return Services.SteamDetector.GetConfigFilePath();
-    }
-
-    private void LoadSyncToggles()
-    {
-        _syncLoading = true;
-        try
-        {
-            var path = GetConfigPath();
-            if (!File.Exists(path)) return;
-
-            var json = File.ReadAllText(path);
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            if (root.TryGetProperty("sync_achievements", out var a) && a.ValueKind == JsonValueKind.True)
-                SyncAchievementsToggle.IsChecked = true;
-            if (root.TryGetProperty("sync_playtime", out var p) && p.ValueKind == JsonValueKind.True)
-                SyncPlaytimeToggle.IsChecked = true;
-            if (root.TryGetProperty("sync_luas", out var l) && l.ValueKind == JsonValueKind.True)
-                SyncLuasToggle.IsChecked = true;
-        }
-        catch { }
-        finally
-        {
-            _syncLoading = false;
-        }
     }
 
     private void SyncToggle_Changed(object sender, RoutedEventArgs e)

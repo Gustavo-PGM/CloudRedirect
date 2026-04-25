@@ -69,7 +69,16 @@ int64_t Iso8601ToUnix(const std::string& iso) {
     if (matched != 6) return 0;
     tm.tm_year -= 1900;
     tm.tm_mon -= 1;
-    return (int64_t)_mkgmtime(&tm);
+    // _mkgmtime returns (time_t)-1 for any tm value it can't represent --
+    // pre-1970 dates, leap-day overflow, negative fields from sscanf failing
+    // to fully match. A subsequent int64→uint64 cast in callers (e.g.
+    // providers writing FileInfo::modifiedTime) turns -1 into UINT64_MAX,
+    // which trivially exceeds any tombstone creation time and bypasses the
+    // SyncFromCloud blob-mtime override gate. Return 0 instead so downstream
+    // callers fall back to the "missing mtime" CN-only path.
+    time_t t = _mkgmtime(&tm);
+    if (t == static_cast<time_t>(-1)) return 0;
+    return static_cast<int64_t>(t);
 }
 
 std::string UnixToIso8601(int64_t ts) {

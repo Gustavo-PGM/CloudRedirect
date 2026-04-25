@@ -17,6 +17,7 @@ namespace CloudRedirect.Pages;
 public partial class AppsPage : Page
 {
     private bool _hasDeletedThisSession;
+    private bool _hasPrunedThisSession;
     private bool _backupsLoaded;
     private List<BackupInfo> _backups;
     private string _steamPath;
@@ -261,7 +262,7 @@ public partial class AppsPage : Page
         var steamPath = SteamDetector.FindSteamPath();
         if (steamPath == null) return;
 
-        // ---- Resolve all deletion targets BEFORE showing the dialog ----
+        // Resolve all deletion targets BEFORE showing the dialog
         var targets = await Task.Run(() => ResolveDeletionTargets(steamPath, app));
 
         // Build a rich-text summary of what we'll destroy
@@ -316,7 +317,7 @@ public partial class AppsPage : Page
         {
             var errors = new List<string>();
 
-            // ---- Back up everything before deleting ----
+            // Back up everything before deleting
             var backupTimestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
             var backupDir = Path.Combine(BackupPaths.GetAppDeleteRoot(steamPath),
                 app.AccountId, $"{app.AppId}_{backupTimestamp}");
@@ -358,8 +359,7 @@ public partial class AppsPage : Page
                 File.WriteAllText(Path.Combine(backupDir, "undo_log.json"), json);
             });
 
-            // ---- Now delete everything ----
-
+            // Now delete everything
             // 1. Delete CloudRedirect local storage (unified + legacy)
             await Task.Run(() =>
             {
@@ -436,6 +436,387 @@ public partial class AppsPage : Page
         {
             await Dialog.ShowErrorAsync(S.Get("Apps_DeleteFailedTitle"), $"Error: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Per-card "Review / Collapse" expand toggle. Matches the Cleanup tab
+    /// pattern: a caution-appearance text button whose label flips between
+    /// "Review Orphans" and "Collapse" while the sibling detail panel is
+    /// shown/hidden. The visibility is driven directly by click instead of
+    /// via a data binding so the list can be kept as an uncolored sibling
+    /// <see cref="StackPanel"/> in the <see cref="DataTemplate"/> (no
+    /// INotifyPropertyChanged plumbing needed on <see cref="AppInfo"/>).
+    /// </summary>
+    private void OrphansToggle_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Primitives.ButtonBase btn) return;
+
+        // Walk up to the outer DataTemplate-root StackPanel (the one whose
+        // first child is the CardControl and whose second child is the
+        // orphans detail StackPanel).
+        DependencyObject? cur = btn;
+        StackPanel? outer = null;
+        while (cur != null)
+        {
+            cur = System.Windows.Media.VisualTreeHelper.GetParent(cur);
+            if (cur is StackPanel sp &&
+                sp.Children.Count == 2 &&
+                sp.Children[0] is Wpf.Ui.Controls.CardControl &&
+                sp.Children[1] is StackPanel)
+            {
+                outer = sp;
+                break;
+            }
+        }
+        if (outer == null) return;
+        if (outer.Children[1] is not StackPanel detail) return;
+
+        if (detail.Visibility == Visibility.Collapsed)
+        {
+            detail.Visibility = Visibility.Visible;
+            btn.SetValue(System.Windows.Controls.ContentControl.ContentProperty,
+                S.Get("Apps_CollapseOrphans"));
+        }
+        else
+        {
+            detail.Visibility = Visibility.Collapsed;
+            btn.SetValue(System.Windows.Controls.ContentControl.ContentProperty,
+                S.Get("Apps_ReviewOrphans"));
+        }
+    }
+
+    /// <summary>
+    /// Top-level "Scan Cloud for Orphans" action. Iterates every local
+    /// app and asks <see cref="OrphanBlobService"/> which of its cloud
+    /// blobs are unreferenced, then mutates each <see cref="AppInfo"/>
+    /// so that only apps with true orphans reveal their prune expander.
+    ///
+    /// Scans are serialized (one cloud listing at a time) to avoid
+    /// tripping provider rate limits, and the Steam-closed gate is
+    /// checked once at the top rather than per-app -- uploads in
+    /// flight while Steam is running would race against the listing
+    /// and could produce false orphans, so a single upfront gate is
+    /// both cheaper and more correct than a per-app one.
+    ///
+    /// SAFETY: Scan results with <c>ListingComplete == false</c> or a
+    /// non-null <c>Error</c> never populate <see cref="AppInfo.HasOrphans"/>,
+    /// so the Prune All affordance cannot appear for an app whose
+    /// listing we couldn't trust. Counted separately in the post-scan
+    /// status so the user knows some apps weren't verified.
+    /// </summary>
+    private async void ScanOrphans_Click(object sender, RoutedEventArgs e)
+    {
+        if (_allApps == null || _allApps.Count == 0) return;
+
+        ScanOrphansButton.IsEnabled = false;
+        var originalContent = ScanOrphansButton.Content;
+        try
+        {
+            // Short-circuit: local-only providers have no cloud to scan.
+            var providerName = CloudProviderClient.GetProviderDisplayName();
+            if (providerName == null)
+            {
+                await Dialog.ShowInfoAsync(
+                    S.Get("Apps_ScanLocalOnlyTitle"),
+                    S.Get("Apps_ScanLocalOnlyMessage"));
+                return;
+            }
+
+            // Explain what an orphan is up front. The button alone said nothing
+            // about what would happen, so a user who clicked out of curiosity
+            // got handed a "close Steam" warning with no context.
+            if (!await Dialog.ConfirmAsync(
+                    S.Get("Apps_ScanOrphansExplainTitle"),
+                    S.Get("Apps_ScanOrphansExplainMessage")))
+            {
+                return;
+            }
+
+            // Single Steam-closed gate for the whole batch; no point
+            // scanning the rest if the user refuses.
+            if (!await SteamDetector.EnsureSteamClosedAsync()) return;
+
+            var steamPath = SteamDetector.FindSteamPath();
+            if (steamPath == null) return;
+
+            ScanStatusText.Text = "";
+
+            // Reuse a single CloudProviderClient across all per-app
+            // listings -- one warm HttpClient, one auth refresh.
+            using var client = new CloudProviderClient();
+            var svc = new OrphanBlobService(client, steamPath);
+
+            int scannedOk = 0;
+            int scanFailed = 0;
+            int totalOrphans = 0;
+            int appsWithOrphans = 0;
+            int i = 0;
+
+            // Clear any prior scan state so stale orphans from a
+            // previous scan can't linger on apps that are now clean.
+            foreach (var a in _allApps)
+            {
+                a.HasOrphans = false;
+                a.OrphanFiles = new List<string>();
+                a.OrphanSummary = "";
+            }
+
+            foreach (var app in _allApps)
+            {
+                i++;
+                ScanOrphansButton.Content = S.Format(
+                    "Apps_ScanningOrphansFormat", i, _allApps.Count);
+
+                try
+                {
+                    var scan = await svc.ScanAsync(app.AccountId, app.AppId);
+
+                    if (!scan.ListingComplete || scan.Error != null)
+                    {
+                        scanFailed++;
+                        continue;
+                    }
+
+                    scannedOk++;
+                    if (scan.Orphans.Count > 0)
+                    {
+                        app.HasOrphans = true;
+                        // Authoritative list for the destructive action --
+                        // raw provider-returned filenames, never the
+                        // sanitized projection (which would either no-op
+                        // on delete or target a wrong blob).
+                        app.OrphanFiles = scan.Orphans.ToList();
+                        app.OrphanFilesPreview = scan.Orphans
+                            .Select(SanitizeForPreview)
+                            .ToList();
+                        app.OrphanSummary = S.Format(
+                            "Apps_OrphanSummaryFormat", scan.Orphans.Count);
+                        totalOrphans += scan.Orphans.Count;
+                        appsWithOrphans++;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch
+                {
+                    scanFailed++;
+                }
+            }
+
+            // Rebind so the expander visibility + summaries refresh.
+            ApplyAppFilter();
+
+            // Status text next to the button summarises the run.
+            if (appsWithOrphans == 0 && scanFailed == 0)
+            {
+                ScanStatusText.Text = S.Format(
+                    "Apps_ScanCompleteCleanFormat", scannedOk);
+            }
+            else
+            {
+                var parts = new List<string>();
+                if (appsWithOrphans > 0)
+                    parts.Add(S.Format("Apps_ScanCompleteFoundFormat",
+                        totalOrphans, appsWithOrphans));
+                if (scanFailed > 0)
+                    parts.Add(S.Format("Apps_ScanCompletePartialFormat", scanFailed));
+                ScanStatusText.Text = string.Join("  ", parts);
+            }
+        }
+        catch (Exception ex)
+        {
+            await Dialog.ShowErrorAsync(
+                S.Get("Apps_ScanFailedTitle"), ex.Message);
+        }
+        finally
+        {
+            ScanOrphansButton.IsEnabled = true;
+            ScanOrphansButton.Content = originalContent;
+        }
+    }
+
+    /// <summary>
+    /// Prune the already-scanned orphan blobs for a single app. The
+    /// orphan list itself is displayed in-page by the expander above
+    /// (populated by <see cref="ScanOrphans_Click"/>), so this flow
+    /// only needs a countdown confirmation before deletion -- no
+    /// modal preview.
+    ///
+    /// Uses <see cref="AppInfo.OrphanFiles"/> captured at scan time
+    /// rather than re-scanning: re-scanning would introduce a TOCTOU
+    /// where a blob uploaded between scan and prune could be deleted
+    /// without the user ever seeing it. The scan-time snapshot is the
+    /// authoritative basis for the destructive action.
+    /// </summary>
+    private async void PruneOrphans_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: AppInfo app } fe) return;
+        if (fe is not System.Windows.Controls.Primitives.ButtonBase btn) return;
+
+        // Defense-in-depth: this button is bound to be visible only
+        // when HasOrphans is true, but an unexpected binding state or
+        // a scan clearing the list concurrently should not cause a
+        // blank prune.
+        if (!app.HasOrphans || app.OrphanFiles.Count == 0) return;
+
+        btn.IsEnabled = false;
+
+        try
+        {
+            var providerName = CloudProviderClient.GetProviderDisplayName();
+            if (providerName == null) return; // scan would have refused too
+
+            if (!await SteamDetector.EnsureSteamClosedAsync()) return;
+
+            var steamPath = SteamDetector.FindSteamPath();
+            if (steamPath == null) return;
+
+            // Countdown confirmation. Session-skip flag mirrors
+            // DeleteApp_Click: first prune of the session pays 3s, later
+            // prunes skip. The flag only advances on verified progress
+            // (Deleted > 0) below so a total-failure attempt still pays
+            // the tax on retry.
+            var countdown = _hasPrunedThisSession ? 0 : 3;
+            var confirmed = await Dialog.ConfirmDangerCountdownAsync(
+                S.Get("Apps_PruneFinalConfirmTitle"),
+                S.Format("Apps_PruneFinalConfirmMessageFormat",
+                    app.OrphanFiles.Count, app.DisplayName),
+                countdown);
+            if (!confirmed) return;
+
+            using var client = new CloudProviderClient();
+            var svc = new OrphanBlobService(client, steamPath);
+
+            OrphanBlobService.PruneResult result;
+            try
+            {
+                result = await svc.PruneAsync(app.AccountId, app.AppId, app.OrphanFiles);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                await Dialog.ShowErrorAsync(
+                    S.Get("Apps_PruneFailedTitle"),
+                    S.Format("Apps_PruneFailedMessageFormat",
+                        0, app.DisplayName, ex.Message));
+                return;
+            }
+
+            if (result.Failed == 0)
+            {
+                // Full success: clear orphan state so the expander
+                // disappears without a re-scan.
+                app.HasOrphans = false;
+                app.OrphanFiles = new List<string>();
+                app.OrphanFilesPreview = new List<string>();
+                app.OrphanSummary = "";
+                ApplyAppFilter();
+
+                await Dialog.ShowInfoAsync(
+                    S.Get("Apps_PruneCompleteTitle"),
+                    S.Format("Apps_PruneCompleteMessageFormat",
+                        result.Deleted, app.DisplayName));
+            }
+            else if (result.Deleted > 0)
+            {
+                // Partial success: retain only the files that failed, so
+                // the user can retry just those. Preserves UI state
+                // across the retry without a re-scan. Both lists are
+                // refreshed together so the display projection stays in
+                // sync with the authoritative list.
+                app.OrphanFiles = result.FailedFilenames.ToList();
+                app.OrphanFilesPreview = app.OrphanFiles
+                    .Select(SanitizeForPreview)
+                    .ToList();
+                app.HasOrphans = app.OrphanFiles.Count > 0;
+                app.OrphanSummary = app.HasOrphans
+                    ? S.Format("Apps_OrphanSummaryFormat", app.OrphanFiles.Count)
+                    : "";
+                ApplyAppFilter();
+
+                var failedSample = string.Join("\n",
+                    result.FailedFilenames.Take(20).Select(f => $"  {f}"));
+                if (result.FailedFilenames.Count > 20)
+                    failedSample += $"\n  ...and {result.FailedFilenames.Count - 20} more";
+
+                await Dialog.ShowWarningAsync(
+                    S.Get("Apps_PrunePartialTitle"),
+                    S.Format("Apps_PrunePartialMessageFormat",
+                        result.Deleted,
+                        result.Deleted + result.Failed,
+                        app.DisplayName,
+                        result.Failed,
+                        failedSample,
+                        result.Error ?? "(no details)"));
+            }
+            else
+            {
+                await Dialog.ShowErrorAsync(
+                    S.Get("Apps_PruneFailedTitle"),
+                    S.Format("Apps_PruneFailedMessageFormat",
+                        app.OrphanFiles.Count, app.DisplayName,
+                        result.Error ?? "(no details)"));
+            }
+
+            if (result.Deleted > 0)
+                _hasPrunedThisSession = true;
+        }
+        catch (Exception ex)
+        {
+            await Dialog.ShowErrorAsync(S.Get("Apps_PruneFailedTitle"), $"Error: {ex.Message}");
+        }
+        finally
+        {
+            btn.IsEnabled = true;
+        }
+    }
+
+    /// <summary>
+    /// Sanitize a cloud-returned filename for UI preview display: strips
+    /// control characters (which would break WrapPanel layout) and bidi-
+    /// override codepoints (which could visually reorder the filename so
+    /// the user approves something different from what it actually
+    /// deletes). The sanitized form is for display only -- the prune
+    /// path uses the original filename from the scan result.
+    /// </summary>
+    private static string SanitizeForPreview(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return "";
+        // Fast path: the common case is ASCII-printable filenames.
+        bool needsSanitize = false;
+        foreach (var c in name)
+        {
+            if (char.IsControl(c) || c == '\u202A' || c == '\u202B' ||
+                c == '\u202C' || c == '\u202D' || c == '\u202E' ||
+                c == '\u2066' || c == '\u2067' || c == '\u2068' || c == '\u2069')
+            {
+                needsSanitize = true;
+                break;
+            }
+        }
+        if (!needsSanitize) return name;
+        var sb = new System.Text.StringBuilder(name.Length);
+        foreach (var c in name)
+        {
+            if (char.IsControl(c)) { sb.Append('?'); continue; }
+            // Explicit bidi overrides (LRE/RLE/PDF/LRO/RLO) and bidi
+            // isolates (LRI/RLI/FSI/PDI) can reorder surrounding text
+            // visually -- replace with a visible placeholder.
+            if (c == '\u202A' || c == '\u202B' || c == '\u202C' ||
+                c == '\u202D' || c == '\u202E' ||
+                c == '\u2066' || c == '\u2067' || c == '\u2068' || c == '\u2069')
+            {
+                sb.Append('?');
+                continue;
+            }
+            sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     private async void LoadBackups()
@@ -769,4 +1150,49 @@ public class AppInfo
 
     /// <summary>Header image URL (292x136) from Steam CDN, or null.</summary>
     public string? HeaderUrl { get; set; }
+
+    /// <summary>
+    /// True iff the last cloud-orphan scan for this app completed
+    /// successfully AND returned at least one orphan. The expander +
+    /// prune affordance are bound to this flag, so apps that are clean
+    /// (or have never been scanned, or whose scan failed) show no
+    /// prune UI at all.
+    /// </summary>
+    public bool HasOrphans { get; set; }
+
+    /// <summary>
+    /// Localized summary text shown in the expander header, e.g.
+    /// "3 unreferenced cloud blobs". Empty when HasOrphans is false.
+    /// </summary>
+    public string OrphanSummary { get; set; } = "";
+
+    /// <summary>
+    /// Original filenames from the last scan, in the order returned by
+    /// <see cref="OrphanBlobService.ComputeOrphans"/> (case-sensitive
+    /// ordinal sort). This list is the authoritative source for the
+    /// prune step -- never re-scan between showing it to the user and
+    /// pruning, to avoid a TOCTOU where a newly-uploaded blob appears
+    /// as a "new" orphan on a second scan and gets deleted without
+    /// the user having seen it.
+    ///
+    /// IMPORTANT: this list holds the RAW provider-returned filenames
+    /// and must be the one passed to <see cref="OrphanBlobService.PruneAsync"/>.
+    /// Display UI binds to <see cref="OrphanFilesPreview"/> which carries
+    /// the sanitized-for-safe-display projection; feeding the sanitized
+    /// names into a delete call would either no-op (name mismatch) or,
+    /// worse, match a DIFFERENT blob whose name coincidentally equals the
+    /// sanitized form.
+    /// </summary>
+    public List<string> OrphanFiles { get; set; } = new();
+
+    /// <summary>
+    /// Display-only projection of <see cref="OrphanFiles"/> with control
+    /// characters and bidi-override codepoints replaced (see
+    /// <see cref="AppsPage.SanitizeForPreview"/>). Bound by the detail
+    /// panel's ItemsControl. Keeping this separate from the authoritative
+    /// <see cref="OrphanFiles"/> list is load-bearing: the prune action
+    /// must operate on the raw filenames the provider returned, not on
+    /// the human-friendly display form.
+    /// </summary>
+    public List<string> OrphanFilesPreview { get; set; } = new();
 }

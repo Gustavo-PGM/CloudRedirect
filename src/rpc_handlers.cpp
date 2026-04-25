@@ -12,8 +12,11 @@
 #include <unordered_set>
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <future>
 #include <sstream>
 
 namespace CloudIntercept {
@@ -51,7 +54,608 @@ static bool RequireAccountId(const char* op, uint32_t appId, uint32_t& accountId
 }
 
 static bool IsInternalMetadataFile(std::string_view cleanName) {
-    return cleanName == kPlaytimeMetadataPath || cleanName == kStatsMetadataPath;
+    return cleanName == kPlaytimeMetadataPath || cleanName == kStatsMetadataPath ||
+        cleanName == kLegacyPlaytimeMetadataPath || cleanName == kLegacyStatsMetadataPath;
+}
+
+static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId);
+static bool TryInvalidateTokenCachesForGeneration(uint32_t accountId, uint32_t appId,
+                                                  uint64_t generation,
+                                                  uint64_t& nextGeneration);
+
+// LOCK ORDER (AutoCloud subsystem)
+// All multi-mutex call chains follow this partial order. Adding any edge that
+// contradicts the order below risks deadlock; add new mutexes as leaves
+// unless you have a reason to widen the DAG.
+//
+//   g_autoCloudImportMutex  (top of the AutoCloud half of the tree)
+//       |
+//       +-> g_autoCloudTokenCacheMutex    \
+//       +-> g_rootTokenMutex              |  all inner locks released
+//       +-> g_fileTokensMutex             |  before the next is taken
+//       +-> g_batchCanonicalTokensMutex   |  (sequential, never nested
+//       +-> g_autoCloudBootstrapMutex     /   pairwise)
+//       +-> LocalStorage::g_mutex        (via StoreBlob / SetFileTimestamp
+//       |                                 / SaveRootTokens / SaveFileTokens
+//       |                                 in BootstrapAutoCloudFilesWorker's
+//       |                                 critical region)
+//       +-> CloudStorage::g_queueMutex   (via EnqueueWork transitively from
+//                                         the same path)
+//
+//   g_fileTokensDirtyMutex   (held alone; never on the stack with anything)
+//
+//   Sinks (never held as an outer lock):
+//       CloudStorage::g_queueMutex, LocalStorage::g_mutex
+//
+// Generation counters in g_autoCloudCanonicalTokenGeneration act as the
+// race guard for import -> publish handoff; no dedicated publish mutex is
+// needed.
+//
+// INVARIANTS enforced by deliberate "release before I/O" patterns:
+//   - BootstrapAutoCloudFilesWorker releases g_autoCloudImportMutex before
+//     CommitCNWithRetry (network). Holding it across a slow provider would
+//     serialize every RPC-driven InvalidateTokenCaches against the publish.
+//   - BootstrapAutoCloudFiles spawns std::async OUTSIDE
+//     g_autoCloudBootstrapMutex (see orchestrator counter). Thread creation
+//     on Windows can take hundreds of ms.
+//   - TryCaptureRootToken / PersistFileTokens snapshot under their mutex,
+//     release, then perform disk I/O + cloud enqueue. HandleGetChangelist's
+//     file-token load follows the same pattern (snapshot, release, load,
+//     re-acquire, double-check).
+//   - WorkerLoop performs network I/O BETWEEN two disjoint g_queueMutex
+//     scopes. g_queueMutex never wraps a provider call.
+//   - g_queueMutex never outer to LocalStorage::g_mutex. The worker's
+//     LocalStorage::ClearDeleted call runs in the unlocked window between
+//     the two queue-mutex scopes.
+static std::mutex g_autoCloudTokenCacheMutex;
+static std::unordered_map<uint64_t, std::unordered_map<std::string, std::string>> g_autoCloudCanonicalTokenCache;
+static std::unordered_map<uint64_t, uint64_t> g_autoCloudCanonicalTokenGeneration;
+static std::mutex g_autoCloudImportMutex;
+static std::mutex g_autoCloudBootstrapMutex;
+static std::condition_variable g_autoCloudBootstrapCV;
+static std::unordered_set<uint64_t> g_autoCloudBootstrapAttemptedApps;
+static std::unordered_set<uint64_t> g_autoCloudBootstrapActiveApps;
+static std::vector<std::future<void>> g_autoCloudBootstrapFutures;
+static bool g_autoCloudBootstrapShuttingDown = false;
+// Number of BootstrapAutoCloudFiles frames currently between TryBegin and
+// return. Incremented by the async spawn path once the frame has taken
+// ownership of an active-set entry, decremented by RAII at return. Exists
+// because the worker's Finish clears `active` the moment it aborts -- which
+// can happen BEFORE the spawner's frame has finished touching the mutex/
+// futures vector. Shutdown must wait on this in addition to active.empty()
+// so ShutdownRpcHandlers cannot return while a spawner is still live.
+static int g_autoCloudBootstrapOrchestratorCount = 0;
+
+static void CacheAutoCloudCanonicalTokens(uint32_t accountId, uint32_t appId,
+                                          const std::vector<LocalStorage::FileEntry>& candidates,
+                                          uint64_t generation) {
+    std::unordered_map<std::string, std::string> tokens;
+    for (const auto& fe : candidates) {
+        if (!fe.filename.empty()) tokens.emplace(fe.filename, fe.rootToken);
+    }
+    std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+    uint64_t key = MakeAppAccountKey(accountId, appId);
+    if (g_autoCloudCanonicalTokenGeneration[key] != generation) return;
+    g_autoCloudCanonicalTokenCache[key] = std::move(tokens);
+}
+
+static void ClearAutoCloudCanonicalTokens(uint32_t accountId, uint32_t appId,
+                                          uint64_t generation) {
+    std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+    uint64_t key = MakeAppAccountKey(accountId, appId);
+    if (g_autoCloudCanonicalTokenGeneration[key] != generation) return;
+    g_autoCloudCanonicalTokenCache.erase(key);
+}
+
+static uint64_t GetAutoCloudCanonicalTokenGeneration(uint32_t accountId, uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+    return g_autoCloudCanonicalTokenGeneration[MakeAppAccountKey(accountId, appId)];
+}
+
+static bool TryBeginAutoCloudBootstrap(uint32_t accountId, uint32_t appId) {
+    uint64_t appKey = MakeAppAccountKey(accountId, appId);
+    std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+    for (auto it = g_autoCloudBootstrapFutures.begin(); it != g_autoCloudBootstrapFutures.end(); ) {
+        if (it->wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            try { it->get(); } catch (...) {}
+            it = g_autoCloudBootstrapFutures.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (g_autoCloudBootstrapShuttingDown || g_autoCloudBootstrapAttemptedApps.count(appKey) ||
+        g_autoCloudBootstrapActiveApps.count(appKey)) {
+        return false;
+    }
+    g_autoCloudBootstrapActiveApps.insert(appKey);
+    return true;
+}
+
+static void FinishAutoCloudBootstrap(uint32_t accountId, uint32_t appId,
+                                     bool markAttempted, uint64_t generation) {
+    uint64_t appKey = MakeAppAccountKey(accountId, appId);
+    bool generationCurrent = GetAutoCloudCanonicalTokenGeneration(accountId, appId) == generation;
+    std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+    g_autoCloudBootstrapActiveApps.erase(appKey);
+    if (markAttempted && generationCurrent) g_autoCloudBootstrapAttemptedApps.insert(appKey);
+    g_autoCloudBootstrapCV.notify_all();
+}
+
+static void WaitForAutoCloudBootstrap(uint32_t accountId, uint32_t appId) {
+    uint64_t appKey = MakeAppAccountKey(accountId, appId);
+    std::unique_lock<std::mutex> lock(g_autoCloudBootstrapMutex);
+    g_autoCloudBootstrapCV.wait(lock, [&] {
+        return !g_autoCloudBootstrapActiveApps.count(appKey);
+    });
+}
+
+static bool IsAutoCloudBootstrapActive(uint32_t accountId, uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+    return g_autoCloudBootstrapActiveApps.count(MakeAppAccountKey(accountId, appId)) != 0;
+}
+
+// Cooperative shutdown probe for BootstrapAutoCloudFilesWorker. Checked at
+// safe abort points BEFORE any blob writes have been persisted -- once the
+// worker is past the local-write region it commits fully (including CN
+// publish) so on-disk state stays consistent.
+static bool IsAutoCloudBootstrapShuttingDown() {
+    std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+    return g_autoCloudBootstrapShuttingDown;
+}
+
+static bool LooksLikeForeignAppPollution(const std::string& filename, uint32_t appId) {
+    size_t pos = filename.find_first_of("/\\");
+    if (pos != std::string::npos && pos >= 3 && pos <= 10) {
+        const std::string prefix = filename.substr(0, pos);
+        if (std::all_of(prefix.begin(), prefix.end(), [](unsigned char c) { return std::isdigit(c); })) {
+            try {
+                uint32_t embeddedAppId = static_cast<uint32_t>(std::stoul(prefix));
+                if (embeddedAppId != 0 && embeddedAppId != appId) return true;
+            } catch (...) {
+            }
+        }
+    }
+
+    size_t underscore = filename.find("_%");
+    if (underscore != std::string::npos && underscore >= 3 && underscore <= 10) {
+        const std::string prefix = filename.substr(0, underscore);
+        if (std::all_of(prefix.begin(), prefix.end(), [](unsigned char c) { return std::isdigit(c); })) {
+            try {
+                uint32_t embeddedAppId = static_cast<uint32_t>(std::stoul(prefix));
+                if (embeddedAppId != 0 && embeddedAppId != appId) return true;
+            } catch (...) {
+            }
+        }
+    }
+
+    return false;
+}
+
+static constexpr uint64_t kMaxAutoCloudImportBytes = 128ULL * 1024 * 1024;
+
+static std::vector<uint8_t> ReadWholeFile(const std::string& path, bool& ok) {
+    ok = false;
+    std::ifstream f(FileUtil::Utf8ToPath(path), std::ios::binary | std::ios::ate);
+    if (!f) return {};
+    auto size = f.tellg();
+    if (size < 0) return {};
+    if (static_cast<uint64_t>(size) > kMaxAutoCloudImportBytes) {
+        LOG("[AutoCloudImport] Skipping oversized source: %s (%llu bytes)",
+            path.c_str(), static_cast<unsigned long long>(size));
+        return {};
+    }
+    f.seekg(0, std::ios::beg);
+    std::vector<uint8_t> data(static_cast<size_t>(size));
+    if (!data.empty() && !f.read(reinterpret_cast<char*>(data.data()), size)) return {};
+    ok = true;
+    return data;
+}
+
+static bool HasPersistedLocalCloudHistory(uint32_t accountId, uint32_t appId) {
+    return std::filesystem::exists(FileUtil::Utf8ToPath(LocalStorage::GetAppPath(accountId, appId)) / "cn.dat");
+}
+
+static void BootstrapAutoCloudFilesWorker(uint32_t accountId, uint32_t appId,
+                                          uint64_t cacheGeneration) {
+    // RAII guard: FinishAutoCloudBootstrap MUST run to release the slot in
+    // g_autoCloudBootstrapActiveApps and notify the shutdown CV. If any call
+    // in the write/drain/publish body throws (std::filesystem_error from a
+    // bad parent-path in WriteFileNoIncrement, bad_alloc under memory
+    // pressure, provider RPC exceptions), unwinding the worker without
+    // running finish() leaks the active-app slot -- which hangs
+    // ShutdownRpcHandlers indefinitely and pins HandleGetChangelist on the
+    // slow disk-load path forever (the bootstrap-active guard in commit N
+    // would stay latched). Explicit finish() calls below LATCH the guard
+    // so the normal success path controls markAttempted/generation; the
+    // default-destruct path covers only the exception case.
+    struct FinishGuard {
+        uint32_t accountId;
+        uint32_t appId;
+        uint64_t generation;
+        bool markAttempted;
+        bool fired;
+        ~FinishGuard() {
+            if (!fired) {
+                LOG("[AutoCloudImport] Worker aborted via exception for app %u -- releasing bootstrap slot", appId);
+                FinishAutoCloudBootstrap(accountId, appId, markAttempted, generation);
+            }
+        }
+    };
+    FinishGuard guard{accountId, appId, cacheGeneration, /*markAttempted=*/false, /*fired=*/false};
+    auto finish = [&](bool markAttempted, uint64_t generation) {
+        guard.fired = true;
+        FinishAutoCloudBootstrap(accountId, appId, markAttempted, generation);
+    };
+
+    // Abort early if shutdown was signaled before the scan ran. The scan can
+    // walk thousands of files and has a 5-second wall budget; refusing here
+    // lets the process exit promptly when a user closes Steam right after
+    // launch. markAttempted=false so a subsequent session can retry if the
+    // process is somehow re-initialized without reloading the DLL.
+    if (IsAutoCloudBootstrapShuttingDown()) {
+        LOG("[AutoCloudImport] Aborting bootstrap for app %u -- shutdown in progress", appId);
+        ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+        finish(false, cacheGeneration);
+        return;
+    }
+
+    LocalStorage::AutoCloudScanResult scan;
+    try {
+        scan = LocalStorage::GetAutoCloudFileList(GetSteamPath(), accountId, appId);
+    } catch (const std::exception& ex) {
+        // Any remaining exceptions are genuinely unexpected filesystem-API
+        // failures, not the routine scan-limit condition (which now returns
+        // structured state below). Clear the cache because we have no
+        // confidence in internal state at this point.
+        LOG("[AutoCloudImport] Scan failed for app %u: %s", appId, ex.what());
+        ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+        finish(false, cacheGeneration);
+        return;
+    } catch (...) {
+        LOG("[AutoCloudImport] Scan failed for app %u", appId);
+        ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+        finish(false, cacheGeneration);
+        return;
+    }
+    // Order matters: collision is OBSERVED evidence of misconfiguration --
+    // it was actually seen in the scanned prefix. Scan-limit is a statement
+    // about the UNOBSERVED tail. If both fire in the same scan, the
+    // collision is already proof the rules are broken regardless of what
+    // the unwalked tail contains, so treat it as corruption unconditionally.
+    // Checking scanLimitHit first would let a genuine collision spin
+    // forever on apps with large save trees: scan-limit preserves the
+    // cache and forces a retry, and every retry that trips the cap again
+    // would mask the collision indefinitely.
+    if (scan.hasRootCollision) {
+        // GetAutoCloudFileList already cleared scan.files. Clear the cache,
+        // fail closed, and markAttempted=true so we don't loop on this app.
+        LOG("[AutoCloudImport] Root collision detected for app %u; aborting bootstrap", appId);
+        ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+        finish(true, cacheGeneration);
+        return;
+    }
+    if (scan.scanLimitHit) {
+        // Scan-limit is a resource cap, not corruption. `scan.files` is a
+        // truncated prefix -- importing it would commit to canonicalizing
+        // only part of the save set while the Steam client may reference
+        // files beyond the cap. Fail closed on import (markAttempted=false
+        // so a future session retries with possibly more generous conditions)
+        // but preserve any canonical token cache that was already populated:
+        // wiping it would strand incoming RPCs that rely on cached tokens
+        // for files the scan DID observe successfully on a prior boot.
+        LOG("[AutoCloudImport] Scan limit hit for app %u (%zu files observed); "
+            "refusing partial import, preserving canonical token cache",
+            appId, scan.files.size());
+        finish(false, cacheGeneration);
+        return;
+    }
+    std::vector<LocalStorage::FileEntry>& candidates = scan.files;
+    if (candidates.empty()) {
+        ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+        finish(true, cacheGeneration);
+        return;
+    }
+    size_t definitePollution = 0;
+    for (const auto& fe : candidates) {
+        if (LooksLikeForeignAppPollution(fe.filename, appId)) {
+            LOG("[AutoCloudImport] Definite pollution candidate for app %u: %s", appId, fe.filename.c_str());
+            ++definitePollution;
+        }
+    }
+    if (definitePollution > 0) {
+        LOG("[AutoCloudImport] Aborting import for app %u: %zu obvious pollution file(s) detected",
+            appId, definitePollution);
+        ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+        finish(true, cacheGeneration);
+        return;
+    }
+
+    std::unordered_map<std::string, LocalStorage::FileEntry> existing;
+    for (const auto& fe : LocalStorage::GetFileList(accountId, appId)) {
+        existing[fe.filename] = fe;
+    }
+
+    auto fileTokens = CloudStorage::LoadFileTokens(accountId, appId);
+    auto rootTokens = CloudStorage::LoadRootTokens(accountId, appId);
+    struct PendingImport {
+        std::string filename;
+        std::string sourcePath;
+        uint64_t timestamp = 0;
+        std::string rootToken;
+    };
+    std::vector<PendingImport> pendingImports;
+    bool tokenMetadataChanged = false;
+
+    for (const auto& fe : candidates) {
+        // Per-file shutdown probe -- this loop issues CheckBlobExists calls
+        // which can each block on network I/O. Bail early without marking
+        // the app attempted so the next session can retry.
+        if (IsAutoCloudBootstrapShuttingDown()) {
+            LOG("[AutoCloudImport] Aborting existence checks for app %u -- shutdown in progress", appId);
+            ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+            finish(false, cacheGeneration);
+            return;
+        }
+        if (fe.filename.empty() || fe.sourcePath.empty()) continue;
+        if (IsInternalMetadataFile(fe.filename)) continue;
+
+        auto it = existing.find(fe.filename);
+        if (it != existing.end()) {
+            if (!(it->second.sha == fe.sha && it->second.rawSize == fe.rawSize)) {
+                LOG("[AutoCloudImport] Skipping existing app %u file %s to avoid overwriting cached/cloud data",
+                    appId, fe.filename.c_str());
+                continue;
+            }
+
+            auto existingToken = fileTokens.find(fe.filename);
+            if (existingToken == fileTokens.end() || existingToken->second != fe.rootToken) {
+                fileTokens[fe.filename] = fe.rootToken;
+                tokenMetadataChanged = true;
+                LOG("[AutoCloudImport] Canonical root token for app %u file %s: '%s'",
+                    appId, fe.filename.c_str(), fe.rootToken.c_str());
+            }
+            if (!fe.rootToken.empty() && !rootTokens.count(fe.rootToken)) {
+                rootTokens.insert(fe.rootToken);
+                tokenMetadataChanged = true;
+            }
+            continue;
+        }
+        auto blobStatus = CloudStorage::CheckBlobExists(accountId, appId, fe.filename);
+        if (blobStatus == ICloudProvider::ExistsStatus::Error) {
+            LOG("[AutoCloudImport] Aborting import for app %u: could not verify cloud blob %s",
+                appId, fe.filename.c_str());
+            ClearAutoCloudCanonicalTokens(accountId, appId, cacheGeneration);
+            finish(false, cacheGeneration);
+            return;
+        }
+        if (blobStatus == ICloudProvider::ExistsStatus::Exists) {
+            LOG("[AutoCloudImport] Skipping app %u file %s because blob already exists in cache/cloud",
+                appId, fe.filename.c_str());
+            continue;
+        }
+        if (HasPersistedLocalCloudHistory(accountId, appId)) {
+            LOG("[AutoCloudImport] Skipping app %u file %s because existing CN may represent cloud deletion",
+                appId, fe.filename.c_str());
+            continue;
+        }
+
+        pendingImports.push_back({ fe.filename, fe.sourcePath, fe.timestamp, fe.rootToken });
+    }
+
+    if (pendingImports.empty() && !tokenMetadataChanged) {
+        finish(true, cacheGeneration);
+        return;
+    }
+
+    uint64_t publishGeneration = 0;
+    size_t imported = 0;
+    uint64_t cn = 0;
+    // Hold g_autoCloudImportMutex only across the critical region that
+    // reads cloud state, writes local blobs, and persists token metadata.
+    // Blocking network calls (DrainQueueForApp, PushCNToCloudSync) run
+    // OUTSIDE this mutex so unrelated RPC paths that call
+    // InvalidateTokenCaches are not stalled on slow providers. The
+    // generation check after the drains detects any concurrent
+    // invalidation that may have raced in during the unlocked window.
+    std::unique_lock<std::mutex> importLock(g_autoCloudImportMutex);
+    if (!TryInvalidateTokenCachesForGeneration(accountId, appId, cacheGeneration, publishGeneration)) {
+        finish(false, cacheGeneration);
+        return;
+    }
+    // Last safe abort point -- past this, StoreBlob writes local state and we
+    // must see the CN commit through to keep disk consistent. If shutdown was
+    // signaled during the scan/existence-check or while we waited on the
+    // import lock, don't start writing blobs we'll never get to publish.
+    if (IsAutoCloudBootstrapShuttingDown()) {
+        LOG("[AutoCloudImport] Aborting pre-commit for app %u -- shutdown in progress", appId);
+        ClearAutoCloudCanonicalTokens(accountId, appId, publishGeneration);
+        finish(false, publishGeneration);
+        return;
+    }
+    {
+        for (auto& pending : pendingImports) {
+            if (HasPersistedLocalCloudHistory(accountId, appId)) {
+                LOG("[AutoCloudImport] Skipping app %u file %s because CN appeared before commit",
+                    appId, pending.filename.c_str());
+                continue;
+            }
+            auto blobStatus = CloudStorage::CheckBlobExists(accountId, appId, pending.filename);
+            if (blobStatus != ICloudProvider::ExistsStatus::Missing) {
+                LOG("[AutoCloudImport] Skipping app %u file %s because blob appeared before commit",
+                    appId, pending.filename.c_str());
+                continue;
+            }
+            bool readOk = false;
+            auto data = ReadWholeFile(pending.sourcePath, readOk);
+            if (!readOk) {
+                LOG("[AutoCloudImport] Failed to read source before commit for app %u: %s",
+                    appId, pending.sourcePath.c_str());
+                continue;
+            }
+            const uint8_t* ptr = data.empty() ? nullptr : data.data();
+            if (!CloudStorage::StoreBlob(accountId, appId, pending.filename, ptr, data.size())) {
+                LOG("[AutoCloudImport] Failed to cache app %u file %s", appId, pending.filename.c_str());
+                continue;
+            }
+            auto existingToken = fileTokens.find(pending.filename);
+            if (existingToken == fileTokens.end() || existingToken->second != pending.rootToken) {
+                fileTokens[pending.filename] = pending.rootToken;
+                tokenMetadataChanged = true;
+                LOG("[AutoCloudImport] Canonical root token for app %u file %s: '%s'",
+                    appId, pending.filename.c_str(), pending.rootToken.c_str());
+            }
+            if (!pending.rootToken.empty() && !rootTokens.count(pending.rootToken)) {
+                rootTokens.insert(pending.rootToken);
+                tokenMetadataChanged = true;
+            }
+            LocalStorage::SetFileTimestamp(accountId, appId, pending.filename, pending.timestamp);
+            ++imported;
+            LOG("[AutoCloudImport] Imported app %u file %s", appId, pending.filename.c_str());
+        }
+        if (imported == 0 && !tokenMetadataChanged) {
+            finish(true, publishGeneration);
+            return;
+        }
+        // Observe the bool return: Save*Tokens now reports local-disk
+        // persist status. If disk write fails but cloud upload succeeds
+        // (enqueued inside the wrapper), a subsequent restart will
+        // LoadRootTokens() the stale set, diverging from cloud. Log the
+        // failure so later divergence in SyncFromCloud is traceable.
+        if (!rootTokens.empty() && !CloudStorage::SaveRootTokens(accountId, appId, rootTokens)) {
+            LOG("[AutoCloudImport] root_token.dat local persist FAILED app %u -- next restart will load stale set", appId);
+        }
+        if ((!fileTokens.empty() || tokenMetadataChanged) &&
+            !CloudStorage::SaveFileTokens(accountId, appId, fileTokens)) {
+            LOG("[AutoCloudImport] file_tokens.dat local persist FAILED app %u -- next restart will load stale set", appId);
+        }
+    }
+    // Release the import mutex before any blocking network calls so unrelated
+    // RPC paths that call InvalidateTokenCaches are not stalled on slow
+    // providers. Generation checks before and after the network-bound work
+    // detect concurrent invalidations that raced in during the unlocked
+    // window.
+    importLock.unlock();
+    if (GetAutoCloudCanonicalTokenGeneration(accountId, appId) != publishGeneration) {
+        finish(false, publishGeneration);
+        return;
+    }
+    cn = LocalStorage::IncrementChangeNumber(accountId, appId);
+    // CommitCNWithRetry drains + syncs CN; on failure it async-retries and
+    // blocks on a second drain so process exit does not drop the publish.
+    CloudStorage::CommitCNWithRetry(accountId, appId, cn);
+    // Re-check generation before publishing canonical tokens; any concurrent
+    // InvalidateTokenCaches during the unlocked drain window bumps the
+    // generation and invalidates our cached candidates. The generation
+    // compare-and-swap inside CacheAutoCloudCanonicalTokens is the actual
+    // race guard; no additional publish mutex is needed.
+    if (GetAutoCloudCanonicalTokenGeneration(accountId, appId) != publishGeneration) {
+        finish(false, publishGeneration);
+        return;
+    }
+    CacheAutoCloudCanonicalTokens(accountId, appId, candidates, publishGeneration);
+    LOG("[AutoCloudImport] Imported %zu AutoCloud file(s), updatedTokens=%u for app %u, CN=%llu",
+        imported, tokenMetadataChanged ? 1 : 0, appId, cn);
+    finish(true, publishGeneration);
+}
+
+static void BootstrapAutoCloudFiles(uint32_t accountId, uint32_t appId, bool wait = false) {
+    uint64_t cacheGeneration = GetAutoCloudCanonicalTokenGeneration(accountId, appId);
+    if (!TryBeginAutoCloudBootstrap(accountId, appId)) {
+        if (wait) WaitForAutoCloudBootstrap(accountId, appId);
+        return;
+    }
+    if (wait) {
+        BootstrapAutoCloudFilesWorker(accountId, appId, cacheGeneration);
+        return;
+    }
+
+    // Fast-path shutdown check so we don't pay thread-creation cost right
+    // before the worker would self-abort anyway. This is an optimization,
+    // not a correctness fence -- shutdown can still be signaled between
+    // here and the spawn below, in which case the worker aborts at its
+    // first IsAutoCloudBootstrapShuttingDown() probe.
+    if (IsAutoCloudBootstrapShuttingDown()) {
+        FinishAutoCloudBootstrap(accountId, appId, /*markAttempted=*/false, cacheGeneration);
+        return;
+    }
+
+    // Claim an orchestrator slot BEFORE spawning. This pins
+    // ShutdownRpcHandlers' CV predicate false for the lifetime of this
+    // frame, so shutdown cannot return while we still have mutex/vector
+    // operations pending -- eliminating the window where the worker's
+    // Finish (which clears `active`) races against our own post-spawn
+    // push_back. RAII decrement on every exit path below.
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+        ++g_autoCloudBootstrapOrchestratorCount;
+    }
+    struct OrchestratorGuard {
+        ~OrchestratorGuard() {
+            std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+            --g_autoCloudBootstrapOrchestratorCount;
+            g_autoCloudBootstrapCV.notify_all();
+        }
+    } orchestratorGuard;
+
+    // Spawn OUTSIDE g_autoCloudBootstrapMutex. std::async(launch::async)
+    // creates a thread, which on Windows can block on the loader lock or
+    // allocator under memory pressure for hundreds of ms. Holding the
+    // bootstrap mutex during that window stalls:
+    //   - every running worker polling IsAutoCloudBootstrapShuttingDown
+    //     at its abort points,
+    //   - TryBeginAutoCloudBootstrap for other apps (so no concurrent
+    //     bootstraps get queued),
+    //   - ShutdownRpcHandlers (which needs the same mutex to flip the
+    //     shutdown flag and drain futures).
+    std::future<void> future;
+    try {
+        future = std::async(std::launch::async, [accountId, appId, cacheGeneration]() {
+            BootstrapAutoCloudFilesWorker(accountId, appId, cacheGeneration);
+        });
+    } catch (...) {
+        // Thread creation failed (resource exhaustion / system limits).
+        // Release the active slot so a subsequent call can retry. Don't
+        // mark attempted -- we never ran the scan, and marking would
+        // permanently suppress retries for this session.
+        LOG("[AutoCloudImport] Failed to spawn bootstrap worker for app %u", appId);
+        FinishAutoCloudBootstrap(accountId, appId, /*markAttempted=*/false, cacheGeneration);
+        return;
+    }
+
+    // Stash the future so ShutdownRpcHandlers can join it. Re-check the
+    // shutdown flag under the mutex: if shutdown began during the spawn,
+    // our future isn't in the drained batch, so we must join it locally
+    // before returning. The worker self-aborts at its first abort point
+    // so this wait is short-bounded. The orchestrator counter above
+    // keeps ShutdownRpcHandlers blocked until we return.
+    {
+        std::unique_lock<std::mutex> lock(g_autoCloudBootstrapMutex);
+        if (!g_autoCloudBootstrapShuttingDown) {
+            g_autoCloudBootstrapFutures.push_back(std::move(future));
+            return;
+        }
+    }
+    try {
+        future.wait();
+    } catch (...) {
+    }
+}
+
+void ShutdownRpcHandlers() {
+    std::vector<std::future<void>> futures;
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+        g_autoCloudBootstrapShuttingDown = true;
+        futures.swap(g_autoCloudBootstrapFutures);
+    }
+    for (auto& future : futures) {
+        try { future.get(); } catch (...) {}
+    }
+    std::unique_lock<std::mutex> lock(g_autoCloudBootstrapMutex);
+    g_autoCloudBootstrapCV.wait(lock, [] {
+        return g_autoCloudBootstrapActiveApps.empty() &&
+               g_autoCloudBootstrapOrchestratorCount == 0;
+    });
 }
 
 static uint64_t ParsePlaytimeField(const Json::Value& value) {
@@ -99,6 +703,8 @@ static void ParsePlaytimeBlob(const std::string& blob, uint64_t& lastPlayed,
 // Used to know which tokens exist for an app; the changelist only presents each
 // file under the specific token it was uploaded with (tracked in g_fileTokens).
 static std::unordered_map<uint64_t, std::unordered_set<std::string>> g_appRootTokens;
+// INVARIANT: never held across CloudStorage::* / LocalStorage::* calls.
+// Snapshot the set under the lock, release, then perform I/O.
 static std::mutex g_rootTokenMutex;
 
 // per-app file-to-token mapping: which root token each file was uploaded under.
@@ -107,13 +713,41 @@ static std::mutex g_rootTokenMutex;
 // caused Steam's rootoverrides to see the cross-platform copy as stale and
 // issue spurious deletes (killing the only actual blob).
 static std::unordered_map<uint64_t, std::unordered_map<std::string, std::string>> g_fileTokens;
+// INVARIANT: never held across CloudStorage::* / LocalStorage::* calls.
+// Snapshot the map under the lock, release, then perform I/O.
+//
+// HandleGetChangelist's double-checked disk load is the only site that
+// releases and re-acquires this mutex around a CloudStorage call. That
+// site MUST NOT cache the disk-loaded map into g_fileTokens if the
+// AutoCloud bootstrap worker is live for the same (accountId, appId)
+// during the load window: the worker invalidates g_fileTokens early and
+// only saves a fresh file_tokens.dat at the very end of its import, so
+// any disk read during that window returns pre-invalidation contents.
+// Caching that would silently revert the invalidation, causing Steam
+// rootoverrides to treat cross-platform copies as stale and DELETE the
+// only real blob. Use IsAutoCloudBootstrapActive (not a generation
+// counter -- those bump at invalidation time, not at SaveFileTokens
+// time, and so cannot detect the wide worker window).
 static std::mutex g_fileTokensMutex;
 
 // Track which apps had file-token changes during the current batch.
 // PersistFileTokens is deferred to HandleCompleteBatch instead of being
 // called per-file, eliminating redundant file_tokens.dat cloud uploads.
 static std::unordered_set<uint64_t> g_fileTokensDirtyApps;
+// INVARIANT: held alone; never acquired while holding any other mutex,
+// and never held across any function call that could itself take a
+// mutex. Only used for trivial set insert / swap-and-clear.
 static std::mutex g_fileTokensDirtyMutex;
+
+// Per-batch AutoCloud canonical root map. Steam can upload stale local entries
+// with their old root token even after our changelist advertises the canonical
+// root. Resolve once for the batch and reuse for begin/commit handling.
+static std::unordered_map<uint64_t, std::unordered_map<std::string, std::string>> g_batchCanonicalTokens;
+// INVARIANT: never held across CloudStorage::* / LocalStorage::* calls,
+// nor across WaitForAutoCloudBootstrap (which takes
+// g_autoCloudBootstrapMutex + CV wait). PrepareBatchCanonicalTokens
+// releases before the wait and re-acquires after.
+static std::mutex g_batchCanonicalTokensMutex;
 
 
 // Strip Steam root tokens like "%GameInstall%" from the start of a filename.
@@ -146,15 +780,129 @@ static std::string ExtractRootToken(const std::string& filename) {
     return "";
 }
 
+static void PrepareBatchCanonicalTokens(uint32_t accountId, uint32_t appId) {
+    uint64_t key = MakeAppAccountKey(accountId, appId);
+    {
+        std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
+        if (g_batchCanonicalTokens.find(key) != g_batchCanonicalTokens.end()) return;
+    }
+
+    std::unordered_map<std::string, std::string> tokens;
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+        auto it = g_autoCloudCanonicalTokenCache.find(key);
+        if (it != g_autoCloudCanonicalTokenCache.end()) {
+            tokens = it->second;
+        }
+    }
+    if (tokens.empty()) {
+        tokens = CloudStorage::LoadFileTokens(accountId, appId);
+    }
+    if (tokens.empty()) {
+        if (IsAutoCloudBootstrapActive(accountId, appId)) {
+            WaitForAutoCloudBootstrap(accountId, appId);
+            std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+            auto it = g_autoCloudCanonicalTokenCache.find(key);
+            if (it != g_autoCloudCanonicalTokenCache.end()) tokens = it->second;
+        }
+        if (tokens.empty()) return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
+    g_batchCanonicalTokens.emplace(key, std::move(tokens));
+}
+
+static void ClearBatchCanonicalTokens(uint32_t accountId, uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
+    g_batchCanonicalTokens.erase(MakeAppAccountKey(accountId, appId));
+}
+
+static std::string CanonicalizeUploadRootToken(uint32_t accountId, uint32_t appId,
+                                               const std::string& cleanName,
+                                               const std::string& fallbackToken) {
+    if (cleanName.empty()) return fallbackToken;
+
+    std::string canonical;
+    bool foundCanonical = false;
+    {
+        std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
+        auto appIt = g_batchCanonicalTokens.find(MakeAppAccountKey(accountId, appId));
+        if (appIt != g_batchCanonicalTokens.end()) {
+            auto tokenIt = appIt->second.find(cleanName);
+            if (tokenIt != appIt->second.end()) {
+                canonical = tokenIt->second;
+                foundCanonical = true;
+            }
+        }
+    }
+
+    if (!foundCanonical) {
+        std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+        auto appIt = g_autoCloudCanonicalTokenCache.find(MakeAppAccountKey(accountId, appId));
+        if (appIt != g_autoCloudCanonicalTokenCache.end()) {
+            auto tokenIt = appIt->second.find(cleanName);
+            if (tokenIt != appIt->second.end()) {
+                canonical = tokenIt->second;
+                foundCanonical = true;
+            }
+        }
+    }
+
+    if (!foundCanonical) return fallbackToken;
+    if (canonical != fallbackToken) {
+        LOG("[NS-TOK] Canonicalized upload token for account %u app %u file %s: %s -> %s",
+            accountId, appId, cleanName.c_str(), fallbackToken.c_str(), canonical.c_str());
+    }
+    return canonical;
+}
+
 // Capture a root token for an app from a filename containing a %Token% prefix.
 // Tracked at two levels: g_appRootTokens (all tokens per app) and g_fileTokens
 // (per-file -> token mapping for changelist). Returns true if new token added.
+//
+// RACE NOTE: the naive "insert into in-memory set, save in-memory set to disk"
+// pattern truncates disk when a concurrent bootstrap worker has just
+// invalidated our in-memory view. Timeline:
+//   1. Worker (line ~464) erases g_appRootTokens[key] under g_rootTokenMutex
+//      (inside its g_autoCloudImportMutex hold), releases g_rootTokenMutex.
+//   2. Worker starts ~100ms of blob writes, still holding import mutex.
+//   3. Concurrent Steam upload hits TryCaptureRootToken("A"): sees empty
+//      in-memory set (post-invalidation), inserts A -> singleton {A},
+//      saves {A} to disk -- TRUNCATING whatever was there.
+//   4. Worker finishes at line 522 with SaveRootTokens(its_set) -- overwrites
+//      disk again with its pre-invalidation-loaded set. If A was not in
+//      that set, A is lost from disk. Either way memory stays at {A} (neither
+//      worker nor TryCapture re-publishes the merged view).
+//   5. Next HandleGetChangelist reads {A} from memory, emits files under A
+//      only -- Steam rootoverrides treats all other-rooted files as stale
+//      cross-platform copies and issues deletes. Data loss.
+//
+// Fix has two parts:
+//   (a) Hold g_autoCloudImportMutex across the full capture so the worker's
+//       import region and our disk write are strictly serialized. This is
+//       the same outer lock InvalidateTokenCaches uses (line 933) and
+//       respects the existing DAG.
+//   (b) Before writing disk, union the in-memory snapshot with the current
+//       on-disk state. This prevents a singleton memory view from truncating
+//       disk even if the worker's SaveRootTokens has already landed. Also
+//       re-publish the union to memory so subsequent readers observe the
+//       complete set instead of the pre-merge singleton.
+//
+// Returns true if a NEW token was added (either to memory or, via the
+// rehydrate path, to an otherwise-empty memory view).
 static bool TryCaptureRootToken(uint32_t accountId, uint32_t appId, const std::string& token) {
     if (token.empty()) return false;
 
-    bool isNew = false;
-    std::unordered_set<std::string> tokensCopy;
     uint64_t key = MakeAppAccountKey(accountId, appId);
+
+    // (a) Serialize against the bootstrap worker's import region. The worker
+    // holds this from g_fileTokens invalidation (line ~464) through its
+    // SaveRootTokens + SaveFileTokens at ~522-523 and releases at ~530, so
+    // the worst-case wait is one import's worth of blob writes.
+    std::lock_guard<std::mutex> importLock(g_autoCloudImportMutex);
+
+    bool isNew = false;
+    std::unordered_set<std::string> memorySnapshot;
     {
         std::lock_guard<std::mutex> lock(g_rootTokenMutex);
         auto& tokenSet = g_appRootTokens[key];
@@ -163,12 +911,34 @@ static bool TryCaptureRootToken(uint32_t accountId, uint32_t appId, const std::s
         if (isNew) {
             LOG("[NS-TOK] Captured root token for account %u app %u: %s (now %zu tokens)",
                 accountId, appId, token.c_str(), tokenSet.size());
-            tokensCopy = tokenSet;  // copy under lock
+            memorySnapshot = tokenSet;  // copy under lock
         }
     }
-    // Perform disk I/O + cloud upload outside the lock
-    if (isNew) {
-        CloudStorage::SaveRootTokens(accountId, appId, tokensCopy);
+    if (!isNew) return false;
+
+    // (b) Load-merge-save: our in-memory set may have been invalidated by a
+    // recent InvalidateTokenCaches, leaving us with a singleton view that
+    // would truncate the on-disk set. Union with the disk snapshot before
+    // persisting, then re-publish the union to memory so future readers
+    // observe the complete set. SaveRootTokens delegates to
+    // LocalStorage::SaveRootTokens + a cloud upload; both happen outside
+    // g_rootTokenMutex per the DAG invariant.
+    auto diskTokens = LocalStorage::LoadRootTokens(accountId, appId);
+    size_t memoryOnlyCount = memorySnapshot.size();
+    memorySnapshot.insert(diskTokens.begin(), diskTokens.end());
+    if (memorySnapshot.size() > memoryOnlyCount) {
+        LOG("[NS-TOK] Merged %zu extra root token(s) from disk for account %u app %u during capture",
+            memorySnapshot.size() - memoryOnlyCount, accountId, appId);
+        std::lock_guard<std::mutex> lock(g_rootTokenMutex);
+        // Compare-and-set: another TryCaptureRootToken may have rehydrated
+        // in the tiny window between our memorySnapshot copy and this
+        // re-acquire. Keep the superset either way.
+        auto& tokenSet = g_appRootTokens[key];
+        tokenSet.insert(memorySnapshot.begin(), memorySnapshot.end());
+        memorySnapshot = tokenSet;
+    }
+    if (!CloudStorage::SaveRootTokens(accountId, appId, memorySnapshot)) {
+        LOG("[TryCaptureRootToken] root_token.dat local persist FAILED app %u -- in-memory set diverges from disk", appId);
     }
     return isNew;
 }
@@ -176,7 +946,7 @@ static bool TryCaptureRootToken(uint32_t accountId, uint32_t appId, const std::s
 // Record which root token a file was uploaded under.
 // Called from HandleCommitFileUpload after successful commit.
 static void RecordFileToken(uint32_t accountId, uint32_t appId, const std::string& cleanName, const std::string& token) {
-    if (token.empty() || cleanName.empty()) return;
+    if (cleanName.empty()) return;
     std::lock_guard<std::mutex> lock(g_fileTokensMutex);
     g_fileTokens[MakeAppAccountKey(accountId, appId)][cleanName] = token;
     LOG("[NS-FT] Recorded file token: account=%u app=%u file=%s token=%s",
@@ -204,14 +974,72 @@ static void RemoveFileToken(uint32_t accountId, uint32_t appId, const std::strin
 }
 
 // Save in-memory file token map to disk and cloud for a given app.
+//
+// Symmetric to TryCaptureRootToken's truncation-race fix: a concurrent
+// bootstrap worker invalidates g_fileTokens[key] early (line ~464), then
+// does ~100ms of blob writes before its own SaveFileTokens at ~523. If
+// PersistFileTokens snapshots in that window, the in-memory map is empty
+// (or missing entries the worker's scan saw), and SaveFileTokens(snapshot)
+// truncates disk. The worker's later SaveFileTokens may or may not restore
+// the entries the batch just recorded -- concurrent HandleCompleteBatch
+// additions happen AFTER invalidation and would be absent from the
+// worker's pre-invalidation load.
+//
+// Fix (mirrors TryCaptureRootToken):
+//   (a) Hold g_autoCloudImportMutex across the full persist, serializing
+//       with the worker's import region.
+//   (b) Load-merge-save: union the memory snapshot with the current disk
+//       contents, preferring MEMORY on key conflicts (memory holds the
+//       most recent RecordFileToken writes; disk is the fallback for
+//       entries memory doesn't know about, e.g. after an invalidation).
+//       Re-publish the union to memory so subsequent readers observe the
+//       complete mapping.
 static void PersistFileTokens(uint32_t accountId, uint32_t appId) {
+    uint64_t key = MakeAppAccountKey(accountId, appId);
+
+    // (a) Serialize against the bootstrap worker's import region.
+    std::lock_guard<std::mutex> importLock(g_autoCloudImportMutex);
+
     std::unordered_map<std::string, std::string> snapshot;
     {
         std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-        auto it = g_fileTokens.find(MakeAppAccountKey(accountId, appId));
+        auto it = g_fileTokens.find(key);
         if (it != g_fileTokens.end()) snapshot = it->second;
     }
-    CloudStorage::SaveFileTokens(accountId, appId, snapshot);
+
+    // (b) Union with disk, preferring memory on conflicts. If a filename
+    // exists in memory (from a just-committed RecordFileToken) and also on
+    // disk (from the worker's or an earlier sync's save), memory's token
+    // wins because it reflects the most recent upload. Entries that exist
+    // only on disk (e.g. the worker's pre-invalidation scan results that
+    // never got re-added to memory) are preserved in the union so the
+    // upcoming SaveFileTokens doesn't drop them.
+    auto diskTokens = CloudStorage::LoadFileTokens(accountId, appId);
+    size_t mergedFromDisk = 0;
+    for (auto& kv : diskTokens) {
+        if (snapshot.find(kv.first) == snapshot.end()) {
+            snapshot.emplace(kv.first, kv.second);
+            ++mergedFromDisk;
+        }
+    }
+    if (mergedFromDisk > 0) {
+        LOG("[NS-FT] PersistFileTokens account %u app %u: merged %zu extra entries from disk",
+            accountId, appId, mergedFromDisk);
+        std::lock_guard<std::mutex> lock(g_fileTokensMutex);
+        // Re-publish the union so future HandleGetChangelist readers see
+        // the complete mapping instead of the truncated snapshot. Merge
+        // again under the lock in case another RecordFileToken landed
+        // between our snapshot and the re-acquire -- that entry should win
+        // over its disk-loaded counterpart.
+        auto& mapRef = g_fileTokens[key];
+        for (auto& kv : snapshot) {
+            mapRef.emplace(kv.first, kv.second); // no-op if memory already has it
+        }
+        snapshot = mapRef;
+    }
+    if (!CloudStorage::SaveFileTokens(accountId, appId, snapshot)) {
+        LOG("[RecordFileToken] file_tokens.dat local persist FAILED app %u -- in-memory mapping diverges from disk", appId);
+    }
 }
 
 // Mark an app's file tokens as needing persistence.
@@ -223,6 +1051,11 @@ static void MarkFileTokensDirty(uint32_t accountId, uint32_t appId) {
 }
 
 static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId) {
+    // Hold the import mutex so this cannot race with the import critical
+    // region in BootstrapAutoCloudFilesWorker. Inner token-cache mutexes
+    // are acquired in sequential scopes, matching the order documented at
+    // the mutex-definitions block.
+    std::lock_guard<std::mutex> importLock(g_autoCloudImportMutex);
     uint64_t key = MakeAppAccountKey(accountId, appId);
     {
         std::lock_guard<std::mutex> lock(g_rootTokenMutex);
@@ -232,6 +1065,48 @@ static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId) {
         std::lock_guard<std::mutex> lock(g_fileTokensMutex);
         g_fileTokens.erase(key);
     }
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+        g_autoCloudCanonicalTokenCache.erase(key);
+        ++g_autoCloudCanonicalTokenGeneration[key];
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
+        g_batchCanonicalTokens.erase(key);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+        g_autoCloudBootstrapAttemptedApps.erase(key);
+    }
+}
+
+static bool TryInvalidateTokenCachesForGeneration(uint32_t accountId, uint32_t appId,
+                                                  uint64_t generation,
+                                                  uint64_t& nextGeneration) {
+    uint64_t key = MakeAppAccountKey(accountId, appId);
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudTokenCacheMutex);
+        if (g_autoCloudCanonicalTokenGeneration[key] != generation) return false;
+        g_autoCloudCanonicalTokenCache.erase(key);
+        nextGeneration = ++g_autoCloudCanonicalTokenGeneration[key];
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_rootTokenMutex);
+        g_appRootTokens.erase(key);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_fileTokensMutex);
+        g_fileTokens.erase(key);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
+        g_batchCanonicalTokens.erase(key);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_autoCloudBootstrapMutex);
+        g_autoCloudBootstrapAttemptedApps.erase(key);
+    }
+    return true;
 }
 
 static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
@@ -392,7 +1267,7 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
 
     std::string vdfPath = GetSteamPath() + "userdata\\" + std::to_string(accountId)
         + "\\config\\localconfig.vdf";
-    std::ifstream vdfIn(vdfPath);
+    std::ifstream vdfIn(FileUtil::Utf8ToPath(vdfPath));
     if (!vdfIn.is_open()) {
         LOG("[Playtime] Cannot open localconfig.vdf for reading (app %u)", appId);
         return;
@@ -541,6 +1416,9 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
         return body;
     }
     uint64_t appKey = MakeAppAccountKey(accountId, appId);
+
+    BootstrapAutoCloudFiles(accountId, appId, /*wait=*/true);
+
     // Filenames from GetFileList are generated by filesystem::relative() against a controlled
     // app root directory, so they cannot contain path traversal sequences (e.g. "../").
     auto files = LocalStorage::GetFileList(accountId, appId);
@@ -568,12 +1446,50 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
             rootTokens = it->second;
         }
     }
-    // If not in memory, try loading from disk (persisted from previous session)
+    // If not in memory, try loading from disk (persisted from previous session).
+    //
+    // RACE GUARD: mirrors the file-token pattern below. A concurrent
+    // RestoreAppMetadata on another thread can call InvalidateTokenCaches
+    // (which erases g_appRootTokens[key] and clears bootstrap-attempted),
+    // then BootstrapAutoCloudFiles(wait=true) on its own RPC, spawning a
+    // new worker for the same (accountId, appId). That worker invalidates
+    // caches early, then does slow blob writes, and only SaveRootTokens's
+    // at the end of its import (line 522 of the worker).
+    //
+    // During the worker's import window, a concurrent HandleGetChangelist
+    // that already cleared its own line 1295 wait (the wait landed before
+    // the InvalidateTokenCaches→new bootstrap transition) observes empty
+    // in-memory root tokens, reads the STALE disk file_tokens.dat, and
+    // would cache it into g_appRootTokens -- silently overwriting the
+    // worker's upcoming fresh write once the worker finishes but leaving
+    // readers on stale disk contents until the next InvalidateTokenCaches.
+    //
+    // Sample IsAutoCloudBootstrapActive before AND after the disk read:
+    // if a worker is live at either edge, use the loaded tokens locally
+    // for this response but do NOT cache them. The next changelist after
+    // the worker finishes will observe the empty cache, do a clean
+    // LoadRootTokens under a quiet bootstrap state, and cache the fresh
+    // result.
     if (rootTokens.empty()) {
+        bool bootstrapActiveBefore = IsAutoCloudBootstrapActive(accountId, appId);
         rootTokens = CloudStorage::LoadRootTokens(accountId, appId);
-        if (!rootTokens.empty()) {
+        bool bootstrapActiveAfter = IsAutoCloudBootstrapActive(accountId, appId);
+        bool bootstrapTouchedLoad = bootstrapActiveBefore || bootstrapActiveAfter;
+        if (!rootTokens.empty() && !bootstrapTouchedLoad) {
             std::lock_guard<std::mutex> lock(g_rootTokenMutex);
-            g_appRootTokens[appKey] = rootTokens;
+            // Re-check: another caller may have populated the in-memory map
+            // while we were reading from disk. Prefer the in-memory entry
+            // in that case because it reflects any TryCaptureRootToken
+            // updates that ran during our I/O.
+            auto it = g_appRootTokens.find(appKey);
+            if (it != g_appRootTokens.end()) {
+                rootTokens = it->second;
+            } else {
+                g_appRootTokens[appKey] = rootTokens;
+            }
+        } else if (bootstrapTouchedLoad && !rootTokens.empty()) {
+            LOG("[NS-CL] Skipping root-token cache-write for account %u app %u "
+                "-- bootstrap worker was active during disk read", accountId, appId);
         }
     }
     // If still empty, use empty string (no root token prefix -- legacy behavior)
@@ -588,20 +1504,79 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     // Load per-file token map (which token each file was uploaded under).
     // If not in memory, load from disk. Snapshot the map so we can do
     // lockless lookups in the file loop below (H5: was N lock acquisitions).
+    //
+    // LOCK ORDER: CloudStorage::LoadFileTokens performs disk I/O and takes
+    // LocalStorage::g_mutex (shared). Do not call it while holding
+    // g_fileTokensMutex -- otherwise every concurrent file-token operation
+    // serializes on disk I/O, and g_fileTokensMutex becomes an outer of
+    // LocalStorage::g_mutex (the only site that would establish that
+    // edge).
+    //
+    // RACE GUARD: "release, load, re-acquire, insert-if-empty" is not
+    // safe on its own. BootstrapAutoCloudFilesWorker's import critical
+    // region invalidates g_fileTokens[key] early, does blob writes for
+    // tens to hundreds of ms (unlocked), and only at the end writes the
+    // new file_tokens.dat via SaveFileTokens. Throughout that window,
+    // memory is empty and disk is still the pre-invalidation snapshot.
+    // A concurrent HandleGetChangelist that observed the empty map would
+    // read the stale disk and RE-INSERT it, silently reverting the
+    // invalidation and causing the next changelist to emit files under
+    // stale root tokens (which Steam's rootoverrides treat as
+    // cross-platform stale copies and delete -- this is a data-loss
+    // class bug, not just a staleness bug).
+    //
+    // Generation counters are not usable as a guard here: both counter
+    // bumps occur when the invalidation completes, but the on-disk file
+    // stays stale until SaveFileTokens runs much later, and the reader's
+    // two generation snapshots (around its disk read) can straddle that
+    // whole window without observing any change. Instead, gate the
+    // reinsert on IsAutoCloudBootstrapActive, which is set from
+    // TryBeginAutoCloudBootstrap through FinishAutoCloudBootstrap -- i.e.
+    // true across the full worker lifetime including SaveFileTokens.
+    // If bootstrap is active for this (accountId, appId) at any point
+    // during our load, discard `loaded` and rely on a later changelist
+    // (post-bootstrap) to re-hydrate memory from the now-fresh disk.
     std::unordered_map<std::string, std::string> fileTokenSnapshot;
+    bool needsDiskLoad = false;
     {
         std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-        if (g_fileTokens.find(appKey) == g_fileTokens.end()) {
-            auto loaded = CloudStorage::LoadFileTokens(accountId, appId);
-            if (!loaded.empty()) {
-                g_fileTokens[appKey] = std::move(loaded);
-                LOG("[NS-CL] Loaded %zu file-token mappings for account %u app %u",
-                    g_fileTokens[appKey].size(), accountId, appId);
-            }
-        }
         auto it = g_fileTokens.find(appKey);
         if (it != g_fileTokens.end()) {
             fileTokenSnapshot = it->second;
+        } else {
+            needsDiskLoad = true;
+        }
+    }
+    if (needsDiskLoad) {
+        bool bootstrapActiveBefore = IsAutoCloudBootstrapActive(accountId, appId);
+        auto loaded = CloudStorage::LoadFileTokens(accountId, appId);
+        bool bootstrapActiveAfter = IsAutoCloudBootstrapActive(accountId, appId);
+        bool bootstrapTouchedLoad = bootstrapActiveBefore || bootstrapActiveAfter;
+        std::lock_guard<std::mutex> lock(g_fileTokensMutex);
+        // Re-check: another caller may have populated the in-memory map
+        // while we were reading from disk. Prefer the in-memory entry in
+        // that case because it reflects any RecordFileToken updates or
+        // later post-bootstrap repopulates that ran during our I/O.
+        auto it = g_fileTokens.find(appKey);
+        if (it != g_fileTokens.end()) {
+            fileTokenSnapshot = it->second;
+        } else if (bootstrapTouchedLoad) {
+            // Bootstrap worker was live at some point during our disk
+            // read. The on-disk file_tokens.dat may predate its eventual
+            // SaveFileTokens, so `loaded` cannot be trusted. Use it
+            // locally (below, via fileTokenSnapshot) but do NOT cache it
+            // in g_fileTokens -- the next changelist after bootstrap
+            // finishes will pick up the correct post-save state.
+            if (!loaded.empty()) {
+                fileTokenSnapshot = loaded;
+            }
+            LOG("[NS-CL] Skipping file-token cache-write for account %u app %u "
+                "-- bootstrap worker was active during disk read", accountId, appId);
+        } else if (!loaded.empty()) {
+            g_fileTokens[appKey] = std::move(loaded);
+            LOG("[NS-CL] Loaded %zu file-token mappings for account %u app %u",
+                g_fileTokens[appKey].size(), accountId, appId);
+            fileTokenSnapshot = g_fileTokens[appKey];
         }
     }
 
@@ -645,8 +1620,9 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
         // Uses pre-loop snapshot (H5: avoids per-file mutex acquisition).
         std::string fileToken;
         auto ftIt = fileTokenSnapshot.find(fe.filename);
-        if (ftIt != fileTokenSnapshot.end()) fileToken = ftIt->second;
-        if (fileToken.empty()) {
+        bool hasRecordedFileToken = ftIt != fileTokenSnapshot.end();
+        if (hasRecordedFileToken) fileToken = ftIt->second;
+        if (!hasRecordedFileToken) {
             fileToken = defaultToken;
             LOG("[NS-CL]   file: %s has no recorded token, using default '%s'",
                 fe.filename.c_str(), fileToken.c_str());
@@ -723,8 +1699,7 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     return body;
 }
 
-// --- Binary KV reader/writer for UserGameStats merge ---
-
+// Binary KV reader/writer for UserGameStats merge
 enum BkvType : uint8_t {
     BKV_SECTION   = 0x00,
     BKV_STRING    = 0x01,
@@ -894,7 +1869,20 @@ static std::vector<BkvNode> MergeStats(
         BkvNode* localAchTimes = BkvFind(localStat->children, "AchievementTimes");
 
         if (cloudAchTimes || localAchTimes) {
-            // Achievement stat: OR the bitfields
+            // Achievement stat: OR the bitfields. BkvNode is a tagged union --
+            // intVal only aliases valid storage when type == BKV_INT. If a
+            // malformed cloud stats blob carries "data" as BKV_UINT64 or
+            // BKV_FLOAT, reading cloudData->intVal is a type-confused read
+            // and ORing it into localData->intVal would persist a garbage
+            // achievement bitmask back to Steam. Skip the merge unless both
+            // sides agree the field is a 32-bit int, matching the defensive
+            // type check the regular-stat branch below already uses.
+            if (localData->type != BKV_INT || cloudData->type != BKV_INT) {
+                LOG("[MergeStats] skipping achievement OR for %s: type mismatch "
+                    "(local=%d cloud=%d)", cloudStat.name.c_str(),
+                    (int)localData->type, (int)cloudData->type);
+                continue;
+            }
             localData->intVal |= cloudData->intVal;
 
             // Ensure local has an AchievementTimes section
@@ -958,7 +1946,7 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
     }
 
     // Read local file
-    std::ifstream localFile(statsPath, std::ios::binary | std::ios::ate);
+    std::ifstream localFile(FileUtil::Utf8ToPath(statsPath), std::ios::binary | std::ios::ate);
     if (!localFile.is_open()) {
         // No local file -- parse and rewrite cloud data to strip junk
         std::vector<uint8_t> outBuf;
@@ -985,7 +1973,27 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
     std::vector<uint8_t> localData(static_cast<size_t>(localSize));
     localFile.seekg(0);
     localFile.read(reinterpret_cast<char*>(localData.data()), localSize);
+    auto localGcount = localFile.gcount();
+    bool localReadOk = !localFile.fail() &&
+                       static_cast<std::streamsize>(localGcount) == localSize;
     localFile.close();
+
+    // If the read came back short or failed (disk error, file shrunk between
+    // tellg and read), localData would otherwise contain partially-
+    // uninitialized tail bytes that BkvRead would happily walk past, then
+    // we'd persist the merged result back to disk via AtomicWriteBinary --
+    // turning a transient I/O glitch into a permanent stats corruption.
+    // Treat a short read as a parse failure so we fall through to the
+    // cloud-overwrite branch instead.
+    if (!localReadOk) {
+        LOG("[Stats] short read on local stats for app %u (expected %lld, got %lld), overwriting with cloud",
+            appId, (long long)localSize, (long long)localGcount);
+        if (!FileUtil::AtomicWriteBinary(statsPath, cloudData.data(), cloudData.size())) {
+            LOG("[Stats] Failed to overwrite local stats with cloud for app %u", appId);
+            return false;
+        }
+        return true;
+    }
 
     // Parse local data
     size_t localPos = 0;
@@ -993,9 +2001,16 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
     std::vector<BkvNode> localNodes;
     if (!BkvRead(localData.data(), localData.size(), localPos, localNodes, 0, localNodeCount)) {
         LOG("[Stats] Failed to parse local stats for app %u, overwriting with cloud", appId);
-        std::ofstream f(statsPath, std::ios::binary | std::ios::trunc);
-        if (!f.is_open()) return false;
-        f.write(reinterpret_cast<const char*>(cloudData.data()), cloudData.size());
+        // Atomic write: a crash between trunc and write under the previous
+        // ofstream-trunc path would leave the stats file empty or partial,
+        // destroying achievement progress beyond recovery. AtomicWriteBinary
+        // writes a .tmp sibling and renames, so either the old or the new
+        // file is visible at every instant. Also: fail loudly on write
+        // failure instead of claiming success.
+        if (!FileUtil::AtomicWriteBinary(statsPath, cloudData.data(), cloudData.size())) {
+            LOG("[Stats] Failed to overwrite local stats with cloud for app %u", appId);
+            return false;
+        }
         return true;
     }
 
@@ -1037,6 +2052,7 @@ PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqB
         LOG("[NS] Cloud sync complete for app %u (hadNewer=%d)", appId, hadNewer);
         RestoreAppMetadata(accountId, appId);
     }
+    BootstrapAutoCloudFiles(accountId, appId, /*wait=*/true);
 
     PB::Writer body; // empty = no pending remote operations
     return body;
@@ -1053,6 +2069,9 @@ PB::Writer HandleQuotaUsage(uint32_t appId, const std::vector<PB::Field>& reqBod
         body.WriteVarint(4, 1073741824ULL);
         return body;
     }
+
+    BootstrapAutoCloudFiles(accountId, appId);
+
     auto files = LocalStorage::GetFileList(accountId, appId);
     files.erase(std::remove_if(files.begin(), files.end(),
         [](const LocalStorage::FileEntry& fe) {
@@ -1082,6 +2101,7 @@ PB::Writer HandleBeginBatch(uint32_t appId, const std::vector<PB::Field>& reqBod
         return body;
     }
     uint64_t changeNumber = LocalStorage::GetChangeNumber(accountId, appId);
+    PrepareBatchCanonicalTokens(accountId, appId);
 
     // log files to upload/delete and capture root tokens from filenames
     int uploadCount = 0, deleteCount = 0;
@@ -1089,13 +2109,15 @@ PB::Writer HandleBeginBatch(uint32_t appId, const std::vector<PB::Field>& reqBod
         if (f.fieldNum == 3 && f.wireType == PB::LengthDelimited) {
             std::string name(reinterpret_cast<const char*>(f.data), f.dataLen);
             LOG("[NS-BATCH]   upload: %s", name.c_str());
-            TryCaptureRootToken(accountId, appId, ExtractRootToken(name));
+            TryCaptureRootToken(accountId, appId,
+                CanonicalizeUploadRootToken(accountId, appId, StripRootToken(name), ExtractRootToken(name)));
             ++uploadCount;
         }
         if (f.fieldNum == 4 && f.wireType == PB::LengthDelimited) {
             std::string name(reinterpret_cast<const char*>(f.data), f.dataLen);
             LOG("[NS-BATCH]   delete: %s", name.c_str());
-            TryCaptureRootToken(accountId, appId, ExtractRootToken(name));
+            TryCaptureRootToken(accountId, appId,
+                CanonicalizeUploadRootToken(accountId, appId, StripRootToken(name), ExtractRootToken(name)));
             ++deleteCount;
         }
     }
@@ -1136,6 +2158,8 @@ PB::Writer HandleBeginFileUpload(uint32_t appId, const std::vector<PB::Field>& r
     std::string urlHost = "127.0.0.1:" + std::to_string(port);
     std::string rootToken = ExtractRootToken(filename);
     std::string cleanName = StripRootToken(filename);
+    PrepareBatchCanonicalTokens(accountId, appId);
+    rootToken = CanonicalizeUploadRootToken(accountId, appId, cleanName, rootToken);
     std::string urlPath = "/upload/" + std::to_string(accountId) + "/" + std::to_string(appId)
         + "/" + HttpUtil::UrlEncode(cleanName, true);
 
@@ -1235,6 +2259,10 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
                         blobPtr, blobData.size())) {
                     LOG("[NS-UP]   ERROR: failed to store blob for %s", cleanName.c_str());
                     committed = false;
+                    // Drop the staged HttpServer blob so a future retry doesn't
+                    // see stale data and so successive failures don't accumulate
+                    // orphaned files in the upload spool.
+                    HttpServer::DeleteBlob(accountId, appId, cleanName);
                 }
             }
 
@@ -1242,14 +2270,25 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
             // The changelist will only present files under their upload token,
             // preventing Steam's rootoverrides from seeing cross-platform
             // duplicates and issuing spurious deletes.
-            std::string rootToken = ExtractRootToken(filename);
-            RecordFileToken(accountId, appId, cleanName, rootToken);
-            MarkFileTokensDirty(accountId, appId);
+            if (committed) {
+                std::string rootToken = ExtractRootToken(filename);
+                PrepareBatchCanonicalTokens(accountId, appId);
+                rootToken = CanonicalizeUploadRootToken(accountId, appId, cleanName, rootToken);
+                RecordFileToken(accountId, appId, cleanName, rootToken);
+                MarkFileTokensDirty(accountId, appId);
+            }
         } else {
             LOG("[NS-UP]   WARNING: blob not found after PUT for %s (clean=%s)", filename.c_str(), cleanName.c_str());
         }
 
         // Cloud upload already enqueued by CloudStorage::StoreBlob above
+    } else {
+        // Steam reported the PUT failed mid-transfer. The HTTP server may
+        // still hold a partial blob from the aborted upload; clear it so a
+        // retry starts clean and the spool doesn't grow on every failure.
+        if (HttpServer::HasBlob(accountId, appId, cleanName)) {
+            HttpServer::DeleteBlob(accountId, appId, cleanName);
+        }
     }
 
     PB::Writer body;
@@ -1281,14 +2320,15 @@ PB::Writer HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& req
     if (!RequireAccountId("CompleteAppUploadBatchBlocking", appId, accountId)) {
         return PB::Writer();
     }
+    // Advance CN to stay consistent with the local writes already committed
+    // by HandleCommitFileUpload / PersistFileTokens. CommitCNWithRetry drains
+    // pending blob/token work, publishes CN, and on failure async-retries +
+    // blocks on a second drain so process exit does not drop the publish and
+    // failed deletes do not resurrect on the next SyncFromCloud.
     uint64_t newCN = LocalStorage::IncrementChangeNumber(accountId, appId);
-    LOG("[NS] CompleteBatch app=%u CN=%llu", appId, newCN);
-
-    // Push updated CN to cloud provider
-    CloudStorage::PushCNToCloud(accountId, appId, newCN);
-
-    // Drain cloud sync queue -- ensure all blobs are pushed before we tell Steam "batch done"
-    CloudStorage::DrainQueueForApp(accountId, appId);
+    bool committed = CloudStorage::CommitCNWithRetry(accountId, appId, newCN);
+    LOG("[NS] CompleteBatch app=%u CN=%llu committed=%d", appId, newCN, committed ? 1 : 0);
+    ClearBatchCanonicalTokens(accountId, appId);
     PB::Writer body; // empty response
     return body;
 }
@@ -1318,13 +2358,19 @@ PB::Writer HandleFileDownload(uint32_t appId, const std::vector<PB::Field>& reqB
 
     auto entry = LocalStorage::GetFileEntry(accountId, appId, cleanName);
     if (entry) {
+        // Use the metadata triple as a unit -- size, sha, and timestamp must
+        // describe the same snapshot, otherwise Steam will reject the download
+        // (or worse, persist a blob signed with a stale hash). A legitimately
+        // empty file (rawSize == 0) is fine here; we still emit the matching
+        // empty sha and recorded timestamp.
         fileSize = entry->rawSize;
         timestamp = entry->timestamp;
         sha = entry->sha;
-    }
-
-    // fall back to blob store if not in local storage metadata
-    if (fileSize == 0) {
+    } else {
+        // No metadata entry yet (e.g. file was just PUT but never recorded by
+        // a prior CN-tracking write path). Fall back to whatever the HTTP
+        // server has on disk for size; sha and timestamp stay zero/empty so
+        // the response describes a single coherent source.
         fileSize = HttpServer::GetBlobSize(accountId, appId, cleanName);
     }
 

@@ -64,7 +64,7 @@ internal static class TokenFile
 /// </summary>
 public sealed class OAuthService : IDisposable
 {
-    // Google Drive (clasp credentials — same as hardcoded in the DLL)
+    // Google Drive (clasp credentials -- same as hardcoded in the DLL)
     private const string GDriveClientId = // owo what's this?
         "1072944905499-vm2v2i5dvn0a0d2o4ca36i1vge8cvbn0.apps.googleusercontent.com";
     private const string GDriveClientSecret = "v6V3fKV_zWU7iw1DrpO1rknX"; // uwuuu
@@ -72,7 +72,7 @@ public sealed class OAuthService : IDisposable
     private const string GDriveAuthUrl = "https://accounts.google.com/o/oauth2/v2/auth";
     private const string GDriveTokenUrl = "https://oauth2.googleapis.com/token";
 
-    // OneDrive (Azure AD public client — same client ID as in the DLL)
+    // OneDrive (Azure AD public client -- same client ID as in the DLL)
     private const string OneDriveClientId = "c582f799-5dc5-48a7-a4cd-cd0d8af354a2";
     private const string OneDriveScope = "Files.ReadWrite offline_access";
     private const string OneDriveAuthUrl =
@@ -278,8 +278,7 @@ public sealed class OAuthService : IDisposable
         }
     }
 
-    // --- private helpers ---
-
+    // private helpers
     private static string BuildGDriveAuthUrl(string redirectUri, string state, string codeChallenge)
     {
         return $"{GDriveAuthUrl}" +
@@ -449,7 +448,7 @@ public sealed class OAuthService : IDisposable
     private static int FindAvailablePort()
     {
         // Use port 0 to let the OS pick an available port.
-        // Start and immediately stop — the port is very likely still free
+        // Start and immediately stop -- the port is very likely still free
         // for the HttpListener that follows (same-process, localhost only).
         var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
         try

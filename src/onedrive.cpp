@@ -71,12 +71,16 @@ std::string OneDriveProvider::BuildFolderPath(uint32_t accountId, uint32_t appId
 }
 
 // list children of a folder by item ID (for recursive listing)
-void OneDriveProvider::ListChildrenById(const std::string& itemId, const std::string& prefix,
-                                         std::vector<RemoteFile>& out, int depth) {
+bool OneDriveProvider::ListChildrenById(const std::string& itemId, const std::string& prefix,
+                                          std::vector<RemoteFile>& out,
+                                          bool* outComplete, int depth) {
     if (depth >= MAX_RECURSION_DEPTH) {
         LOG("[OneDrive] ListChildrenById: max depth %d reached at %s, stopping",
             MAX_RECURSION_DEPTH, prefix.c_str());
-        return;
+        // As above: we got what the cap allows; callers must refuse to prune
+        // based on this incomplete listing.
+        if (outComplete) *outComplete = false;
+        return true;
     }
     std::string url = "/v1.0/me/drive/items/" + itemId +
         "/children?$select=id,name,size,fileSystemInfo,folder";
@@ -86,7 +90,7 @@ void OneDriveProvider::ListChildrenById(const std::string& itemId, const std::st
         auto r = ApiGet(url);
         if (r.status != 200) {
             LOG("[OneDrive] ListChildren failed: HTTP %d: %s", r.status, r.body.c_str());
-            return;
+            return false;
         }
         auto j = Json::Parse(r.body);
         auto& items = j["value"];
@@ -96,9 +100,9 @@ void OneDriveProvider::ListChildrenById(const std::string& itemId, const std::st
             std::string name = UrlDecode(item["name"].str());
             std::string path = prefix.empty() ? name : prefix + "/" + name;
 
-            if (!item["folder"].isNull()) {
+        if (!item["folder"].isNull()) {
                 // recurse into subfolder
-                ListChildrenById(item["id"].str(), path, out, depth + 1);
+                if (!ListChildrenById(item["id"].str(), path, out, outComplete, depth + 1)) return false;
             } else {
                 RemoteFile rf;
                 rf.id = item["id"].str();
@@ -114,27 +118,43 @@ void OneDriveProvider::ListChildrenById(const std::string& itemId, const std::st
         auto nextLink = j["@odata.nextLink"].str();
         if (nextLink.empty()) break;
 
-        // nextLink is a full URL -- extract just the path+query part
+        // nextLink is a full URL -- extract just the path+query part.
+        // Graph docs don't guarantee "/v1.0/" in the URL (beta endpoints,
+        // regional hosts, future changes). If we can't parse it, we stop
+        // iterating but must NOT report the listing as complete -- returning
+        // success-complete with only page 1 read is exactly the silent
+        // truncation the outComplete flag exists to catch. Prune decisions
+        // at the caller will skip on !complete.
         size_t pathStart = nextLink.find("/v1.0/");
         if (pathStart != std::string::npos) {
             url = nextLink.substr(pathStart);
         } else {
+            LOG("[OneDrive] ListChildrenById: unparseable @odata.nextLink, "
+                "marking listing incomplete: %s", nextLink.c_str());
+            if (outComplete) *outComplete = false;
             url.clear();
         }
     }
+    return true;
 }
 
 // list all files under an app folder using path-based addressing
 std::vector<OneDriveProvider::RemoteFile>
-OneDriveProvider::ListAppFiles(uint32_t accountId, uint32_t appId) {
+OneDriveProvider::ListAppFiles(uint32_t accountId, uint32_t appId, bool* ok, bool* outComplete) {
     std::vector<RemoteFile> result;
+    if (ok) *ok = false;
+    // Pessimistic default; write `true` only on the verified-success tail.
+    if (outComplete) *outComplete = false;
 
     // get the app folder item to find its ID for recursive listing
     auto folderPath = BuildFolderPath(accountId, appId);
     LOG("[OneDrive] ListAppFiles: looking up folder: %s", folderPath.c_str());
     auto r = ApiGet(folderPath + "?$select=id");
     if (r.status == 404) {
+        // Folder doesn't exist yet: legitimate empty-complete listing.
         LOG("[OneDrive] ListAppFiles: folder not found (404)");
+        if (ok) *ok = true;
+        if (outComplete) *outComplete = true;
         return result;
     }
     if (r.status != 200) {
@@ -150,8 +170,16 @@ OneDriveProvider::ListAppFiles(uint32_t accountId, uint32_t appId) {
         return result;
     }
 
+    // ListChildrenById may flip our pessimistic default to stay-false on
+    // depth cap / unparseable nextLink; we intentionally don't touch it
+    // between that call and the final write.
     LOG("[OneDrive] ListAppFiles: folder ID=%s, listing children", folderId.c_str());
-    ListChildrenById(folderId, "", result);
+    bool childrenComplete = true;
+    if (!ListChildrenById(folderId, "", result, &childrenComplete)) {
+        return result;
+    }
+    if (ok) *ok = true;
+    if (outComplete) *outComplete = childrenComplete;
     return result;
 }
 
@@ -513,27 +541,49 @@ bool OneDriveProvider::Remove(const std::string& path) {
 }
 
 bool OneDriveProvider::Exists(const std::string& path) {
+    return CheckExists(path) == ExistsStatus::Exists;
+}
+
+ICloudProvider::ExistsStatus OneDriveProvider::CheckExists(const std::string& path) {
     uint32_t accountId, appId;
     std::string relFilename;
     if (!ParsePath(path, accountId, appId, relFilename) || relFilename.empty())
-        return false;
+        return ExistsStatus::Error;
 
     auto itemPath = BuildItemPath(accountId, appId, relFilename);
     auto r = ApiGet(itemPath + "?$select=id");
-    return r.status == 200;
+    if (r.status == 200) return ExistsStatus::Exists;
+    if (r.status == 404) return ExistsStatus::Missing;
+    return ExistsStatus::Error;
 }
 
 std::vector<ICloudProvider::FileInfo>
 OneDriveProvider::List(const std::string& prefix) {
     std::vector<FileInfo> result;
+    ListChecked(prefix, result);
+    return result;
+}
+
+bool OneDriveProvider::ListChecked(const std::string& prefix, std::vector<FileInfo>& result,
+                                    bool* outComplete) {
+    result.clear();
+    // Pessimistic default per ICloudProvider::ListChecked contract.
+    if (outComplete) *outComplete = false;
 
     uint32_t accountId, appId;
     std::string relPrefix;
-    if (!ParsePath(prefix, accountId, appId, relPrefix))
-        return result;
+    if (!ParsePath(prefix, accountId, appId, relPrefix)) {
+        return false;
+    }
 
-    // List all files under the app folder
-    auto remoteFiles = ListAppFiles(accountId, appId);
+    // List all files under the app folder. Use a local completeness flag so
+    // we can only flip outComplete to true at the verified-success tail.
+    bool ok = false;
+    bool listComplete = true;
+    auto remoteFiles = ListAppFiles(accountId, appId, &ok, &listComplete);
+    if (!ok) {
+        return false;
+    }
 
     std::string basePrefix = std::to_string(accountId) + "/" + std::to_string(appId) + "/";
 
@@ -553,6 +603,8 @@ OneDriveProvider::List(const std::string& prefix) {
         result.push_back(std::move(fi));
     }
 
-    LOG("[OneDriveProvider] List '%s': %zu files", prefix.c_str(), result.size());
-    return result;
+    LOG("[OneDriveProvider] List '%s': %zu files (complete=%d)",
+        prefix.c_str(), result.size(), (int)listComplete);
+    if (outComplete) *outComplete = listComplete;
+    return true;
 }

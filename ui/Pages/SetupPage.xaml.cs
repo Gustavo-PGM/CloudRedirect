@@ -463,12 +463,13 @@ public partial class SetupPage : Page
             Log("═══ Pre-step: Download SteamTools Core DLLs ═══");
             try
             {
-                PatchResult repairResult = null;
-                await Task.Run(() =>
-                {
-                    var patcher = new Patcher(_steamPath, Log);
-                    repairResult = patcher.RepairCoreDlls();
-                });
+                // M18: RepairCoreDllsAsync is genuinely async (await on
+                // HttpClient), so we don't need Task.Run wrapping a
+                // GetAwaiter().GetResult() to keep the dispatcher
+                // responsive. The thread-pool thread is freed back to
+                // the pool while WinHTTP is in flight.
+                var patcher = new Patcher(_steamPath, Log);
+                PatchResult repairResult = await patcher.RepairCoreDllsAsync();
 
                 if (repairResult?.Succeeded != true)
                 {
@@ -555,7 +556,7 @@ public partial class SetupPage : Page
                 Log("OK");
             else
             {
-                Log("FAILED — see detail above");
+                Log("FAILED -- see detail above");
                 allSucceeded = false;
             }
         }
@@ -638,7 +639,7 @@ public partial class SetupPage : Page
 
         if (!allSucceeded)
         {
-            Log("Some steps failed — review the log above.");
+            Log("Some steps failed -- review the log above.");
         }
         else
         {
@@ -808,8 +809,8 @@ public partial class SetupPage : Page
             RefreshStExeStatus(new Patcher(_steamPath, _ => { }));
             Log("");
             Log(stResult == 1 ? "SteamTools.exe patched."
-              : stResult == 0 ? "SteamTools.exe not found — nothing to patch."
-              : "Patch failed — see log above.");
+              : stResult == 0 ? "SteamTools.exe not found -- nothing to patch."
+              : "Patch failed -- see log above.");
         }
         catch (Exception ex)
         {
@@ -849,7 +850,7 @@ public partial class SetupPage : Page
 
             RefreshStExeStatus(new Patcher(_steamPath, _ => { }));
             Log("");
-            Log(success ? "SteamTools.exe restored." : "Restore failed — see log above.");
+            Log(success ? "SteamTools.exe restored." : "Restore failed -- see log above.");
         }
         catch (Exception ex)
         {
