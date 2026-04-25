@@ -44,9 +44,24 @@ static constexpr int    COOLDOWN_SECS    = 300; // 5 minutes
 static std::atomic<int> g_consecutiveFails{0};
 static std::atomic<int64_t> g_lastDialogTime{0};
 static std::mutex g_dialogMutex;
-static std::thread g_dialogThread;
+// Track *every* outstanding dialog thread (not just the most recent) so
+// Shutdown can join them all before DLL unload. Detaching prior threads
+// from this list and trusting "the module is pinned" is fragile: anyone
+// removing the GET_MODULE_HANDLE_EX_FLAG_PIN in dllmain would silently
+// resurrect a use-after-free where a still-open MessageBox returns into
+// freed .text. Joining-all on Shutdown costs us at most one dismissal
+// wait per still-open dialog, which already had to be open before
+// Shutdown ran.
+static std::vector<std::thread> g_dialogThreads;
+// Set during Shutdown so any late ShowCloudError caller (e.g. an
+// auth-refresh callback that beat the provider->Shutdown teardown) does
+// nothing rather than emplacing into a vector we've already moved out of
+// and joined. Without this gate, a late dialog thread would never be
+// joined and its lambda body could outlive DLL_PROCESS_DETACH.
+static std::atomic<bool> g_dialogShuttingDown{false};
 
 static void ShowCloudError(const std::string& message) {
+    if (g_dialogShuttingDown.load(std::memory_order_acquire)) return;
     // check cooldown
     int64_t now = (int64_t)time(nullptr);
     int64_t last = g_lastDialogTime.load();
@@ -55,13 +70,38 @@ static void ShowCloudError(const std::string& message) {
 
     LOG("[CloudStorage] Showing error dialog: %s", message.c_str());
 
-    // non-blocking: fire-and-forget thread for MessageBox
-    // Tracked so Shutdown can join before DLL unload.
-    std::string msg = message; // copy for thread
+    // non-blocking: fire-and-forget thread for MessageBox.
+    // We never detach: each thread is tracked in g_dialogThreads so
+    // Shutdown can join all outstanding dialogs before DLL unload (a
+    // detached MessageBox callback returning into unloaded .text would
+    // crash the host Steam process). The cost of tracking is one
+    // std::thread per ever-shown dialog; in practice the cooldown gate
+    // and FAIL_THRESHOLD keep this list tiny.
     std::lock_guard<std::mutex> lock(g_dialogMutex);
-    if (g_dialogThread.joinable()) g_dialogThread.join();
-    g_dialogThread = std::thread([msg]() {
-        MessageBoxA(nullptr, msg.c_str(), "CloudRedirect - Cloud Sync Error",
+    // Re-check the shutdown flag under the lock: the unlocked check at
+    // function entry is a fast path, but Shutdown could have set the flag
+    // and moved out g_dialogThreads between that check and this lock
+    // acquisition. Without re-checking we'd emplace a new std::thread
+    // into a vector Shutdown already drained, leaving an unjoined thread
+    // whose lambda body could outlive the DLL.
+    if (g_dialogShuttingDown.load(std::memory_order_acquire)) return;
+    // Use MessageBoxW so non-ASCII (CJK / Cyrillic / accented) paths in
+    // the message render correctly regardless of the system ACP. Steam
+    // installs commonly contain non-Latin1 user folders. We don't have a
+    // free-standing UTF-8 -> wide helper; route through the OS converter
+    // directly. -1 length lets MultiByteToWideChar include the NUL.
+    std::wstring wmsg;
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, message.c_str(),
+                                   static_cast<int>(message.size()), nullptr, 0);
+    if (wlen > 0) {
+        wmsg.resize(static_cast<size_t>(wlen));
+        MultiByteToWideChar(CP_UTF8, 0, message.c_str(),
+                            static_cast<int>(message.size()),
+                            wmsg.data(), wlen);
+    }
+    g_dialogThreads.emplace_back([wmsg]() {
+        MessageBoxW(nullptr, wmsg.c_str(),
+                    L"CloudRedirect - Cloud Sync Error",
                     MB_OK | MB_ICONWARNING | MB_SYSTEMMODAL);
     });
 }
@@ -305,7 +345,15 @@ static void RemoveLocalBlobsNotInCloud(uint32_t accountId, uint32_t appId,
                 for (auto& c : rel) { if (c == '\\') c = '/'; }
                 bool skipReserved = (rel == "cn.dat" || rel == "root_token.dat" ||
                                      rel == "file_tokens.dat" || rel == "deleted.dat");
-                if (!skipReserved && !cloudBlobNames.count(rel) &&
+                // cloudBlobNames was built by canonicalizing each cloud-listed
+                // filename through CanonicalizeInternalMetadataName, so a local
+                // blob still sitting under a legacy name (e.g. Playtime.bin
+                // rather than .cloudredirect/Playtime.bin) would wrongly miss
+                // its canonical cloud sibling and get conflict-copied + removed.
+                // Canonicalize the local relative path the same way before
+                // looking it up.
+                std::string canonRel = CanonicalizeInternalMetadataName(rel);
+                if (!skipReserved && !cloudBlobNames.count(canonRel) &&
                     PreserveLocalConflictCopy(accountId, appId, rel, FileUtil::PathToUtf8(entry.path()))) {
                     std::filesystem::path parentPath = entry.path().parent_path();
                     std::error_code rmEc;
@@ -501,85 +549,112 @@ static void WorkerLoop(int threadId) {
         bool success = false;
         bool requeued = false;
         bool droppedAsStale = false;
-        switch (item.type) {
-        case WorkItem::Upload:
-            if (item.skipIfExists) {
-                auto exists = g_provider->CheckExists(item.cloudPath);
-                if (exists == ICloudProvider::ExistsStatus::Exists) {
-                    LOG("[CloudStorage] BG upload skipped existing [%d]: %s",
-                        threadId, item.cloudPath.c_str());
-                    OnCloudSuccess();
-                    success = true;
-                    break;
-                }
-                if (exists == ICloudProvider::ExistsStatus::Error && item.existsCheckRetries++ < 3) {
-                    LOG("[CloudStorage] BG upload deferred after existence check failure [%d]: %s",
-                        threadId, item.cloudPath.c_str());
-                    OnCloudFailure("Exists", item.cloudPath);
-                    requeued = RequeueFromWorker(std::move(item));
-                    if (!requeued) droppedAsStale = true;
-                    break;
-                }
-                if (exists == ICloudProvider::ExistsStatus::Error) {
-                    LOG("[CloudStorage] BG upload abandoned after repeated existence check failures [%d]: %s",
-                        threadId, item.cloudPath.c_str());
-                    OnCloudFailure("Exists", item.cloudPath);
-                    break;
-                }
-            }
-            if (g_provider->Upload(item.cloudPath, item.data.data(), item.data.size())) {
-                LOG("[CloudStorage] BG upload OK [%d]: %s (%zu bytes)",
-                    threadId, item.cloudPath.c_str(), item.data.size());
-                OnCloudSuccess();
-                success = true;
-            } else {
-                LOG("[CloudStorage] BG upload FAILED [%d]: %s", threadId, item.cloudPath.c_str());
-                OnCloudFailure("Upload", item.cloudPath);
-                if (item.transferRetries++ < 3) {
-                    requeued = RequeueFromWorker(std::move(item));
-                    if (!requeued) droppedAsStale = true;
-                }
-            }
-            break;
-        case WorkItem::Delete:
-            if (g_provider->Remove(item.cloudPath)) {
-                LOG("[CloudStorage] BG delete OK [%d]: %s", threadId, item.cloudPath.c_str());
-                OnCloudSuccess();
-                success = true;
-                // Cloud confirmed the delete — drop the local tombstone so a
-                // future StoreBlob of the same filename isn't treated as a
-                // resurrection candidate. Parsing failure (e.g. metadata path)
-                // is silent: non-blob deletes have no tombstone to clear.
-                // Canonicalize so legacy-name deletes clear the canonical
-                // tombstone written by DeleteBlob (and vice versa), keeping
-                // the tombstone namespace aligned with SyncFromCloud's
-                // cloudBlobNames lookup.
-                //
-                // EXCEPT: legacy-metadata cleanup deletes (flagged with
-                // suppressTombstoneClear) must never touch the canonical
-                // tombstone. They delete the legacy copy on the strength of
-                // a canonical sibling being present, not on any intent to
-                // clear the user's live deletion. Without this gate, a
-                // cleanup-delete succeeding concurrently with a user-driven
-                // canonical DeleteBlob would clobber the canonical tombstone
-                // and resurrect the file on the next sync.
-                if (!item.suppressTombstoneClear) {
-                    uint32_t doneAcct = 0, doneApp = 0;
-                    std::string doneFile;
-                    if (ParseCloudBlobPath(item.cloudPath, doneAcct, doneApp, doneFile)) {
-                        LocalStorage::ClearDeleted(doneAcct, doneApp,
-                                                   CanonicalizeInternalMetadataName(doneFile));
+        bool faulted = false;
+        // Any uncaught exception out of this switch terminates the worker
+        // thread, which calls std::terminate and kills the host Steam
+        // process. The pre-switch path also bumped g_activeWorkers and
+        // g_activePaths[item.cloudPath]; an exception that escaped before
+        // the cleanup block below would leak both counters and block
+        // DrainQueue + HasPendingWorkForPrefix forever for that path.
+        // Catch everything, log it, and fall through so the cleanup runs.
+        try {
+            switch (item.type) {
+            case WorkItem::Upload:
+                if (item.skipIfExists) {
+                    auto exists = g_provider->CheckExists(item.cloudPath);
+                    if (exists == ICloudProvider::ExistsStatus::Exists) {
+                        LOG("[CloudStorage] BG upload skipped existing [%d]: %s",
+                            threadId, item.cloudPath.c_str());
+                        OnCloudSuccess();
+                        success = true;
+                        break;
+                    }
+                    if (exists == ICloudProvider::ExistsStatus::Error && item.existsCheckRetries++ < 3) {
+                        LOG("[CloudStorage] BG upload deferred after existence check failure [%d]: %s",
+                            threadId, item.cloudPath.c_str());
+                        OnCloudFailure("Exists", item.cloudPath);
+                        requeued = RequeueFromWorker(std::move(item));
+                        if (!requeued) droppedAsStale = true;
+                        break;
+                    }
+                    if (exists == ICloudProvider::ExistsStatus::Error) {
+                        LOG("[CloudStorage] BG upload abandoned after repeated existence check failures [%d]: %s",
+                            threadId, item.cloudPath.c_str());
+                        OnCloudFailure("Exists", item.cloudPath);
+                        break;
                     }
                 }
-            } else {
-                LOG("[CloudStorage] BG delete FAILED [%d]: %s", threadId, item.cloudPath.c_str());
-                OnCloudFailure("Delete", item.cloudPath);
-                if (item.transferRetries++ < 3) {
-                    requeued = RequeueFromWorker(std::move(item));
-                    if (!requeued) droppedAsStale = true;
+                if (g_provider->Upload(item.cloudPath, item.data.data(), item.data.size())) {
+                    LOG("[CloudStorage] BG upload OK [%d]: %s (%zu bytes)",
+                        threadId, item.cloudPath.c_str(), item.data.size());
+                    OnCloudSuccess();
+                    success = true;
+                } else {
+                    LOG("[CloudStorage] BG upload FAILED [%d]: %s", threadId, item.cloudPath.c_str());
+                    OnCloudFailure("Upload", item.cloudPath);
+                    if (item.transferRetries++ < 3) {
+                        requeued = RequeueFromWorker(std::move(item));
+                        if (!requeued) droppedAsStale = true;
+                    }
                 }
+                break;
+            case WorkItem::Delete:
+                if (g_provider->Remove(item.cloudPath)) {
+                    LOG("[CloudStorage] BG delete OK [%d]: %s", threadId, item.cloudPath.c_str());
+                    OnCloudSuccess();
+                    success = true;
+                    // Cloud confirmed the delete — drop the local tombstone so a
+                    // future StoreBlob of the same filename isn't treated as a
+                    // resurrection candidate. Parsing failure (e.g. metadata path)
+                    // is silent: non-blob deletes have no tombstone to clear.
+                    // Canonicalize so legacy-name deletes clear the canonical
+                    // tombstone written by DeleteBlob (and vice versa), keeping
+                    // the tombstone namespace aligned with SyncFromCloud's
+                    // cloudBlobNames lookup.
+                    //
+                    // EXCEPT: legacy-metadata cleanup deletes (flagged with
+                    // suppressTombstoneClear) must never touch the canonical
+                    // tombstone. They delete the legacy copy on the strength of
+                    // a canonical sibling being present, not on any intent to
+                    // clear the user's live deletion. Without this gate, a
+                    // cleanup-delete succeeding concurrently with a user-driven
+                    // canonical DeleteBlob would clobber the canonical tombstone
+                    // and resurrect the file on the next sync.
+                    if (!item.suppressTombstoneClear) {
+                        uint32_t doneAcct = 0, doneApp = 0;
+                        std::string doneFile;
+                        if (ParseCloudBlobPath(item.cloudPath, doneAcct, doneApp, doneFile)) {
+                            LocalStorage::ClearDeleted(doneAcct, doneApp,
+                                                       CanonicalizeInternalMetadataName(doneFile));
+                        }
+                    }
+                } else {
+                    LOG("[CloudStorage] BG delete FAILED [%d]: %s", threadId, item.cloudPath.c_str());
+                    OnCloudFailure("Delete", item.cloudPath);
+                    if (item.transferRetries++ < 3) {
+                        requeued = RequeueFromWorker(std::move(item));
+                        if (!requeued) droppedAsStale = true;
+                    }
+                }
+                break;
             }
-            break;
+        } catch (const std::exception& ex) {
+            faulted = true;
+            LOG("[CloudStorage] BG worker [%d] EXCEPTION on %s: %s",
+                threadId, activePath.c_str(), ex.what());
+        } catch (...) {
+            faulted = true;
+            LOG("[CloudStorage] BG worker [%d] UNKNOWN EXCEPTION on %s",
+                threadId, activePath.c_str());
+        }
+        // On exception we don't trust `item`'s state (it may have been
+        // partly moved-from) so don't stash it into g_failedWorkItems --
+        // just let the path drop out of active tracking, which lets the
+        // queue resume serving other paths and unblocks DrainQueue waits.
+        if (faulted) {
+            success = false;
+            requeued = false;
+            droppedAsStale = true;
         }
 
         if (success)
@@ -871,10 +946,21 @@ void Shutdown() {
         g_provider.reset();
     }
 
-    // Join any outstanding error dialog thread before DLL unload
+    // Join every outstanding error dialog thread before DLL unload --
+    // see the g_dialogThreads decl for why we track the full list rather
+    // than just the most recent handle. The g_dialogShuttingDown flag is
+    // set first so any in-flight ShowCloudError caller bails before
+    // emplacing into the vector we're about to move out of. We then move
+    // the vector under the lock and join unlocked (joins on MessageBox
+    // threads can take arbitrarily long if the user has the dialog up).
+    g_dialogShuttingDown.store(true, std::memory_order_release);
+    std::vector<std::thread> dialogs;
     {
         std::lock_guard<std::mutex> lock(g_dialogMutex);
-        if (g_dialogThread.joinable()) g_dialogThread.join();
+        dialogs = std::move(g_dialogThreads);
+    }
+    for (auto& t : dialogs) {
+        if (t.joinable()) t.join();
     }
 
     LOG("[CloudStorage] Shutdown complete");
@@ -941,13 +1027,48 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
     {
         std::ifstream f(FileUtil::Utf8ToPath(localPath), std::ios::binary | std::ios::ate);
         if (f) {
-            auto size = f.tellg();
-            f.seekg(0, std::ios::beg);
-            std::vector<uint8_t> data(static_cast<size_t>(size));
-            f.read(reinterpret_cast<char*>(data.data()), size);
-            LOG("[CloudStorage] RetrieveBlob: cache hit: %s (%zu bytes)",
-                filename.c_str(), data.size());
-            return data;
+            // tellg returns pos_type(-1) on stream failure; casting that to
+            // size_t yields SIZE_MAX and the subsequent vector ctor throws
+            // bad_alloc, which propagates straight back through the Steam
+            // RPC caller. Bail to the cloud path on negative or short-read
+            // results instead of trusting the stream.
+            auto rawSize = f.tellg();
+            bool cacheServed = false;
+            std::vector<uint8_t> data;
+            if (rawSize >= 0) {
+                auto size = static_cast<std::streamoff>(rawSize);
+                f.seekg(0, std::ios::beg);
+                data.resize(static_cast<size_t>(size));
+                if (size == 0) {
+                    cacheServed = true;
+                } else {
+                    f.read(reinterpret_cast<char*>(data.data()), size);
+                    // Guard f.fail() in addition to gcount: an underlying
+                    // I/O error during read can set badbit while gcount
+                    // happens to match the requested size (the buffer is
+                    // filled from a corrupted but in-range region). Treat
+                    // any stream failure as a cache miss and re-pull from
+                    // the cloud rather than handing corrupt bytes back to
+                    // the Steam caller.
+                    if (!f.fail() && f.gcount() == size) {
+                        cacheServed = true;
+                    } else {
+                        LOG("[CloudStorage] RetrieveBlob: cache read failed for %s (gcount=%lld of %lld, fail=%d); falling back",
+                            filename.c_str(),
+                            static_cast<long long>(f.gcount()),
+                            static_cast<long long>(size),
+                            f.fail() ? 1 : 0);
+                    }
+                }
+            } else {
+                LOG("[CloudStorage] RetrieveBlob: cache tellg failed for %s; falling back to cloud",
+                    filename.c_str());
+            }
+            if (cacheServed) {
+                LOG("[CloudStorage] RetrieveBlob: cache hit: %s (%zu bytes)",
+                    filename.c_str(), data.size());
+                return data;
+            }
         }
     }
 
@@ -1786,7 +1907,17 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                     for (auto& c : rel) { if (c == '\\') c = '/'; }
                     if (rel == "cn.dat" || rel == "root_token.dat" ||
                         rel == "file_tokens.dat" || rel == "deleted.dat") continue;
-                    if (cloudBlobNames.count(rel)) continue;
+                    // cloudBlobNames was populated by canonicalizing every
+                    // cloud-listed name (see SyncFromCloud's listing loop), so
+                    // a legacy-named local blob (e.g. Playtime.bin without the
+                    // .cloudredirect/ prefix) whose canonical sibling is
+                    // already in the cloud would otherwise miss this filter
+                    // and get re-uploaded under the legacy name, producing a
+                    // duplicate cloud object — exactly the namespace mismatch
+                    // RemoveLocalBlobsNotInCloud guards against on the prune
+                    // side. Canonicalize before lookup to keep the two paths
+                    // symmetrical.
+                    if (cloudBlobNames.count(CanonicalizeInternalMetadataName(rel))) continue;
 
                     // entry.path() is already a wide native path; ifstream's
                     // path overload forwards to the wide CRT open — safe.
