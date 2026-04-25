@@ -35,8 +35,7 @@ internal sealed class GoogleDriveUiCloudProvider : IUiCloudProvider
         _tokenPath = tokenPath;
     }
 
-    // ----- Public surface -----
-
+    // Public surface
     public async Task<CloudProviderClient.DeleteResult> DeleteAppDataAsync(
         string accountId, string appId, CancellationToken cancel)
     {
@@ -162,8 +161,7 @@ internal sealed class GoogleDriveUiCloudProvider : IUiCloudProvider
         return new CloudProviderClient.DeleteBlobsResult(deleted, failed, failedNames, err);
     }
 
-    // ----- GDrive-internal types & helpers -----
-
+    // GDrive-internal types & helpers
     /// <summary>
     /// Distinguishes the three GDrive lookup outcomes so the prune path can
     /// tell a transient HTTP/parse error apart from a genuine "not found."
@@ -472,19 +470,12 @@ internal sealed class GoogleDriveUiCloudProvider : IUiCloudProvider
     }
 
     /// <summary>
-    /// Find a non-folder child of a GDrive folder by exact name. Returns
-    /// Found with the file id, NotFound if the query ran to conclusion with
-    /// zero results, or Error on any HTTP/parse failure. Escapes apostrophes
-    /// and backslashes in the name to keep the v3 query language safe.
+    /// Find a non-folder child by exact name. Returns Found, NotFound, or
+    /// Error on any HTTP/parse failure. Escapes apostrophes and backslashes
+    /// for the v3 query language.
     ///
-    /// Limitation: if multiple files exist with the exact same name and
-    /// parent (GDrive permits this), only the first match is deleted per
-    /// prune run. The caller dedups by name, so duplicates are resolved
-    /// monotonically across successive scan/prune cycles rather than all
-    /// at once. This is acceptable for a prune UX because each run makes
-    /// progress and the numeric count stays accurate per-run; full
-    /// enumeration would require paginating the query and deleting all
-    /// ids, which we can add if duplicate names become a real workflow.
+    /// Duplicates: GDrive permits same-name siblings; only the first match
+    /// is deleted per prune run. Repeat runs converge.
     /// </summary>
     private async Task<LookupResult> FindBlobFileCheckedAsync(
         string token, string name, string parentId, CancellationToken cancel)
@@ -509,9 +500,8 @@ internal sealed class GoogleDriveUiCloudProvider : IUiCloudProvider
 
         if (!resp.IsSuccessStatusCode)
         {
-            // Transient 5xx or permission 403/401 are all "cannot verify"
-            // states -- NOT "file is absent." Return Error so the caller
-            // can count this as a failed delete, not a spurious success.
+            // 4xx/5xx all mean "cannot verify," not "absent." Caller counts
+            // these as failed deletes, not spurious successes.
             _log?.Invoke($"GDrive FindBlob '{name}' returned HTTP {(int)resp.StatusCode}; treating as lookup error");
             return new LookupResult(LookupKind.Error, null);
         }
@@ -531,9 +521,8 @@ internal sealed class GoogleDriveUiCloudProvider : IUiCloudProvider
             if (!doc.RootElement.TryGetProperty("files", out var files) ||
                 files.ValueKind != JsonValueKind.Array)
             {
-                // Malformed response -- the endpoint should always return a
-                // "files" array on 200. Treat as lookup error, not "not
-                // found," so we fail the delete instead of lying.
+                // Malformed 200 response. Treat as error so the caller fails
+                // the delete instead of reporting a spurious success.
                 _log?.Invoke($"GDrive FindBlob '{name}' response missing 'files' array");
                 return new LookupResult(LookupKind.Error, null);
             }
@@ -562,10 +551,8 @@ internal sealed class GoogleDriveUiCloudProvider : IUiCloudProvider
     {
         var names = new List<string>();
         string? pageToken = null;
-        // Defensive cap against a non-changing / cyclic pageToken. 10k pages
-        // at 1000 items == 10M files, far beyond any realistic per-app blob
-        // count; tripping this cap means the API is misbehaving and we must
-        // surface it rather than loop until process exit.
+        // Cap to break out of a stuck/cyclic pageToken. 10k * 1000/page is
+        // well past any real blob count; tripping it means the API is broken.
         const int kMaxPages = 10_000;
         int pages = 0;
 

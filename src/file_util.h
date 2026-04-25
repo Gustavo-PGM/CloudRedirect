@@ -53,7 +53,7 @@ inline std::string PathToUtf8(const std::filesystem::path& p) {
 // GetEnvironmentVariableW) and do not have a std::filesystem::path on hand.
 // Constructing a path just to round-trip would discard the explicit length and
 // re-canonicalize the string. WC_ERR_INVALID_CHARS rejects ill-formed UTF-16
-// (lone surrogates) — we never want to write those into a UTF-8 buffer that
+// (lone surrogates) -- we never want to write those into a UTF-8 buffer that
 // will later be sent to a cloud server or written to NTFS as a filename.
 inline std::string WideToUtf8(const wchar_t* w) {
     if (!w || !*w) return {};
@@ -123,7 +123,7 @@ inline bool IsPathWithin(const std::string& root, const std::string& fullPath) {
 
 // Walk up from `startDir` removing empty directories until the walk reaches
 // `stopAt` (exclusive) or hits a non-empty / non-existent directory. Best-effort
-// cleanup — every error path silently stops the walk. Used by the blob cache
+// cleanup -- every error path silently stops the walk. Used by the blob cache
 // to prune session-scoped subtrees (e.g. Unity's Analytics/ArchivedEvents/<id>/)
 // after files inside them are deleted.
 //
@@ -151,7 +151,7 @@ inline void CleanupEmptyDirsUpTo(const std::string& startDir,
 
     for (int i = 0; i < 256; ++i) {
         const std::string curStr = PathToUtf8(cur);
-        // Must be strictly under stopAt — equal or outside stops the walk.
+        // Must be strictly under stopAt -- equal or outside stops the walk.
         if (curStr.size() <= stopStr.size()) break;
         if (_strnicmp(curStr.c_str(), stopStr.c_str(), stopStr.size()) != 0) break;
         const char sep = curStr[stopStr.size()];
@@ -172,7 +172,7 @@ inline void CleanupEmptyDirsUpTo(const std::string& startDir,
 
 // Path-redirecting reparse-point detection: returns true ONLY for reparse
 // tags that let an attacker redirect a recursive scan to a path of their
-// choosing — NTFS junctions (IO_REPARSE_TAG_MOUNT_POINT) and symlinks
+// choosing -- NTFS junctions (IO_REPARSE_TAG_MOUNT_POINT) and symlinks
 // (IO_REPARSE_TAG_SYMLINK). Returns false for benign reparse tags
 // (OneDrive Files-on-Demand cloud placeholders, AppExecLink, WSL, WIM,
 // dedup, etc.) so legitimate cloud-synced saves are not refused.
@@ -186,7 +186,7 @@ inline void CleanupEmptyDirsUpTo(const std::string& startDir,
 //
 // Why explicit tag inspection instead of FILE_ATTRIBUTE_REPARSE_POINT alone:
 //   - OneDrive Files-on-Demand placeholders set FILE_ATTRIBUTE_REPARSE_POINT
-//     with IO_REPARSE_TAG_CLOUD_* — opening reads them through the cloud
+//     with IO_REPARSE_TAG_CLOUD_* -- opening reads them through the cloud
 //     filter and returns the real bytes. Refusing all reparse points would
 //     silently break AutoCloud for every OneDrive user with synced saves.
 //   - AppExecLink (Microsoft Store apps), WSL, dedup, WIM and similar tags
@@ -204,7 +204,7 @@ inline void CleanupEmptyDirsUpTo(const std::string& startDir,
 //   - FindFirstFileW returns the tag in WIN32_FIND_DATAW::dwReserved0 for
 //     reparse-point entries (documented contract), in a single syscall.
 //
-// Returns false on any error (path missing, ACL denied) — callers treat
+// Returns false on any error (path missing, ACL denied) -- callers treat
 // "unknown" as "not a reparse point" and let the subsequent open/walk fail
 // naturally with its own error path. This avoids a denial-of-service where a
 // transiently unreadable directory permanently blocks AutoCloud.
@@ -214,7 +214,7 @@ inline bool IsPathRedirectingReparsePoint(const std::string& path) {
     // wideLen-1 (the count without the null) and then asked
     // MultiByteToWideChar to write wideLen characters (count *with* the
     // null) into wstring::data(). That overwrote the wstring's own
-    // trailing-null slot with another null — accidentally correct on
+    // trailing-null slot with another null -- accidentally correct on
     // every Microsoft STL we've shipped against, but writing past
     // wstring::size() is fragile to change. Utf8ToPath sizes correctly
     // and gives us a path::native() (wchar_t*) that FindFirstFileW
@@ -228,8 +228,8 @@ inline bool IsPathRedirectingReparsePoint(const std::string& path) {
     if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) return false;
     // dwReserved0 carries the reparse tag for entries that are reparse points.
     switch (fd.dwReserved0) {
-        case IO_REPARSE_TAG_MOUNT_POINT: // NTFS junction — unprivileged primitive
-        case IO_REPARSE_TAG_SYMLINK:     // file/dir symlink — privileged primitive
+        case IO_REPARSE_TAG_MOUNT_POINT: // NTFS junction -- unprivileged primitive
+        case IO_REPARSE_TAG_SYMLINK:     // file/dir symlink -- privileged primitive
             return true;
         default:
             // CLOUD_*, APPEXECLINK, WCI*, WIM, DEDUP, HSM, GVFS, ONEDRIVE, etc.

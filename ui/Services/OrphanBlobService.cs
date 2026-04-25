@@ -14,12 +14,10 @@ namespace CloudRedirect.Services;
 /// a failed delete, or a manual override, and will never be downloaded or
 /// cleaned up by the normal sync path.
 ///
-/// CRITICAL SAFETY CONTRACT: <see cref="ScanAsync"/> results carry a
-/// <see cref="ScanResult.ListingComplete"/> flag. Callers MUST refuse to
-/// prune when it is false &#8212; a partial cloud listing could make
-/// legitimate blobs appear orphaned, causing permanent save loss. This
-/// mirrors the native-side ICloudProvider::ListChecked completeness
-/// discipline at <c>src/cloud_storage.cpp:1283-1566</c>.
+/// <see cref="ScanAsync"/> results carry a <see cref="ScanResult.ListingComplete"/>
+/// flag. Callers must refuse to prune when it is false: a partial cloud listing
+/// could make legitimate blobs appear orphaned and cause save loss. Mirrors the
+/// native ICloudProvider::ListChecked discipline in src/cloud_storage.cpp.
 /// </summary>
 internal sealed class OrphanBlobService
 {
@@ -36,7 +34,7 @@ internal sealed class OrphanBlobService
 
     /// <summary>
     /// Result of a scan. <see cref="Orphans"/> is non-empty only when
-    /// <see cref="ListingComplete"/> is true &#8212; a partial listing is
+    /// <see cref="ListingComplete"/> is true -- a partial listing is
     /// treated as "cannot determine orphan set".
     /// </summary>
     public record ScanResult(
@@ -105,7 +103,7 @@ internal sealed class OrphanBlobService
         catch (Exception ex)
         {
             _log?.Invoke($"[OrphanBlob] Failed to read file_tokens.dat: {ex.Message}");
-            // Safer to abort than assume zero referenced filenames &#8212; a
+            // Safer to abort than assume zero referenced filenames -- a
             // false-empty referenced set would mark every cloud blob as an
             // orphan.
             return new ScanResult(Array.Empty<string>(), listing.BlobFilenames.Count, 0, false,
@@ -191,7 +189,7 @@ internal sealed class OrphanBlobService
     /// peer) can leave a legacy top-level blob on the cloud, and the
     /// top-level <c>blobs/</c> listing in this UI will return it. A pure
     /// set-difference against <c>referenced</c> would then mark it as an
-    /// orphan &#8212; triggering a UI prune would delete live playtime /
+    /// orphan -- triggering a UI prune would delete live playtime /
     /// stats metadata the DLL still relies on. These filenames stay under
     /// the DLL's authority; UI orphan logic is scoped to user save files.
     /// Kept in lockstep with <c>src/rpc_handlers.cpp:IsInternalMetadata</c>;
@@ -216,7 +214,7 @@ internal sealed class OrphanBlobService
     /// issues one delete per filename.
     ///
     /// INTERNAL METADATA: Filenames in <see cref="InternalMetadataFilenames"/>
-    /// are unconditionally skipped &#8212; they are DLL-managed, not user
+    /// are unconditionally skipped -- they are DLL-managed, not user
     /// save data, and pruning them would corrupt playtime / achievement
     /// state. See that set's doc comment for the full rationale.
     /// </summary>

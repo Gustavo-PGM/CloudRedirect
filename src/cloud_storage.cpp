@@ -152,7 +152,7 @@ struct WorkItem {
 };
 
 static std::list<WorkItem>               g_workQueue;
-// LOCK ORDER: this is a SINK in the AutoCloud DAG — never acquired while
+// LOCK ORDER: this is a SINK in the AutoCloud DAG -- never acquired while
 // any CloudRedirect mutex is already held (except transitively from
 // g_autoCloudImportMutex via EnqueueWork from the import critical region).
 // INVARIANT: never held across a provider call (network I/O) or across
@@ -231,8 +231,8 @@ static void RequeueFailedWorkForPrefixLocked(const std::string& prefix) {
             // Release the payload bytes: we will never retry this upload, so
             // holding the blob data in memory until process exit (or until a
             // user re-saves the exact same filename) is pure waste. A large
-            // poisoned blob — e.g. 100 MB save that the provider permanently
-            // rejects — would otherwise pin that much heap for the session.
+            // poisoned blob -- e.g. 100 MB save that the provider permanently
+            // rejects -- would otherwise pin that much heap for the session.
             g_failedPaths.erase(it->first);
             if (!it->second.data.empty()) {
                 std::vector<uint8_t>().swap(it->second.data);
@@ -395,11 +395,11 @@ static std::string CloudBlobPath(uint32_t accountId, uint32_t appId,
            "/blobs/" + filename;
 }
 
-// Inverse of CloudBlobPath — returns false if the path doesn't match the
+// Inverse of CloudBlobPath -- returns false if the path doesn't match the
 // "{accountId}/{appId}/blobs/{filename}" shape. Only blob paths are parsable;
 // metadata paths (cn.dat, root_token.dat, etc.) deliberately fail here.
 //
-// Parses only canonical unsigned decimal for accountId/appId — rejects signs,
+// Parses only canonical unsigned decimal for accountId/appId -- rejects signs,
 // whitespace, leading '+' or '-', and values that don't fit in uint32_t. This
 // keeps the parser symmetric with CloudBlobPath (which always writes canonical
 // unsigned decimal) so a round-trip never produces a different (acct, app)
@@ -441,7 +441,7 @@ static std::string CloudMetadataPath(uint32_t accountId, uint32_t appId,
 }
 
 // Local cache paths use the existing LocalStorage layout:
-//   {g_localRoot}\storage\{accountId}\{appId}\{filename}  — all file data + metadata
+//   {g_localRoot}\storage\{accountId}\{appId}\{filename}  -- all file data + metadata
 // Previously blobs were stored separately in a "blobs\" directory, but this caused
 // desync between changelist metadata and HTTP-served file bytes. Now unified.
 static std::string LocalStoragePath(uint32_t accountId, uint32_t appId) {
@@ -603,7 +603,7 @@ static void WorkerLoop(int threadId) {
                     LOG("[CloudStorage] BG delete OK [%d]: %s", threadId, item.cloudPath.c_str());
                     OnCloudSuccess();
                     success = true;
-                    // Cloud confirmed the delete — drop the local tombstone so a
+                    // Cloud confirmed the delete -- drop the local tombstone so a
                     // future StoreBlob of the same filename isn't treated as a
                     // resurrection candidate. Parsing failure (e.g. metadata path)
                     // is silent: non-blob deletes have no tombstone to clear.
@@ -673,7 +673,7 @@ static void WorkerLoop(int threadId) {
                 g_failedWorkItems.erase(activePath);
             } else if (droppedAsStale) {
                 // Fresher upload already supersedes this retry (handled by
-                // RequeueFromWorker); do not record as failed — the new
+                // RequeueFromWorker); do not record as failed -- the new
                 // queued item is authoritative.
             } else if (!requeued) {
                 g_failedPaths.insert(activePath);
@@ -800,7 +800,7 @@ bool CommitCNWithRetry(uint32_t accountId, uint32_t appId, uint64_t cn) {
     // Genuine transient failure (drain timed out or sync CN push failed).
     // Queue an async retry so the CN publish survives process exit, then
     // block on a second drain so failed Uploads/Deletes for this app prefix
-    // get one more chance before this batch returns to Steam — a failed
+    // get one more chance before this batch returns to Steam -- a failed
     // cloud delete left behind can resurrect on the next SyncFromCloud.
     LOG("[CloudStorage] CommitCNWithRetry app %u CN=%llu drained=%d: deferring to async retry",
         appId, (unsigned long long)cn, drained ? 1 : 0);
@@ -826,7 +826,7 @@ static void PruneStaleConflictCopies(const std::string& localRoot) {
     // Wrap the entire walk in try/catch: std::filesystem APIs we do NOT call
     // with an error_code overload (notably path::string() for logging) can
     // still throw when a conflict-copy filename contains characters outside
-    // the system ANSI codepage — common for Japanese/Cyrillic save names.
+    // the system ANSI codepage -- common for Japanese/Cyrillic save names.
     // This function is best-effort cleanup on startup; a throw here must
     // not escape Init().
     try {
@@ -981,7 +981,7 @@ bool IsCloudActive() {
 bool StoreBlob(uint32_t accountId, uint32_t appId,
                const std::string& filename,
                const uint8_t* data, size_t len) {
-    // 1. Write to local cache (synchronous — the HTTP server needs this immediately).
+    // 1. Write to local cache (synchronous -- the HTTP server needs this immediately).
     //
     // Route through LocalStorage::WriteFileNoIncrement so the write is serialized
     // against SyncFromCloud's staged-blob promotion and RestoreFileIfUnchanged
@@ -996,7 +996,7 @@ bool StoreBlob(uint32_t accountId, uint32_t appId,
     }
     LOG("[CloudStorage] StoreBlob: cached locally: %s (%zu bytes)", filename.c_str(), len);
 
-    // User re-created the file — clear any stale tombstone so SyncFromCloud
+    // User re-created the file -- clear any stale tombstone so SyncFromCloud
     // won't later suppress it and so the background Upload below is the
     // authoritative cloud state for this filename. Canonicalize to match the
     // key DeleteBlob would have written (see MarkDeleted below).
@@ -1072,7 +1072,7 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
         }
     }
 
-    // 2. Cache miss — pull from cloud provider (blocking)
+    // 2. Cache miss -- pull from cloud provider (blocking)
     if (g_provider) {
         std::string cloudPath = CloudBlobPath(accountId, appId, filename);
         std::vector<uint8_t> data;
@@ -1181,7 +1181,7 @@ static bool WriteLocalText(const std::string& path, const std::string& content) 
     return FileUtil::AtomicWriteText(path, content);
 }
 
-// SaveMetadata: removed — metadata.json was never created locally by any code path.
+// SaveMetadata: removed -- metadata.json was never created locally by any code path.
 // With the blob→storage copy in SyncFromCloud, GetFileList() works on restore
 // without a separate metadata file.
 //
@@ -1200,7 +1200,7 @@ bool SaveRootTokens(uint32_t accountId, uint32_t appId,
     // upload: uploading a purely in-memory set that never landed on disk
     // creates a "cloud-only, never durable locally" state that neither
     // SyncFromCloud's merge+rollback path nor the tombstone-CN gate is
-    // prepared for — on restart LoadRootTokens would return the stale
+    // prepared for -- on restart LoadRootTokens would return the stale
     // pre-update disk set and the cloud would hold orphan tokens.
     bool localOk = LocalStorage::SaveRootTokens(accountId, appId, tokens);
 
@@ -1220,7 +1220,7 @@ bool SaveRootTokens(uint32_t accountId, uint32_t appId,
 }
 
 std::unordered_set<std::string> LoadRootTokens(uint32_t accountId, uint32_t appId) {
-    // Just read from local — SyncFromCloud will have pulled the cloud version already
+    // Just read from local -- SyncFromCloud will have pulled the cloud version already
     return LocalStorage::LoadRootTokens(accountId, appId);
 }
 
@@ -1270,7 +1270,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         std::filesystem::create_directories(FileUtil::Utf8ToPath(storagePath), ec);
         if (ec) {
             LOG("[CloudStorage] SyncFromCloud app %u: failed to create local storage "
-                "dir %s: %s — aborting sync", appId, storagePath.c_str(), ec.message().c_str());
+                "dir %s: %s -- aborting sync", appId, storagePath.c_str(), ec.message().c_str());
             return false;
         }
     }
@@ -1329,7 +1329,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         // Default to "vacuously rolled back" only when there is nothing to
         // revert. If we DID merge cloud tokens this cycle, start at false
         // and flip to true only after a successful SaveRootTokens /
-        // SaveFileTokens — otherwise a predicate mismatch (disk drifted
+        // SaveFileTokens -- otherwise a predicate mismatch (disk drifted
         // between merge and rollback) would silently leave merged state on
         // disk while claiming rollback success.
         bool rootRolledBack = !haveMergedCloudRootTokens;
@@ -1340,13 +1340,13 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                     if (LocalStorage::SaveRootTokens(accountId, appId, originalRootTokens)) {
                         rootRolledBack = true;
                     } else {
-                        LOG("[CloudStorage] SyncFromCloud app %u: rollback SaveRootTokens failed — merged tokens remain on disk",
+                        LOG("[CloudStorage] SyncFromCloud app %u: rollback SaveRootTokens failed -- merged tokens remain on disk",
                             appId);
                     }
                 } else {
                     // Disk drifted since our merge; we cannot safely assume
                     // the on-disk set is still ours to revert.
-                    LOG("[CloudStorage] SyncFromCloud app %u: rollback skipped for root tokens — disk set no longer matches merged snapshot",
+                    LOG("[CloudStorage] SyncFromCloud app %u: rollback skipped for root tokens -- disk set no longer matches merged snapshot",
                         appId);
                 }
             }
@@ -1355,11 +1355,11 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                     if (LocalStorage::SaveFileTokens(accountId, appId, originalFileTokens)) {
                         fileRolledBack = true;
                     } else {
-                        LOG("[CloudStorage] SyncFromCloud app %u: rollback SaveFileTokens failed — merged tokens remain on disk",
+                        LOG("[CloudStorage] SyncFromCloud app %u: rollback SaveFileTokens failed -- merged tokens remain on disk",
                             appId);
                     }
                 } else {
-                    LOG("[CloudStorage] SyncFromCloud app %u: rollback skipped for file tokens — disk set no longer matches merged snapshot",
+                    LOG("[CloudStorage] SyncFromCloud app %u: rollback skipped for file tokens -- disk set no longer matches merged snapshot",
                         appId);
                 }
             }
@@ -1402,7 +1402,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                 }
                 if (rawCount > cloudTokens.size()) {
                     cloudHadCorruption = true;
-                    LOG("[CloudStorage] SyncFromCloud app %u: cloud root_token.dat had %zu raw entries but only %zu clean tokens — pushing cleaned version",
+                    LOG("[CloudStorage] SyncFromCloud app %u: cloud root_token.dat had %zu raw entries but only %zu clean tokens -- pushing cleaned version",
                         appId, rawCount, cloudTokens.size());
                 }
             }
@@ -1423,7 +1423,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                     haveMergedCloudRootTokens = true;
                     hadNewer = true;
                 } else {
-                    LOG("[CloudStorage] SyncFromCloud app %u: merged root-token persist failed — skipping rollback predicate bookkeeping",
+                    LOG("[CloudStorage] SyncFromCloud app %u: merged root-token persist failed -- skipping rollback predicate bookkeeping",
                         appId);
                 }
             }
@@ -1498,7 +1498,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                         haveMergedCloudFileTokens = true;
                         hadNewer = true;
                     } else {
-                        LOG("[CloudStorage] SyncFromCloud app %u: merged file-token persist failed — skipping rollback predicate bookkeeping",
+                        LOG("[CloudStorage] SyncFromCloud app %u: merged file-token persist failed -- skipping rollback predicate bookkeeping",
                             appId);
                     }
                 }
@@ -1506,7 +1506,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         }
     }
 
-    // 3. (removed) metadata.json sync — no longer needed.
+    // 3. (removed) metadata.json sync -- no longer needed.
     //    Downloaded blobs are now written directly to LocalStorage,
     //    so GetFileList() works without a separate metadata file.
 
@@ -1580,7 +1580,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     // Load tombstones once per sync. A cloud Delete whose worker never
     // succeeded (provider down, permanent transport failure, etc.) would
     // otherwise resurrect the file here on the next SyncFromCloud. We do
-    // NOT re-enqueue a Delete from this path — doing so would race a
+    // NOT re-enqueue a Delete from this path -- doing so would race a
     // concurrent StoreBlob+Upload via the FIFO queue and could lose the
     // user's freshly saved file. The tombstone stays until either the
     // original queued Delete finally succeeds or the user re-saves the
@@ -1657,7 +1657,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             if (blobsPos == std::string::npos) continue;
             std::string filename = CanonicalizeInternalMetadataName(fi.path.substr(blobsPos + 7));
 
-            // Honor local delete tombstones — don't resurrect files the user
+            // Honor local delete tombstones -- don't resurrect files the user
             // deleted locally just because a not-yet-processed cloud Delete
             // hasn't flushed through the provider yet. Override requires
             // evidence of a real cross-machine write: cloud CN strictly
@@ -1665,7 +1665,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             // time (with a 5-minute skew grace to forgive cross-machine
             // clock drift). If either signal is missing (legacy tombstone
             // with createTimeUnix=0, or provider that doesn't populate
-            // modifiedTime), we fall back to CN-only — same as pre-upgrade.
+            // modifiedTime), we fall back to CN-only -- same as pre-upgrade.
             auto tombIt = deletedTombstones.find(filename);
             if (tombIt != deletedTombstones.end()) {
                 constexpr uint64_t kTombstoneSkewSec = 300;
@@ -1678,13 +1678,13 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                     if (haveBlobTime) {
                         overrideTomb = blobNewerThanTombstone;
                     } else {
-                        // Legacy tombstone or provider without mtime — CN-only fallback.
+                        // Legacy tombstone or provider without mtime -- CN-only fallback.
                         overrideTomb = true;
                     }
                 }
                 if (overrideTomb) {
                     LOG("[CloudStorage] SyncFromCloud app %u: tombstone for %s overridden "
-                        "(cloudCn=%llu > tombCn=%llu, blobMtime=%llu > tombCreate=%llu) — clearing and downloading",
+                        "(cloudCn=%llu > tombCn=%llu, blobMtime=%llu > tombCreate=%llu) -- clearing and downloading",
                         appId, filename.c_str(),
                         (unsigned long long)cloudCN,
                         (unsigned long long)tombIt->second.cn,
@@ -1762,7 +1762,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                 // Promotion is destructive (overwrites local). If we cannot
                 // determine whether a local file exists (transient stat error
                 // from AV lock, share violation, ACL glitch, etc.), we must
-                // NOT treat that as "no local file" — that would skip the
+                // NOT treat that as "no local file" -- that would skip the
                 // conflict-copy safety net and let us clobber an unsynced
                 // local save without a recoverable backup, and would also
                 // leave hadOriginal=false so a later rollback would not
@@ -1826,7 +1826,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         }
         // Prune guard: require a verified-complete listing. A success return
         // with cloudListComplete == false (e.g. GDrive recursion cap) must not
-        // trigger RemoveLocalBlobsNotInCloud — files below the cap would be
+        // trigger RemoveLocalBlobsNotInCloud -- files below the cap would be
         // silently deleted locally despite still existing in cloud.
         if (cloudHadNewerCN && cloudListSucceeded && cloudListComplete && !cloudBlobNames.empty()) {
             RemoveLocalBlobsNotInCloud(accountId, appId, cloudBlobNames);
@@ -1841,7 +1841,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
 
     // Tombstone eviction: once the provider confirms a filename is absent
     // from a complete, non-empty listing, the tombstone has nothing left to
-    // protect — no stale cloud blob exists that could resurrect the file on
+    // protect -- no stale cloud blob exists that could resurrect the file on
     // the next sync. Keeping stuck tombstones (typically from provider-delete
     // RPCs that failed on files that never existed in cloud, or from
     // pre-tombstone-era cleanup) grows deleted.dat indefinitely and adds
@@ -1866,7 +1866,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
     // Gap-repair is a recovery path that trusts "cloud shows nothing" as
     // evidence of an uninitialized provider. A truncated listing (incomplete)
     // can look identically empty for a sub-tree while real data exists above
-    // the recursion cap — never run recovery on an incomplete listing.
+    // the recursion cap -- never run recovery on an incomplete listing.
     bool providerLooksUninitialized = cloudListSucceeded && cloudListComplete &&
                                       !cloudCNFound && !cloudRootTokensFound &&
                                       !cloudFileTokensFound && cloudBlobNames.empty();
@@ -1881,7 +1881,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         std::error_code gapEc;
         bool dirExists = std::filesystem::exists(localBlobDirPath, gapEc);
         if (gapEc) {
-            LOG("[CloudStorage] SyncFromCloud app %u: gap-repair skipped — stat failed for %s: %s",
+            LOG("[CloudStorage] SyncFromCloud app %u: gap-repair skipped -- stat failed for %s: %s",
                 appId, localBlobDir.c_str(), gapEc.message().c_str());
             dirExists = false;
         }
@@ -1890,7 +1890,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             std::filesystem::recursive_directory_iterator it(localBlobDirPath, iterEc);
             std::filesystem::recursive_directory_iterator end;
             if (iterEc) {
-                LOG("[CloudStorage] SyncFromCloud app %u: gap-repair skipped — cannot open %s: %s",
+                LOG("[CloudStorage] SyncFromCloud app %u: gap-repair skipped -- cannot open %s: %s",
                     appId, localBlobDir.c_str(), iterEc.message().c_str());
             } else {
                 for (; !iterEc && it != end; it.increment(iterEc)) {
@@ -1899,7 +1899,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                     bool isFile = entry.is_regular_file(entryEc);
                     if (entryEc || !isFile) continue;
 
-                    // rel becomes a cloud path via CloudBlobPath — must be
+                    // rel becomes a cloud path via CloudBlobPath -- must be
                     // UTF-8 so non-ASCII blob names upload to the right key.
                     std::string rel = FileUtil::PathToUtf8(
                         std::filesystem::relative(entry.path(), localBlobDirPath, entryEc));
@@ -1913,14 +1913,14 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                     // .cloudredirect/ prefix) whose canonical sibling is
                     // already in the cloud would otherwise miss this filter
                     // and get re-uploaded under the legacy name, producing a
-                    // duplicate cloud object — exactly the namespace mismatch
+                    // duplicate cloud object -- exactly the namespace mismatch
                     // RemoveLocalBlobsNotInCloud guards against on the prune
                     // side. Canonicalize before lookup to keep the two paths
                     // symmetrical.
                     if (cloudBlobNames.count(CanonicalizeInternalMetadataName(rel))) continue;
 
                     // entry.path() is already a wide native path; ifstream's
-                    // path overload forwards to the wide CRT open — safe.
+                    // path overload forwards to the wide CRT open -- safe.
                     std::ifstream f(entry.path(), std::ios::binary);
                     if (!f) continue;
                     std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),

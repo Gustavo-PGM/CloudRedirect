@@ -69,7 +69,7 @@ namespace CloudRedirect.Services
         /// <summary>
         /// A ghost entry has SHA=all-zeros, size=0, syncstate=2.
         /// These are cloud sync artifacts from SteamTools redirecting all namespace apps
-        /// to app 760's cloud bucket — the server pushed every game's files into every
+        /// to app 760's cloud bucket -- the server pushed every game's files into every
         /// other namespace app's manifest.
         /// </summary>
         public bool IsGhost =>
@@ -88,7 +88,7 @@ namespace CloudRedirect.Services
         PollutionAppIdDir,  // File in a <otherAppId>/ subdirectory
         PollutionMangled,   // File with <appid>_%Token%...~... mangled name
         PollutionOrphan,    // File not in remotecache and doesn't match any AutoCloud rule
-        PollutionCrossApp,  // Ghost entry in remotecache (SHA=0, syncstate=2) — SteamTools cloud spread
+        PollutionCrossApp,  // Ghost entry in remotecache (SHA=0, syncstate=2) -- SteamTools cloud spread
         Unknown             // Can't determine
     }
 
@@ -528,7 +528,7 @@ namespace CloudRedirect.Services
                 if (entry.IsGhost)
                 {
                     result.Classification = FileClassification.PollutionCrossApp;
-                    result.Reason = "Ghost remotecache entry (SHA=0, syncstate=2) — cloud sync contamination from app 760 bucket";
+                    result.Reason = "Ghost remotecache entry (SHA=0, syncstate=2) -- cloud sync contamination from app 760 bucket";
                     return result;
                 }
 
@@ -537,15 +537,15 @@ namespace CloudRedirect.Services
                 {
                     if (appsWithFile.Count > 1)
                     {
-                        // This filename exists in 2+ namespace apps' remotecaches — contamination
+                        // This filename exists in 2+ namespace apps' remotecaches -- contamination
                         var otherApps = appsWithFile.Where(a => a != appId).ToList();
                         result.Classification = FileClassification.PollutionCrossApp;
-                        result.Reason = $"Filename present in {appsWithFile.Count} apps' remotecaches (also in: {string.Join(", ", otherApps.Take(5))}{(otherApps.Count > 5 ? "..." : "")}) — cross-app contamination from app 760 bucket";
+                        result.Reason = $"Filename present in {appsWithFile.Count} apps' remotecaches (also in: {string.Join(", ", otherApps.Take(5))}{(otherApps.Count > 5 ? "..." : "")}) -- cross-app contamination from app 760 bucket";
                         return result;
                     }
                     else
                     {
-                        // Filename unique to this app's remotecache — legitimate
+                        // Filename unique to this app's remotecache -- legitimate
                         result.Classification = FileClassification.Legitimate;
                         result.Reason = $"Real remotecache entry, unique to this app (SHA={entry.Sha?[..Math.Min(12, entry.Sha?.Length ?? 0)]}..., size={entry.Size})";
                         return result;
@@ -611,20 +611,20 @@ namespace CloudRedirect.Services
                         // File is NOT in this app's remotecache but IS in other apps' remotecaches
                         // → contamination that wasn't synced into this app's remotecache
                         result.Classification = FileClassification.PollutionCrossApp;
-                        result.Reason = $"Not in this app's remotecache but present in {otherApps.Count} other app(s)' remotecaches ({string.Join(", ", otherApps.Take(5))}{(otherApps.Count > 5 ? "..." : "")}) — cross-app contamination";
+                        result.Reason = $"Not in this app's remotecache but present in {otherApps.Count} other app(s)' remotecaches ({string.Join(", ", otherApps.Take(5))}{(otherApps.Count > 5 ? "..." : "")}) -- cross-app contamination";
                         return result;
                     }
                 }
 
-                result.Reason = $"Not in any namespace app's remotecache (app has {remotecacheEntries.Count} tracked files) — ambiguous";
+                result.Reason = $"Not in any namespace app's remotecache (app has {remotecacheEntries.Count} tracked files) -- ambiguous";
             }
             else if (remotecacheEntries != null && remotecacheEntries.Count == 0)
             {
-                result.Reason = "remotecache.vdf exists but has no tracked files — ambiguous";
+                result.Reason = "remotecache.vdf exists but has no tracked files -- ambiguous";
             }
             else
             {
-                result.Reason = "No remotecache.vdf — cannot determine if file is legitimate or contamination";
+                result.Reason = "No remotecache.vdf -- cannot determine if file is legitimate or contamination";
             }
             return result;
         }
@@ -788,7 +788,7 @@ namespace CloudRedirect.Services
 
         /// <summary>
         /// Move polluted files to a timestamped backup directory.
-        /// Each cleanup batch gets its own isolated directory — no files are ever overwritten.
+        /// Each cleanup batch gets its own isolated directory -- no files are ever overwritten.
         /// </summary>
         private (int moved, List<ClassifiedFile> movedFiles) MoveToHoldover(string accountId, uint appId, string appDir, List<ClassifiedFile> pollutedFiles)
         {
@@ -809,7 +809,7 @@ namespace CloudRedirect.Services
                         Directory.CreateDirectory(destDir);
 
                     // If destination already exists (shouldn't happen with timestamped dirs,
-                    // but be defensive), add a numeric suffix — never lose data
+                    // but be defensive), add a numeric suffix -- never lose data
                     string finalDest = destPath;
                     if (File.Exists(finalDest))
                     {

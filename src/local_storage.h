@@ -59,7 +59,7 @@ std::string GetAppPath(uint32_t accountId, uint32_t appId);
 // - scanLimitHit: the resource cap (kMaxAutoCloudScanFiles /
 //   kMaxAutoCloudScanMillis) was reached; `files` is a truncated prefix of
 //   what the filesystem contains. Callers MUST NOT commit to an import
-//   based on this — they can't tell whether an unobserved file is a
+//   based on this -- they can't tell whether an unobserved file is a
 //   foreign-app pollution sentinel or a legitimate save. They also MUST
 //   NOT clear any canonical-token cache: a partial scan is not corruption
 //   evidence, and discarding a previously-populated cache would break
@@ -114,7 +114,7 @@ std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, 
 // delete" (tombstone should clear) from "my own later batches advanced cloud
 // CN while my Delete was poisoned in flight" (tombstone must stay). We also
 // stamp the tombstone with a wall-clock creation time and let the cloud-side
-// sync check the blob's modified time against it — the blob mtime only
+// sync check the blob's modified time against it -- the blob mtime only
 // advances when someone actually wrote to the file, which is the real signal.
 // Legacy tombstones with createTimeUnix=0 fall back to CN-only comparison.
 struct TombstoneInfo {
@@ -136,7 +136,7 @@ void ClearDeleted(uint32_t accountId, uint32_t appId, const std::string& filenam
 // The `listingCapturedAtUnix` cutoff (Unix seconds) excludes tombstones
 // created AFTER the listing snapshot was taken. Such tombstones would not be
 // reflected by the keepSet even when the deleted file was actually in cloud
-// — a DeleteBlob that fires mid-sync, with the queued provider Delete
+// -- a DeleteBlob that fires mid-sync, with the queued provider Delete
 // poisoned after the listing but before Upload drains, would otherwise see
 // its fresh tombstone evicted and the newly-uploaded file resurrect on the
 // next sync. Legacy tombstones with createTimeUnix == 0 bypass the cutoff
@@ -164,7 +164,7 @@ std::unordered_map<std::string, TombstoneInfo> LoadDeleted(uint32_t accountId,
 // hold, so any concurrent `MarkDeleted`/`ClearDeleted` either commits before
 // this call's read (and is included in the rewrite) or waits until after the
 // persist (and observes the migrated file). Neither can be silently dropped
-// by a stale in-memory snapshot — the lost-update race that a naive
+// by a stale in-memory snapshot -- the lost-update race that a naive
 // load-transform-replace pattern would expose.
 //
 // Returns:

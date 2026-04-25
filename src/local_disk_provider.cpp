@@ -31,7 +31,7 @@ std::string LocalDiskProvider::ToFullPath(const std::string& relPath) const {
     // FileUtil::IsPathWithin internally canonicalizes both sides via
     // weakly_canonical, so this check already resolves symlinks/junctions
     // inside the root and catches both "../" traversal and symlink-escape
-    // attacks in a single call — do not add a second post-canonical check,
+    // attacks in a single call -- do not add a second post-canonical check,
     // it would only duplicate FS I/O.
     if (!FileUtil::IsPathWithin(m_root, full)) {
         LOG("[LocalDiskProvider] BLOCKED path traversal: %s (root=%s)",

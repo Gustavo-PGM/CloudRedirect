@@ -74,9 +74,8 @@ internal sealed class OneDriveUiCloudProvider : IUiCloudProvider
         string? nextUrl = $"https://graph.microsoft.com/v1.0/me/drive/root:/{encoded}:/children?$top=200";
 
         var names = new List<string>();
-        // Defensive cap: a non-changing / cyclic @odata.nextLink would spin
-        // this loop forever holding the shared HttpClient. 10k pages at 200
-        // items == 2M blobs, which is far beyond any realistic per-app count.
+        // Cap to break out of a stuck/cyclic @odata.nextLink. Well past any
+        // real per-app blob count.
         const int kMaxPages = 10_000;
         int pages = 0;
         while (!string.IsNullOrEmpty(nextUrl))
@@ -96,13 +95,9 @@ internal sealed class OneDriveUiCloudProvider : IUiCloudProvider
                 return new CloudProviderClient.ListBlobsResult(names, false, $"OneDrive list transport error: {ex.Message}");
             }
 
-            // NotFound is a trivially-complete empty listing ONLY on the
-            // very first request. Mid-pagination NotFound means an already-
-            // accumulated partial listing would be silently discarded and
-            // reported as Complete=true, which is a completeness-contract
-            // violation -- downstream orphan computation would run against
-            // an empty cloud set and the user would see "nothing to prune"
-            // when reality is unknown.
+            // NotFound on the first request = empty listing (folder absent).
+            // NotFound mid-pagination = the folder vanished or the link
+            // expired; report as incomplete rather than silently truncating.
             if (resp.StatusCode == HttpStatusCode.NotFound)
             {
                 if (names.Count == 0)

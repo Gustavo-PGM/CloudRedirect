@@ -1,7 +1,7 @@
 #pragma once
 #include "cloud_provider.h"
 
-// LocalDiskProvider — ICloudProvider that stores files on a separate local/network path.
+// LocalDiskProvider -- ICloudProvider that stores files on a separate local/network path.
 
 class LocalDiskProvider : public ICloudProvider {
 public:

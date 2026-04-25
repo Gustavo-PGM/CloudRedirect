@@ -219,7 +219,7 @@ public partial class CleanupPage : Page
             {
                 var cleanup = _cleanup ?? new CloudCleanup(_steamPath, _ => { });
 
-                // Group by account first, then by app — each account gets its own batch/undo log
+                // Group by account first, then by app -- each account gets its own batch/undo log
                 var byAccount = allSuspect.GroupBy(x => x.app.AccountId);
 
                 foreach (var accountGroup in byAccount)

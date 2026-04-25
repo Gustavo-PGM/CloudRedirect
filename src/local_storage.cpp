@@ -20,7 +20,7 @@ namespace LocalStorage {
 
 static std::string g_baseRoot;
 static std::unordered_map<uint64_t, uint64_t> g_changeNumbers;
-// LOCK ORDER: this is a SINK in the AutoCloud DAG — LocalStorage never
+// LOCK ORDER: this is a SINK in the AutoCloud DAG -- LocalStorage never
 // calls back into CloudStorage, RpcHandlers, or any other subsystem
 // while holding this mutex. Public entry points either take it directly
 // (exclusive for writes, shared for reads) or, for the hashing/stat
@@ -32,7 +32,7 @@ static std::unordered_map<uint64_t, uint64_t> g_changeNumbers;
 // deadlock. Functions that need a shared-read followed by an exclusive
 // write (LoadRootTokens / LoadDeleted legacy rewrites) must drop the
 // shared lock, re-acquire exclusive, and re-read state under the new
-// lock — never pass stale snapshots into the writer path.
+// lock -- never pass stale snapshots into the writer path.
 static std::shared_mutex g_mutex;
 
 // Convert a file_time_type to Unix seconds using a single clock sample pair.
@@ -136,7 +136,7 @@ static std::string GetKnownFolderPathString(const KNOWNFOLDERID& id) {
     // same WC_ERR_INVALID_CHARS rejection of malformed UTF-16 as every other
     // narrow-conversion call in the DLL. SHGetKnownFolderPath is system-
     // controlled, so malformed surrogates are unlikely, but encoding policy
-    // must be uniform — otherwise the next person hardening WideToUtf8 will
+    // must be uniform -- otherwise the next person hardening WideToUtf8 will
     // fix it in 1 of N places.
     std::string result = FileUtil::WideToUtf8(wide);
     CoTaskMemFree(wide);
@@ -219,7 +219,7 @@ struct AutoCloudRuleNative {
 //   - contains '/' or '\\': path traversal / directory escape.
 //   - control chars (< 0x20): filesystem-unsafe.
 //
-// This is a safety filter, not a defensive cap — valid tokens pass through
+// This is a safety filter, not a defensive cap -- valid tokens pass through
 // unchanged regardless of count or length. See
 // AutoCloudRuleNative::siblings doc for the save-loss-vs-caps reasoning.
 static std::vector<std::string> ParseAutoCloudSiblings(const std::string& raw) {
@@ -786,7 +786,7 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
             const auto* siblings = FindChild(entry.children, "siblings");
             if (siblings && siblings->hasString && !siblings->stringValue.empty()) {
                 rule.siblings = ParseAutoCloudSiblings(siblings->stringValue);
-                // Operational signal only — no cap. Legitimate games rarely
+                // Operational signal only -- no cap. Legitimate games rarely
                 // have more than a handful of companion extensions.
                 if (rule.siblings.size() > 32) {
                     LOG("LoadAutoCloudRules: app %u rule root='%s' path='%s' has %zu siblings "
@@ -807,7 +807,7 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
 }
 
 // Pattern complexity caps. WildcardMatchInsensitive is a recursive
-// backtracking matcher — an adversarial pattern like "a*a*a*a*a*a*a*a*b"
+// backtracking matcher -- an adversarial pattern like "a*a*a*a*a*a*a*a*b"
 // against a long "aaaa...a" text backtracks exponentially in the number
 // of '*' segments. UFS appinfo rules come from Steam-controlled input
 // that we treat as untrusted (appinfo.vdf can be modified on disk, a
@@ -818,7 +818,7 @@ static constexpr size_t kMaxWildcardPatternLen = 1024;
 static constexpr int    kMaxWildcardStars      = 16;
 // Iteration budget bounds the total number of recursive calls across a
 // single top-level match. Any pattern that blows through it is treated
-// as a non-match (fail-closed — a rule we can't evaluate safely is
+// as a non-match (fail-closed -- a rule we can't evaluate safely is
 // better skipped than allowed to hang the bootstrap scan).
 static constexpr int    kMaxWildcardIterations = 100000;
 
@@ -958,7 +958,7 @@ static CNParseResult ReadCNFile(const std::string& path, uint64_t& outCn) {
         if (!f) return CNParseResult::Absent;
 
         // Hard cap the read. A valid CN is a decimal uint64 ≤ 20 digits
-        // plus optional trailing newline — 64 bytes is generous. An
+        // plus optional trailing newline -- 64 bytes is generous. An
         // uncapped read on a multi-gigabyte corrupt file (FS bleed, AV
         // quarantine placeholder, ransomware padding) would OOM a 32-bit
         // process long before we got to validate.
@@ -977,7 +977,7 @@ static CNParseResult ReadCNFile(const std::string& path, uint64_t& outCn) {
 
         std::string content(buf, static_cast<size_t>(n));
         // Embedded NUL / non-printable anywhere is corruption. Do NOT use
-        // NUL as a read delimiter — a torn write "847\0<junk>" must not be
+        // NUL as a read delimiter -- a torn write "847\0<junk>" must not be
         // silently accepted as the valid prefix "847".
         for (char c : content) {
             if (c == '\0') return CNParseResult::Corrupt;
@@ -1137,7 +1137,7 @@ uint64_t GetChangeNumber(uint32_t accountId, uint32_t appId) {
             // A corrupt cn.dat is a strong signal that the last write was
             // interrupted or the file was tampered with. Quarantine it so
             // that a subsequent IncrementChangeNumber does NOT overwrite
-            // the damaged content with a fresh small value — the old file
+            // the damaged content with a fresh small value -- the old file
             // stays on disk for inspection. Fall through to default 1.
             QuarantineCorruptCNFile(cnPath, appId);
             break;
@@ -1247,7 +1247,7 @@ std::vector<uint8_t> SHA1(const uint8_t* data, size_t len) {
     return hash;
 }
 
-// Streaming SHA1 — reads file in chunks to avoid loading entire file into memory.
+// Streaming SHA1 -- reads file in chunks to avoid loading entire file into memory.
 // path is UTF-8 by codebase convention; route through the wide bridge so
 // non-ASCII filenames open correctly (ifstream(std::string) goes through ACP
 // and silently misses any path with Cyrillic/CJK/accented characters).
@@ -1277,7 +1277,7 @@ static std::vector<uint8_t> SHA1File(const std::string& path) {
 std::vector<FileEntry> GetFileList(uint32_t accountId, uint32_t appId) {
     std::vector<FileEntry> result;
 
-    // Phase 1: Collect file paths under shared lock (fast — no hashing)
+    // Phase 1: Collect file paths under shared lock (fast -- no hashing)
     struct PendingFile {
         std::string relPath;
         std::string fullPath;
@@ -1291,7 +1291,7 @@ std::vector<FileEntry> GetFileList(uint32_t accountId, uint32_t appId) {
         std::string appRoot = GetAppPathInternal(accountId, appId);
         // Convert appRoot once via Utf8ToPath. The previous implementation
         // passed appRoot directly into std::filesystem::exists / iterator /
-        // relative which uses the implicit ACP-decoding string overload — for
+        // relative which uses the implicit ACP-decoding string overload -- for
         // any non-ASCII account profile (Cyrillic / CJK userdata path) that
         // returned false from exists(), silently producing an empty file list
         // and skipping cloud sync entirely. Fix: convert once on the wide
@@ -1303,7 +1303,7 @@ std::vector<FileEntry> GetFileList(uint32_t accountId, uint32_t appId) {
         // ec overload with skip_permission_denied: GetFileList runs on
         // the Cloud RPC hot path. A transient I/O fault (OneDrive reparse,
         // AV lock, disconnected drive) must not unwind through the DLL
-        // boundary — bail out with whatever we have and let the caller
+        // boundary -- bail out with whatever we have and let the caller
         // treat the app as empty this cycle.
         std::filesystem::recursive_directory_iterator it(
             appRootFs,
@@ -1377,12 +1377,12 @@ std::vector<FileEntry> GetFileList(uint32_t accountId, uint32_t appId) {
                 appRoot.c_str(), ec.message().c_str(), pending.size());
         }
     }
-    // Lock released — hash files without blocking writers
+    // Lock released -- hash files without blocking writers
 
     // Phase 2: Compute SHA1 hashes without holding the lock
     for (auto& pf : pending) {
         auto sha = SHA1File(pf.fullPath);
-        // File may have been deleted between phase 1 and 2 — skip if hash is empty/all zeros
+        // File may have been deleted between phase 1 and 2 -- skip if hash is empty/all zeros
         if (sha.empty() || std::all_of(sha.begin(), sha.end(), [](uint8_t b) { return b == 0; }))
             continue;
 
@@ -1803,7 +1803,7 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
         // (uncommon, but legitimate on relocated user profiles or junction-
         // based folder redirection), the ".." traversal hops through that
         // junction without IsPathRedirectingReparsePoint ever inspecting it
-        // — the gate only checks the literal path string, and the literal
+        // -- the gate only checks the literal path string, and the literal
         // path doesn't carry the reparse attribute itself. The knownfolder
         // ID returns the canonical LocalLow path directly with no ".."
         // segments, so the gate sees the actual target.
@@ -1814,7 +1814,7 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
             // Pre-Vista is unreachable here (we require Win10+), but the
             // knownfolder API can still fail for restricted process tokens
             // or a corrupted user profile. Synthetic fallback preserves
-            // legacy behavior for those edge cases — junction redirection
+            // legacy behavior for those edge cases -- junction redirection
             // through %LOCALAPPDATA% remains a theoretical concern in the
             // fallback path, but it requires a token that already cannot
             // resolve LocalAppDataLow, which is itself a misconfiguration.
@@ -1961,11 +1961,11 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
         // Reject path-redirecting reparse points at the rule's resolved
         // scan root. Steam's AutoCloud walks attacker-influenced paths
         // (game saves under %USERPROFILE%\Documents\...) and a junction
-        // here would silently redirect the walk into an arbitrary tree —
+        // here would silently redirect the walk into an arbitrary tree --
         // exfiltrating its contents into the cloud blob upload. Refuse to
         // walk and let the app boot without AutoCloud rather than
         // uploading the wrong tree. OneDrive cloud-placeholder dirs are
-        // explicitly NOT rejected — see IsPathRedirectingReparsePoint.
+        // explicitly NOT rejected -- see IsPathRedirectingReparsePoint.
         std::string scanRootUtf8 = FileUtil::PathToUtf8(scanRoot);
         if (FileUtil::IsPathRedirectingReparsePoint(scanRootUtf8)) {
             LOG("GetAutoCloudFileList: app %u rule scan root is a junction/symlink, refusing to walk: root='%s' path='%s' resolved='%s'",
@@ -1986,7 +1986,7 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
             // pipeline never sees a redirected path. Cheap FindFirstFileW;
             // only fires when the iterator actually yields a reparse entry.
             // OneDrive cloud-placeholder files are intentionally allowed
-            // through — they read as their real bytes via the cloud filter.
+            // through -- they read as their real bytes via the cloud filter.
             std::string entryUtf8 = FileUtil::PathToUtf8(entry.path());
             if (FileUtil::IsPathRedirectingReparsePoint(entryUtf8)) {
                 LOG("GetAutoCloudFileList: app %u skipping junction/symlink entry under '%s': %s",
@@ -2030,7 +2030,7 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
             // that exist become CHILD CAutoCloudFile nodes of the primary;
             // CR flattens this to individual FileEntry emits because it
             // always sends full changelists (is_only_delta=0) and the
-            // downstream upload path treats entries independently — the
+            // downstream upload path treats entries independently -- the
             // tree is an internal bookkeeping detail of Steam's delta
             // tracker that has no wire equivalent in CR.
             //
@@ -2045,7 +2045,7 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
             // rules whose siblings land on the same cloud path is a
             // benign dedupe case, and a primary later claiming a path a
             // sibling already emitted would cause spurious abort of the
-            // entire bootstrap — downgraded here to silent-skip because
+            // entire bootstrap -- downgraded here to silent-skip because
             // the primary record covers the file on its own.
             for (const auto& siblingExt : rule.siblings) {
                 if (scanLimitReached()) break;
@@ -2135,7 +2135,7 @@ AutoCloudScanResult GetAutoCloudFileList(const std::string& steamPath,
     // Surface termination conditions to the caller via the structured
     // result rather than an exception. Scan-limit and root-collision are
     // expected outcomes of a bounded scan against adversarial/misconfigured
-    // inputs, not unrecoverable errors — using exceptions here would mean
+    // inputs, not unrecoverable errors -- using exceptions here would mean
     // every caller pays for unwinding on a routine abort path.
     outResult.scanLimitHit = scanLimitHit;
     outResult.hasRootCollision = hasRootCollision;
@@ -2213,7 +2213,7 @@ std::unordered_set<std::string> LoadRootTokens(uint32_t accountId, uint32_t appI
             // returned to the caller is still correct for this call, but the
             // next LoadRootTokens will re-trigger the same failing rewrite.
             // Log once here so the retry storm is at least visible.
-            LOG("LoadRootTokens: cleanup rewrite FAILED app %u — will retry on next load", appId);
+            LOG("LoadRootTokens: cleanup rewrite FAILED app %u -- will retry on next load", appId);
         }
     }
 
@@ -2272,7 +2272,7 @@ std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, 
     return result;
 }
 
-// ---- Delete tombstones ---------------------------------------------------
+// Delete tombstones
 //
 // Persisted as "deleted.dat" under the app dir, one entry per line as
 // "filename\tcn\n". The file is treated as LocalStorage-internal metadata:
@@ -2288,7 +2288,7 @@ std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, 
 // cloud CN must exceed the tombstone CN (otherwise the cloud state is no
 // newer than our local state at delete time), AND the cloud blob's mtime must
 // exceed the tombstone creation time plus a clock-skew grace (otherwise we
-// saw cloud CN advance but nobody actually wrote this file — it's stale
+// saw cloud CN advance but nobody actually wrote this file -- it's stale
 // content from before our delete that the cloud provider couldn't purge).
 //
 // File format evolved:
@@ -2298,7 +2298,7 @@ std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, 
 //
 // Legacy rows (createTime=0) fall back to CN-only comparison at sync time,
 // preserving pre-upgrade behavior. Upgrade-on-read rewrites the file verbatim
-// but does NOT synthesize a createTime for legacy entries — we genuinely
+// but does NOT synthesize a createTime for legacy entries -- we genuinely
 // don't know when those tombstones were set.
 
 static std::unordered_map<std::string, TombstoneInfo> LoadDeletedLocked(uint32_t accountId,
@@ -2349,7 +2349,7 @@ static std::unordered_map<std::string, TombstoneInfo> LoadDeletedLocked(uint32_t
                 if (outNeedsRewrite) *outNeedsRewrite = true;
             }
             if (secondTab == std::string::npos) {
-                // v2 (filename\tcn) — legacy, createTime stays 0
+                // v2 (filename\tcn) -- legacy, createTime stays 0
                 if (outNeedsRewrite) *outNeedsRewrite = true;
             } else {
                 std::string ctStr = rest.substr(secondTab + 1);
@@ -2407,7 +2407,7 @@ static bool SaveDeletedLocked(uint32_t accountId, uint32_t appId,
         content += '\n';
     }
     if (!FileUtil::AtomicWriteText(path, content)) {
-        LOG("SaveDeletedLocked: FAILED to persist %zu tombstone(s) for app %u — "
+        LOG("SaveDeletedLocked: FAILED to persist %zu tombstone(s) for app %u -- "
             "deletion may resurrect on next SyncFromCloud", deleted.size(), appId);
         return false;
     }
@@ -2469,7 +2469,7 @@ void MarkDeleted(uint32_t accountId, uint32_t appId, const std::string& filename
     uint64_t mergedCn = inserted ? cnAtDelete : (std::max)(it->second.cn, cnAtDelete);
     deleted[filename] = TombstoneInfo{ mergedCn, now };
     if (!SaveDeletedLocked(accountId, appId, deleted)) {
-        // Persistence failed — the in-memory snapshot is now ahead of disk.
+        // Persistence failed -- the in-memory snapshot is now ahead of disk.
         // The next LoadDeletedLocked will reflect only what's on disk, so
         // functionally we've rolled back. Caller is already informed via LOG
         // from SaveDeletedLocked; just log the site context.
@@ -2515,7 +2515,7 @@ bool MigrateDeletedKeys(uint32_t accountId, uint32_t appId,
     //
     // Thread `needsRewrite` through so if the on-disk file is in a legacy
     // v1/v2 format (no createTimeUnix column), we upgrade it to v3 in the
-    // same persist below — matching LoadDeleted's opportunistic rewrite.
+    // same persist below -- matching LoadDeleted's opportunistic rewrite.
     bool needsFormatRewrite = false;
     auto current = LoadDeletedLocked(accountId, appId, &needsFormatRewrite);
     std::unordered_map<std::string, TombstoneInfo> migrated;
@@ -2546,7 +2546,7 @@ bool MigrateDeletedKeys(uint32_t accountId, uint32_t appId,
             LOG("MigrateDeletedKeys: app %u rewrite of %zu tombstone(s) NOT persisted",
                 appId, migrated.size());
             // Return the (not-yet-persisted) migrated view so the caller can
-            // keep going in-memory — a future sync retries the persist.
+            // keep going in-memory -- a future sync retries the persist.
             // Caveat: during this failed-persist sync, any ClearDeleted on a
             // canonical key will miss the still-legacy on-disk entry and
             // silently no-op. The next successful migration closes the gap.
@@ -2579,13 +2579,13 @@ void EvictTombstonesNotIn(uint32_t accountId, uint32_t appId,
     int protectedByCutoff = 0;
     for (auto it = deleted.begin(); it != deleted.end(); ) {
         if (keepSet.count(it->first) != 0) {
-            // Cloud confirms the file exists — tombstone is still protecting
+            // Cloud confirms the file exists -- tombstone is still protecting
             // against resurrection. Keep it.
             ++it;
             continue;
         }
         // Tombstone filename absent from cloud listing. Evict only if the
-        // tombstone was written BEFORE the listing snapshot — otherwise we
+        // tombstone was written BEFORE the listing snapshot -- otherwise we
         // might be evicting a tombstone for a file whose cloud blob exists
         // but post-dated the listing snapshot, reopening the resurrection
         // window that MarkDeleted's caller was trying to close.

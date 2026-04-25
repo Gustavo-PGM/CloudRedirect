@@ -262,7 +262,7 @@ public partial class AppsPage : Page
         var steamPath = SteamDetector.FindSteamPath();
         if (steamPath == null) return;
 
-        // ---- Resolve all deletion targets BEFORE showing the dialog ----
+        // Resolve all deletion targets BEFORE showing the dialog
         var targets = await Task.Run(() => ResolveDeletionTargets(steamPath, app));
 
         // Build a rich-text summary of what we'll destroy
@@ -317,7 +317,7 @@ public partial class AppsPage : Page
         {
             var errors = new List<string>();
 
-            // ---- Back up everything before deleting ----
+            // Back up everything before deleting
             var backupTimestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
             var backupDir = Path.Combine(BackupPaths.GetAppDeleteRoot(steamPath),
                 app.AccountId, $"{app.AppId}_{backupTimestamp}");
@@ -359,8 +359,7 @@ public partial class AppsPage : Page
                 File.WriteAllText(Path.Combine(backupDir, "undo_log.json"), json);
             });
 
-            // ---- Now delete everything ----
-
+            // Now delete everything
             // 1. Delete CloudRedirect local storage (unified + legacy)
             await Task.Run(() =>
             {
@@ -494,7 +493,7 @@ public partial class AppsPage : Page
     ///
     /// Scans are serialized (one cloud listing at a time) to avoid
     /// tripping provider rate limits, and the Steam-closed gate is
-    /// checked once at the top rather than per-app &#8212; uploads in
+    /// checked once at the top rather than per-app -- uploads in
     /// flight while Steam is running would race against the listing
     /// and could produce false orphans, so a single upfront gate is
     /// both cheaper and more correct than a per-app one.
@@ -642,7 +641,7 @@ public partial class AppsPage : Page
     /// Prune the already-scanned orphan blobs for a single app. The
     /// orphan list itself is displayed in-page by the expander above
     /// (populated by <see cref="ScanOrphans_Click"/>), so this flow
-    /// only needs a countdown confirmation before deletion &#8212; no
+    /// only needs a countdown confirmation before deletion -- no
     /// modal preview.
     ///
     /// Uses <see cref="AppInfo.OrphanFiles"/> captured at scan time
@@ -782,7 +781,7 @@ public partial class AppsPage : Page
     /// control characters (which would break WrapPanel layout) and bidi-
     /// override codepoints (which could visually reorder the filename so
     /// the user approves something different from what it actually
-    /// deletes). The sanitized form is for display only &#8212; the prune
+    /// deletes). The sanitized form is for display only -- the prune
     /// path uses the original filename from the scan result.
     /// </summary>
     private static string SanitizeForPreview(string name)

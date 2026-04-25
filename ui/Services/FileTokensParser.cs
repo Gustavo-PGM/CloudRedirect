@@ -9,7 +9,7 @@ namespace CloudRedirect.Services;
 /// at lines 1881-1923): one entry per line as "cleanName\ttoken\n". Empty
 /// lines are skipped; lines without a tab are skipped; CRLF line endings are
 /// tolerated. Filenames are stored verbatim (no canonicalization at this
-/// layer) and compared case-sensitively &#8212; mirrors the native
+/// layer) and compared case-sensitively -- mirrors the native
 /// std::unordered_map&lt;std::string,...&gt; keying.
 ///
 /// This parser is read-only and never touches disk beyond

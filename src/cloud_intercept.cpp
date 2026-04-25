@@ -108,7 +108,7 @@ static constexpr uint32_t CCM_OFF_CONN_CONTEXT       = 1688;  // connection cont
 // CBaseUser layout
 static constexpr uint32_t USER_OFF_CCMINTERFACE     = 72;     // CCMInterface embedded at CBaseUser+0x48
 
-// Function pointer types for BRouteMsgToJob bypass (Approach D — legacy)
+// Function pointer types for BRouteMsgToJob bypass (Approach D -- legacy)
 // sub_138D02530: wraps CNetPacket into CProtoBufNetPacket (parses protobuf header)
 using WrapPacketFn = void*(__fastcall*)(CNetPacket* pkt, int addRef);
 // sub_138D0EB50: routes a wrapped packet to the waiting job
@@ -116,7 +116,7 @@ using BRouteMsgToJobFn = char(__fastcall*)(void* jobMgr, void* connCtx,
                                            void* wrappedPkt, void* routeInfo, int validateFrom);
 // sub_1380EB160: releases a wrapped packet (decrements refcount)
 using ReleaseWrappedFn = void*(__fastcall*)(void* wrappedPkt);
-// sub_138DCA830: refcount increment helper — takes ptr-to-ptr, reads inner ptr, does InterlockedIncrement64
+// sub_138DCA830: refcount increment helper -- takes ptr-to-ptr, reads inner ptr, does InterlockedIncrement64
 using RefCountHelperFn = void*(__fastcall*)(volatile int64_t** ppCounter);
 
 // Function pointer types for service-method vtable hook (Approach E)
@@ -136,25 +136,25 @@ using ServiceMethodSlot4Fn = bool(__fastcall*)(void* thisptr, const char* method
 //   [rsp+28h] = flags (int64_t*, typically NULL)
 using ServiceMethodSlot5Fn = bool(__fastcall*)(void* thisptr, const char* methodName,
                                                 void* request, void* response, int64_t* flags);
-// Slot 7 signature: notification direct — sends fire-and-forget notification
+// Slot 7 signature: notification direct -- sends fire-and-forget notification
 //   rcx = this (CClientUnifiedServiceTransport*)
 //   rdx = methodName (const char*)
 //   r8  = bodyObj (raw protobuf body object, NOT wrapped in CProtoBufMsg)
-//   r9  = flags (int*, can be NULL) — {routing_appid, ?, ?, ?}
+//   r9  = flags (int*, can be NULL) -- {routing_appid, ?, ?, ?}
 using NotificationSlot7Fn = bool(__fastcall*)(void* thisptr, const char* methodName,
                                                void* bodyObj, int* flags);
-// Slot 8 signature: notification wrapper — extracts body from CProtoBufMsg, calls slot 7
+// Slot 8 signature: notification wrapper -- extracts body from CProtoBufMsg, calls slot 7
 //   rcx = this (CClientUnifiedServiceTransport*)
 //   rdx = methodName (const char*)
 //   r8  = request CProtoBufMsg* (body at +48, header at +40)
 using NotificationSlot8Fn = bool(__fastcall*)(void* thisptr, const char* methodName,
                                                void* request);
-// sub_138BD0210: ParseFromArray — fills a protobuf message object from raw bytes
+// sub_138BD0210: ParseFromArray -- fills a protobuf message object from raw bytes
 //   rcx = protobuf message object (body at CProtoBufMsg+48)
 //   rdx = raw data pointer
 //   r8  = raw data size (as int)
 using ParseFromArrayFn = char(__fastcall*)(void* msgBody, const char* data, int size);
-// sub_138BD07E0: SerializeToArray — writes protobuf message to a buffer
+// sub_138BD07E0: SerializeToArray -- writes protobuf message to a buffer
 //   rcx = protobuf message object (body at CProtoBufMsg+48)
 //   rdx = output buffer pointer
 //   returns pointer past last written byte
@@ -230,7 +230,7 @@ static LONG WINAPI CrashExcFilter(PEXCEPTION_POINTERS pExc) {
                 // For Cyrillic/CJK Steam install paths approaching MAX_PATH
                 // the full path will not fit. Fall back to the leaf name
                 // (everything past the final '\') which is what crash-report
-                // triage actually needs — "dwmapi.dll" or "steamclient64.dll"
+                // triage actually needs -- "dwmapi.dll" or "steamclient64.dll"
                 // is the diagnostic, the directory prefix is noise.
                 int n = WideCharToMultiByte(CP_UTF8, 0, wbuf, (int)wlen,
                                             s_crashModuleName,
@@ -332,7 +332,7 @@ static ParseFromArrayFn g_parseFromArray = nullptr;          // sub_138BD0210
 static SerializeToArrayFn g_serializeToArray = nullptr;      // sub_138BD07E0
 static std::atomic<bool> g_vtableHookInstalled{false};
 
-// Hook reference counter — incremented on entry to each hook, decremented on exit.
+// Hook reference counter -- incremented on entry to each hook, decremented on exit.
 // Shutdown() spins until this reaches zero before restoring vtable pointers.
 static std::atomic<int> g_hookRefCount{0};
 
@@ -725,7 +725,7 @@ static void TryFindCCMInterface() {
     void* ccm = FindCCMInterface();
     if (!ccm) return;
 
-    // Atomically claim the "first finder" role — only one thread proceeds.
+    // Atomically claim the "first finder" role -- only one thread proceeds.
     // This prevents double vtable patching which would overwrite the saved
     // original slot pointers with our hook addresses, causing crash on restore.
     bool expected = false;
@@ -738,7 +738,7 @@ static void TryFindCCMInterface() {
 
     LOG("[CCM] Found real CCMInterface: %p", ccm);
 
-    // Log details for debugging (wrapped in SEH — raw pointer dereferences for diagnostics only)
+    // Log details for debugging (wrapped in SEH -- raw pointer dereferences for diagnostics only)
     __try {
         uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
         uintptr_t engine = *pEngineGlobal;
@@ -746,7 +746,7 @@ static void TryFindCCMInterface() {
 
         LOG("[CCM]   CSteamEngine: %p (global at sc+0x%X)", (void*)engine, SC_RVA_GLOBAL_ENGINE);
         LOG("[CCM]   Global user handle: %u", handle);
-        LOG("[CCM]   Vtable: %p (RVA=0x%llX) — MATCHES CCMInterface::vftable",
+        LOG("[CCM]   Vtable: %p (RVA=0x%llX) -- MATCHES CCMInterface::vftable",
             (void*)(*(uintptr_t*)ccm), (uint64_t)SC_RVA_CCMINTERFACE_VT);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         LOG("[CCM] WARNING: exception reading engine globals (code=0x%lX)", GetExceptionCode());
@@ -780,7 +780,7 @@ static void TryFindCCMInterface() {
     }
 }
 
-// Response injection via BRouteMsgToJob (Approach D — legacy fallback)
+// Response injection via BRouteMsgToJob (Approach D -- legacy fallback)
 //
 // Queue + inject on network thread via RecvPktMonitorHook.
 // BRouteMsgToJob → Coroutine_Continue requires the thread-local coroutine manager
@@ -832,7 +832,7 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
     }
 
     if (!wrappedPkt) {
-        LOG("[INJECT] WrapPacket returned NULL — packet validation failed");
+        LOG("[INJECT] WrapPacket returned NULL -- packet validation failed");
         VirtualFree(ctx->pktBuf, 0, MEM_RELEASE);
         free(ctx->pktStruct);
         delete ctx;
@@ -898,7 +898,7 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
             uint32_t jobState = cjobPtr ? *(uint32_t*)((uintptr_t)cjobPtr + 0x84) : 999;
             LOG("[INJECT]   FindJob slot=%d cjob=%p state=%u", jobSlot, cjobPtr, jobState);
         } else {
-            LOG("[INJECT]   FindJob: job not found (slot=%d) — may have timed out", jobSlot);
+            LOG("[INJECT]   FindJob: job not found (slot=%d) -- may have timed out", jobSlot);
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         LOG("[INJECT]   EXCEPTION in FindJob: code=0x%08X", GetExceptionCode());
@@ -913,7 +913,7 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
         }
     }
 
-    // Call BRouteMsgToJob (on network thread — coroutine manager is valid here)
+    // Call BRouteMsgToJob (on network thread -- coroutine manager is valid here)
     char result = 0;
     s_crashFaultAddr = 0;
     s_crashAccessAddr = 0;
@@ -946,7 +946,7 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
 // rejects new pushes, but anything already in the queue when Shutdown()
 // began would otherwise leak its VirtualAlloc'd pktBuf, malloc'd
 // pktStruct, and the new'd ctx itself. We do NOT call BRouteMsgToJob
-// here — Steam's networking is tearing down, and the receive thread
+// here -- Steam's networking is tearing down, and the receive thread
 // may already be gone, so there is no safe consumer.
 static void DrainInjectQueueOnShutdown() {
     std::vector<QueuedInjection*> leftovers;
@@ -985,7 +985,7 @@ static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
 
     auto pktData = BuildPacket(EMSG_SERVICE_METHOD_RESP, hdr, body);
 
-    // Allocate packet data buffer — use VirtualAlloc for page-aligned memory.
+    // Allocate packet data buffer -- use VirtualAlloc for page-aligned memory.
     // This buffer is referenced by the CNetPacket and must outlive RecvPkt processing.
     // We manage lifetime via a ring buffer for deferred free.
     uint8_t* pktBuf = (uint8_t*)VirtualAlloc(nullptr, pktData.size(),
@@ -996,10 +996,10 @@ static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
     }
     memcpy(pktBuf, pktData.data(), pktData.size());
 
-    // pktBuf lifetime is managed by ProcessQueuedInjection — freed after BRouteMsgToJob completes.
+    // pktBuf lifetime is managed by ProcessQueuedInjection -- freed after BRouteMsgToJob completes.
 
     // Allocate CNetPacket via malloc. Steam's CNetPacket::Release (sub_138E5A220)
-    // puts it into a pool for reuse when refcount hits 0 — it does NOT call free().
+    // puts it into a pool for reuse when refcount hits 0 -- it does NOT call free().
     // To prevent pool corruption from mixing allocators, we start m_cRef at 1.
     // AddRef in WrapPacket makes it 2, and Release brings it to 1 (never 0),
     // so it's never returned to the pool. This is an intentional per-injection leak
@@ -1024,7 +1024,7 @@ static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
     // "packet sent OK, now yield for response." We can't inject now because
     // the job hasn't entered yield state yet. Instead, we push to a queue and
     // RecvPktMonitorHook (on the network thread) drains it on the next real packet.
-    // This also solves the coroutine thread-affinity problem — BRouteMsgToJob
+    // This also solves the coroutine thread-affinity problem -- BRouteMsgToJob
     // must run on the network thread where the coroutine manager lives.
     auto* ctx = new QueuedInjection();
     ctx->pktBuf = pktBuf;
@@ -1172,11 +1172,11 @@ static std::optional<PB::Writer> DispatchCloudRpc(
     return std::nullopt;
 }
 
-// Vtable hook for slot 4 — replaces CClientUnifiedServiceTransport::vtable[4]
+// Vtable hook for slot 4 -- replaces CClientUnifiedServiceTransport::vtable[4]
 // This is the "direct" request/response function that slot 5 normally wraps.
 // RPCs like ClientBeginFileUpload, ClientCommitFileUpload, ClientFileDownload call
 // slot 4 directly, bypassing slot 5. By hooking slot 4, we can handle these
-// synchronously — no deferred injection queue, no timing delays.
+// synchronously -- no deferred injection queue, no timing delays.
 //
 // Slot 4 takes raw protobuf body objects (NOT wrapped in CProtoBufMsg).
 // Flags layout (int[68]): [0]=routing_appid, [1]=mode, [2]=error_code, [3]=eresult, [4..67]=error_message
@@ -1232,13 +1232,13 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
         return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
     }
 
-    // === NAMESPACE APP: handle locally, synchronously ===
+    // NAMESPACE APP: handle locally, synchronously
     LOG("[Slot4] INTERCEPT %s app=%u (%zu bytes):", methodName, appId, reqBytes.size());
 #ifdef DEBUG_VERBOSE_LOGGING
     SpyLogFields("[Slot4-REQ]", reqBytes.data(), (uint32_t)reqBytes.size());
 #endif
 
-    // Capture SteamID if not yet captured (from SendPkt or slot 5 — but just in case)
+    // Capture SteamID if not yet captured (from SendPkt or slot 5 -- but just in case)
     // (SteamID should already be captured from earlier RPCs)
 
     // Call the appropriate handler to build a response body
@@ -1265,9 +1265,9 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
 
     // Flags layout (from IDA decompilation of sub_138914710 / sub_138914A30):
     //   [0-1]: __int64 (routing/request context, leave untouched)
-    //   [2]:   int  — transport success flag (1 = OK, 0 = transport failure → triggers k_EResultTimeout=16)
-    //   [3]:   int  — eresult from response header (1 = k_EResultOK)
-    //   [4+]:  char[] — error message string (null-terminated)
+    //   [2]:   int  -- transport success flag (1 = OK, 0 = transport failure → triggers k_EResultTimeout=16)
+    //   [3]:   int  -- eresult from response header (1 = k_EResultOK)
+    //   [4+]:  char[] -- error message string (null-terminated)
     if (flags) {
         flags[2] = 1;  // transport_success = true (MUST be 1, or caller returns k_EResultTimeout!)
         flags[3] = 1;  // eresult = k_EResultOK
@@ -1278,7 +1278,7 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
     return true;
 }
 
-// The actual vtable hook function — replaces CClientUnifiedServiceTransport::vtable[5]
+// The actual vtable hook function -- replaces CClientUnifiedServiceTransport::vtable[5]
 static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
                                            void* request, void* response, int64_t* flags) {
     HookGuard guard;
@@ -1294,7 +1294,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     }
 
     // Check if it's a Cloud RPC we handle (zero-alloc check via strcmp)
-    // Request/response RPCs only — notifications go through slots 7/8
+    // Request/response RPCs only -- notifications go through slots 7/8
     bool isCloudRpc = (strcmp(methodName, RPC_GET_CHANGELIST) == 0 || strcmp(methodName, RPC_BEGIN_BATCH) == 0 ||
                        strcmp(methodName, RPC_BEGIN_UPLOAD) == 0 || strcmp(methodName, RPC_COMMIT_UPLOAD) == 0 ||
                        strcmp(methodName, RPC_FILE_DOWNLOAD) == 0 || strcmp(methodName, RPC_DELETE_FILE) == 0 ||
@@ -1339,12 +1339,12 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     }
 
     if (!isNamespace) {
-        // Not a namespace app — pass through to real Steam servers
+        // Not a namespace app -- pass through to real Steam servers
         LOG("[VtHook] %s app=%u: not namespace, passing through", methodName, appId);
         return g_originalSlot5(thisptr, methodName, request, response, flags);
     }
 
-    // === NAMESPACE APP: handle locally ===
+    // NAMESPACE APP: handle locally
     LOG("[VtHook] INTERCEPT %s app=%u (%zu bytes):", methodName, appId, reqBytes.size());
 #ifdef DEBUG_VERBOSE_LOGGING
     SpyLogFields("[VtHook-REQ]", reqBytes.data(), (uint32_t)reqBytes.size());
@@ -1430,8 +1430,8 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
 
     // Set the flags output (if provided) to indicate success
     // From slot 5 decompilation: after slot 4 returns:
-    //   v5[3] is read and written to *(respHeader + 216) — this is the eresult from flags
-    //   v5[2] is read and written to *(respHeader + 220) — this is the error code from flags
+    //   v5[3] is read and written to *(respHeader + 216) -- this is the eresult from flags
+    //   v5[2] is read and written to *(respHeader + 220) -- this is the error code from flags
     //   We already set those directly in the header above.
     // But the caller (sync job) reads the flags too, so we need to set them.
     if (flags) {
@@ -1678,7 +1678,7 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
         cloudPlaytime, cloudPlaytime2wks, mergedPlaytime, mergedPlaytime2wks, mergedLastPlayed, ok);
 }
 
-// Slot 8 hook — Notification wrapper (e.g. SignalAppExitSyncDone)
+// Slot 8 hook -- Notification wrapper (e.g. SignalAppExitSyncDone)
 // request is a CProtoBufMsg* with body at +48, header at +40
 static bool __fastcall NotificationWrapperHook(void* thisptr, const char* methodName, void* request) {
     HookGuard guard;
@@ -1698,7 +1698,7 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
     uint32_t realAppId = CheckNotificationNamespaceApp(methodName, bodyObj);
 
     if (realAppId == 0) {
-        // Not a namespace app — pass through to real Steam
+        // Not a namespace app -- pass through to real Steam
         LOG("[VtHook-Notif] %s: not namespace, passing through", methodName);
         return g_originalSlot8(thisptr, methodName, request);
     }
@@ -1729,7 +1729,7 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
     return true;  // Return success without actually sending
 }
 
-// Slot 7 hook — Notification direct (e.g. ConflictResolution, TransferReport)
+// Slot 7 hook -- Notification direct (e.g. ConflictResolution, TransferReport)
 // bodyObj is the raw protobuf body (NOT wrapped in CProtoBufMsg)
 static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodName, void* bodyObj, int* flags) {
     HookGuard guard;
@@ -1747,7 +1747,7 @@ static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodN
     uint32_t realAppId = CheckNotificationNamespaceApp(methodName, bodyObj);
 
     if (realAppId == 0) {
-        // Not a namespace app — pass through to real Steam
+        // Not a namespace app -- pass through to real Steam
         LOG("[VtHook-Notif] %s (direct): not namespace, passing through", methodName);
         return g_originalSlot7(thisptr, methodName, bodyObj, flags);
     }
@@ -1759,7 +1759,7 @@ static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodN
             if (g_syncAchievements) UploadStatsOnExit(capturedAppId);
             if (g_syncPlaytime) UploadPlaytimeOnExit(capturedAppId);
         });
-        // See NotificationHook (slot 8) above — same shutdown-window race.
+        // See NotificationHook (slot 8) above -- same shutdown-window race.
         std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
         if (g_shuttingDown.load(std::memory_order_acquire)) {
             t.detach();
@@ -1784,7 +1784,7 @@ static void InstallServiceMethodHook() {
     LOG("[VtHook] ParseFromArray=%p SerializeToArray=%p",
         g_parseFromArray, g_serializeToArray);
 
-    // === Read slot 4 (request/response direct) ===
+    // Read slot 4 (request/response direct)
     uintptr_t vtableSlot4Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT4;
 
     ServiceMethodSlot4Fn currentSlot4 = nullptr;
@@ -1804,7 +1804,7 @@ static void InstallServiceMethodHook() {
     LOG("[VtHook] Original slot 4: %p (RVA=0x%llX)",
         (void*)currentSlot4, (uint64_t)((uintptr_t)currentSlot4 - g_steamClientBase));
 
-    // === Patch slot 5 (request/response wrapper) ===
+    // Patch slot 5 (request/response wrapper)
     uintptr_t vtableSlot5Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT5;
 
     ServiceMethodSlot5Fn currentSlot5 = nullptr;
@@ -1824,7 +1824,7 @@ static void InstallServiceMethodHook() {
     LOG("[VtHook] Original slot 5: %p (RVA=0x%llX)",
         (void*)currentSlot5, (uint64_t)((uintptr_t)currentSlot5 - g_steamClientBase));
 
-    // === Patch slot 7 (notification direct) ===
+    // Patch slot 7 (notification direct)
     uintptr_t vtableSlot7Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT7;
 
     NotificationSlot7Fn currentSlot7 = nullptr;
@@ -1844,7 +1844,7 @@ static void InstallServiceMethodHook() {
     LOG("[VtHook] Original slot 7: %p (RVA=0x%llX)",
         (void*)currentSlot7, (uint64_t)((uintptr_t)currentSlot7 - g_steamClientBase));
 
-    // === Patch slot 8 (notification wrapper) ===
+    // Patch slot 8 (notification wrapper)
     uintptr_t vtableSlot8Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT8;
 
     NotificationSlot8Fn currentSlot8 = nullptr;
@@ -1864,7 +1864,7 @@ static void InstallServiceMethodHook() {
     LOG("[VtHook] Original slot 8: %p (RVA=0x%llX)",
         (void*)currentSlot8, (uint64_t)((uintptr_t)currentSlot8 - g_steamClientBase));
 
-    // === Make vtable region writable and patch all four slots ===
+    // Make vtable region writable and patch all four slots
     // Slots 4, 5, 7, 8 span from slot 4 (offset 0x20) to slot 8 (offset 0x40 + 8)
     // Total region: slot 4 addr to slot 8 addr + sizeof(void*) 
     uintptr_t regionStart = vtableSlot4Addr;
@@ -1896,7 +1896,7 @@ static void InstallServiceMethodHook() {
     LOG("[VtHook] Vtable slot 8 patched: %p -> %p (ok=%d)", (void*)currentSlot8, (void*)NotificationWrapperHook, slot8Ok);
 
     if (g_vtableHookInstalled.load(std::memory_order_acquire)) {
-        LOG("[VtHook] All hooks ACTIVE — Cloud RPCs (slots 4/5/7/8) will be intercepted at vtable level");
+        LOG("[VtHook] All hooks ACTIVE -- Cloud RPCs (slots 4/5/7/8) will be intercepted at vtable level");
     } else {
         LOG("[VtHook] WARNING: Some hooks failed! slot4=%d slot5=%d slot7=%d slot8=%d", slot4Ok, slot5Ok, slot7Ok, slot8Ok);
     }
@@ -2062,7 +2062,7 @@ static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
                     } else if (f.wireType == PB::WireType::LengthDelimited) {
                         // Could be string, bytes, or submessage
                         if (f.fieldNum == 2) {
-                            // file entry submessage — parse recursively
+                            // file entry submessage -- parse recursively
                             auto subFields = PB::Parse(f.data, f.dataLen);
                             std::string fileName;
                             for (auto& sf : subFields) {
@@ -2076,7 +2076,7 @@ static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
                                     LOG("[RecvMon-PB]    field=%u varint=%llu", sf.fieldNum, sf.varintVal);
                                 } else if (sf.wireType == PB::WireType::LengthDelimited) {
                                     if (sf.fieldNum == 2) {
-                                        // sha — log as hex
+                                        // sha -- log as hex
                                         char shaHex[50] = {};
                                         for (uint32_t i = 0; i < sf.dataLen && i < 20; i++)
                                             snprintf(shaHex + i*2, 3, "%02x", sf.data[i]);
@@ -2223,7 +2223,7 @@ static std::vector<LuaFile> ReadLocalLuaFiles() {
     std::string dir = g_steamPath + "config\\stplug-in\\";
     // FindFirstFileW + wide pattern: FindFirstFileA would return ACP-encoded
     // filenames, and an ACP-unrepresentable filename (non-Latin-1 alphabet)
-    // degrades to the 8.3 short name — a different path from the one the
+    // degrades to the 8.3 short name -- a different path from the one the
     // Windows filesystem stored, which rotates into a different lua record
     // every launch. We convert dir to wide via Utf8ToPath, then every
     // discovered filename back to UTF-8 narrow to match our convention.
@@ -2399,7 +2399,7 @@ static void SyncLuaFiles() {
                 // mz_zip_reader_get_filename silently truncates if the
                 // in-zip filename is longer than the destination buffer
                 // (it does NOT return enough info to detect this when
-                // filename_buf_size > 0 — the returned size is post-clamp).
+                // filename_buf_size > 0 -- the returned size is post-clamp).
                 // Probe with a NULL buffer first: with filename_buf_size==0
                 // miniz returns the true required size from the central
                 // directory, letting us reject overlength names before any
@@ -2699,7 +2699,7 @@ static void UploadLuaOnShutdown() {
         localFiles.size(), cloudManifest.size());
 }
 
-// Expected Steam client version — patches and RVAs are only valid for this build
+// Expected Steam client version -- patches and RVAs are only valid for this build
 static constexpr uint64_t EXPECTED_STEAM_VERSION = 1773426488ULL;
 
 static uint64_t ReadSteamVersion(const std::string& steamDir) {
@@ -2851,7 +2851,7 @@ void Init(const std::string& steamPath) {
     if (HasNamespaceApps()) {
         LOG("[NS] Namespace mode ENABLED: %d self-unlocking of %d total lua(s)", selfUnlocking, totalLuas);
     } else {
-        LOG("[NS] No self-unlocking Lua files found (%d total luas) — DLL will only log Cloud RPCs", totalLuas);
+        LOG("[NS] No self-unlocking Lua files found (%d total luas) -- DLL will only log Cloud RPCs", totalLuas);
     }
 
     // Steam-side config (per-system, controls DLL feature toggles).
@@ -2901,7 +2901,7 @@ void Init(const std::string& steamPath) {
                 // installed under a profile with non-ANSI codepage
                 // characters; FindFirstFileA would refuse to open the
                 // directory. Filenames we care about here are numeric
-                // (<appId>.lua) — if the name isn't an ASCII digit sequence
+                // (<appId>.lua) -- if the name isn't an ASCII digit sequence
                 // we skip it anyway, so we stay on the wide cFileName for
                 // the strtoul parse (high bytes just fail the parse) and
                 // only convert to UTF-8 narrow for the log.
@@ -3324,7 +3324,7 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
 
     // If vtable hook is active, Cloud RPCs are handled at the vtable level.
     // With slots 4+5 both hooked, namespace Cloud RPCs should never reach SendPkt.
-    // If they do, it means something escaped — log a warning and fall through
+    // If they do, it means something escaped -- log a warning and fall through
     // to the legacy Approach D handler as a safety net.
     static std::atomic<int> g_approachDFallbackCount{0};
     if (g_vtableHookInstalled.load(std::memory_order_acquire)) {
@@ -3338,14 +3338,14 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
             bool isNs = IsNamespaceApp(appId);
 
             if (isNs) {
-                // Namespace app Cloud RPC reached SendPkt despite slot 4+5 hooks — unexpected!
+                // Namespace app Cloud RPC reached SendPkt despite slot 4+5 hooks -- unexpected!
                 int count = ++g_approachDFallbackCount;
                 LOG("[SendPkt] WARNING: %s app=%u (%u bytes) escaped vtable hooks! "
                     "Using Approach D fallback (occurrence #%d)",
                     method.c_str(), appId, pkt.bodyLen, count);
                 // Fall through to Approach D below
             } else {
-                LOG("[SendPkt] %s app=%u (%u bytes) — vtable hook active, passing through",
+                LOG("[SendPkt] %s app=%u (%u bytes) -- vtable hook active, passing through",
                     method.c_str(), appId, pkt.bodyLen);
                 return false;
             }
@@ -3354,7 +3354,7 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
         }
     }
 
-    // === Approach D: handle namespace Cloud RPCs locally ===
+    // Approach D: handle namespace Cloud RPCs locally
     // This path is only reached when vtable hooks are not active, or a namespace RPC escaped.
     // Non-Cloud RPCs: early-out before allocating std::string
     if (!isCloudMethod) return false;
@@ -3420,14 +3420,14 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
     }
 
     if (!isNamespace) {
-        // not a namespace app — log and pass through
+        // not a namespace app -- log and pass through
         if (method.find("Cloud.") != std::string::npos) {
             LOG("[PassThru] %s app=%u (%u bytes)", method.c_str(), appId, pkt.bodyLen);
         }
         return false;
     }
 
-    // === NAMESPACE APP: handle locally, fabricate response (Approach D fallback) ===
+    // NAMESPACE APP: handle locally, fabricate response (Approach D fallback)
     LOG("[NS-D] INTERCEPT %s app=%u (%u bytes):", method.c_str(), appId, pkt.bodyLen);
 #ifdef DEBUG_VERBOSE_LOGGING
     SpyLogFields("[NS-REQ]", pkt.bodyData, pkt.bodyLen);
@@ -3458,7 +3458,7 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
 //
 // Detached threads are reaped by the OS at process exit; the DllMain
 // DLL_PROCESS_DETACH path with reserved != NULL already skips Shutdown(),
-// so detach-on-timeout only affects FreeLibrary / normal shutdown — both
+// so detach-on-timeout only affects FreeLibrary / normal shutdown -- both
 // of which terminate the process shortly after.
 static bool JoinThreadWithTimeout(std::thread& t, DWORD timeoutMs, const char* name) {
     if (!t.joinable()) return true;
@@ -3468,7 +3468,7 @@ static bool JoinThreadWithTimeout(std::thread& t, DWORD timeoutMs, const char* n
         t.join();
         return true;
     }
-    LOG("Shutdown: %s did not finish within %u ms (wait=%u) — detaching to unblock shutdown",
+    LOG("Shutdown: %s did not finish within %u ms (wait=%u) -- detaching to unblock shutdown",
         name, timeoutMs, wait);
     t.detach();
     return false;
@@ -3534,7 +3534,7 @@ void Shutdown() {
     // g_shuttingDown internally, so a 5s budget is more than enough to let
     // them exit their poll/upload loops cleanly. If they're stuck inside
     // SyncLuaFiles / SyncAllFromCloud network I/O, detach so shutdown
-    // proceeds — the OS reaps the worker at process exit.
+    // proceeds -- the OS reaps the worker at process exit.
     JoinThreadWithTimeout(g_luaSyncThread, 5000, "g_luaSyncThread");
     JoinThreadWithTimeout(g_startupMetadataThread, 5000, "g_startupMetadataThread");
 

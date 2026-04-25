@@ -16,7 +16,7 @@ namespace CloudRedirect.Converters;
 /// </para>
 /// <list type="bullet">
 ///   <item><description>
-///     <b>file://</b> &#8212; decoded with <see cref="BitmapCacheOption.OnLoad"/>
+///     <b>file://</b> -- decoded with <see cref="BitmapCacheOption.OnLoad"/>
 ///     and <see cref="System.Windows.Freezable.Freeze"/>d. OnLoad decodes
 ///     immediately and releases the backing file handle; without it the cached
 ///     JPEG stays locked for the lifetime of the BitmapImage, blocking both
@@ -26,7 +26,7 @@ namespace CloudRedirect.Converters;
 ///     bindings without per-access dispatcher marshalling.
 ///   </description></item>
 ///   <item><description>
-///     <b>https://</b> &#8212; created with WPF's default
+///     <b>https://</b> -- created with WPF's default
 ///     (<see cref="BitmapCacheOption.Default"/>) streaming async load and
 ///     left unfrozen. Setting <c>OnLoad</c> here would force a synchronous
 ///     UI-thread download that (a) stalls rendering when dozens of app cards

@@ -202,7 +202,7 @@ static void HandleClient(SOCKET client) {
     int bodyReceived = total - headerEnd;
 
     if (_stricmp(method, "PUT") == 0) {
-        // Reject PUT without Content-Length — we can't safely read the body
+        // Reject PUT without Content-Length -- we can't safely read the body
         if (contentLength < 0) {
             LOG("[HTTP] PUT %s -> REJECTED: no Content-Length header", path);
             const char* response =
@@ -256,7 +256,7 @@ static void HandleClient(SOCKET client) {
                 }
             }
 
-            // Reject partial body — recv returned 0/-1 before all bytes arrived
+            // Reject partial body -- recv returned 0/-1 before all bytes arrived
             if (contentLength > 0 && (int64_t)bodyData.size() != contentLength) {
                 LOG("[HTTP] PUT %s -> PARTIAL BODY (%zu of %lld bytes), rejecting",
                     path, bodyData.size(), (long long)contentLength);
@@ -283,7 +283,7 @@ static void HandleClient(SOCKET client) {
             // write blob to disk. create_directories is the ec overload so a
             // failed mkdir (bad ACL, disk full, junction loop) returns an
             // error we can report as 500 instead of letting filesystem_error
-            // escape HandleClient — which would leak the client socket and
+            // escape HandleClient -- which would leak the client socket and
             // leave doneFlag un-set, so PruneClientThreads never reaps the
             // slot and the 16-thread cap eventually wedges the whole server.
             std::string blobPath = BlobPath(accountId, appId, filename);
@@ -328,7 +328,7 @@ static void HandleClient(SOCKET client) {
                 "\r\n";
             send(client, response, (int)strlen(response), 0);
         } else {
-            // unrecognized PUT path — drain and return 200 OK
+            // unrecognized PUT path -- drain and return 200 OK
             int64_t remaining = contentLength - bodyReceived;
             if (remaining > 0) {
                 char drain[4096];
@@ -481,7 +481,7 @@ static bool IsConnectionFromSteam(SOCKET client) {
         }
     }
 
-    // Connection not found in table — race condition, reject to be safe
+    // Connection not found in table -- race condition, reject to be safe
     return false;
 }
 
@@ -512,7 +512,7 @@ static void AcceptLoop() {
         // Set send+receive timeouts so a slow/stalled client cannot pin a
         // thread indefinitely. Without SO_SNDTIMEO, the final send() of the
         // 200-OK response (or a 4xx/5xx error) can wedge if the peer's recv
-        // buffer is full and never drained — 16 such stuck threads saturate
+        // buffer is full and never drained -- 16 such stuck threads saturate
         // the accept pool (cap at g_clientSlots.size() >= 16 below).
         DWORD rcvTimeout = 30000; // 30s
         DWORD sndTimeout = 30000; // 30s
@@ -550,7 +550,7 @@ bool Start(const std::string& blobRoot, uint32_t accountId) {
     std::error_code rootEc;
     std::filesystem::create_directories(FileUtil::Utf8ToPath(g_blobRoot), rootEc);
     if (rootEc) {
-        LOG("[HTTP] create_directories '%s' FAILED: %s (continuing — later PUT writes will retry)",
+        LOG("[HTTP] create_directories '%s' FAILED: %s (continuing -- later PUT writes will retry)",
             g_blobRoot.c_str(), rootEc.message().c_str());
     }
     LOG("[HTTP] Blob storage root: %s (accountId=%u)", g_blobRoot.c_str(), g_accountId.load());

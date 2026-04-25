@@ -48,7 +48,7 @@ bool RemoveFileIfPresent(const fs::path& p, SweepStats& stats) {
 
 // Remove `dir` and its contents. Must reject reparse points (junctions /
 // symlinks) because this sweep runs unattended at DLL init against a
-// user-writable tree — following a junction at `.cloudredirect\` into
+// user-writable tree -- following a junction at `.cloudredirect\` into
 // anywhere the user can create (their Documents, their save folder on
 // another drive, etc.) would wipe arbitrary files. If we find a reparse
 // point where we expect a plain directory, unlink only the link itself and

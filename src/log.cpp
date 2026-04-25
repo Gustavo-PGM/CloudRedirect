@@ -13,29 +13,29 @@ static std::string g_logPath;
 static constexpr long MAX_LOG_SIZE = 10 * 1024 * 1024;
 
 // Records up to STACK_BUF bytes go through a stack buffer with no heap
-// allocation; longer records (rare — a stack trace dump or a serialized
+// allocation; longer records (rare -- a stack trace dump or a serialized
 // blob list) fall through to a one-shot heap allocation. Either way the
 // finished record is emitted with a single fwrite() under the mutex so
 // concurrent writers can never interleave fragments of each other's lines.
 static constexpr size_t STACK_BUF = 1024;
 
-// Open mode L"ab": append, binary. Binary is critical — text mode causes the
+// Open mode L"ab": append, binary. Binary is critical -- text mode causes the
 // CRT to translate '\n' to "\r\n" on every write, which (a) silently corrupts
 // any UTF-8 byte sequence that happens to contain 0x0A inside a multi-byte
 // codepoint when interleaved with format-buffer reuse, and (b) makes our
 // "single fwrite per record" guarantee meaningless because the CRT splits
 // the buffer at every '\n' for the translation. We embed our own '\r\n' (or
-// '\n' — readers handle both) and bypass the translation entirely.
+// '\n' -- readers handle both) and bypass the translation entirely.
 static FILE* OpenLog(const std::string& utf8Path) {
     if (utf8Path.empty()) return nullptr;
     auto wPath = FileUtil::Utf8ToPath(utf8Path);
     if (wPath.empty()) return nullptr;
-    // path::c_str() returns wchar_t* on Windows — exactly what _wfopen wants.
+    // path::c_str() returns wchar_t* on Windows -- exactly what _wfopen wants.
     return _wfopen(wPath.c_str(), L"ab");
 }
 
 // Single-fwrite record emission. Caller must hold g_mutex.
-// On any error path we silently drop the record — logging must never throw
+// On any error path we silently drop the record -- logging must never throw
 // or block, especially on the cloud RPC hot path.
 static void WriteRecord(const char* data, size_t len) {
     if (!g_file || !data || len == 0) return;
@@ -103,8 +103,8 @@ void Write(const char* fmt, ...) {
 
     // Build the entire record (timestamp + caller's formatted line + '\n')
     // into a single buffer, then emit with one fwrite. Previously we issued
-    // four separate fprintf calls — each one a distinct write to the FILE*
-    // buffer — so two threads logging concurrently could interleave their
+    // four separate fprintf calls -- each one a distinct write to the FILE*
+    // buffer -- so two threads logging concurrently could interleave their
     // fragments inside the kernel buffer. The mutex above prevents that
     // here, but the single-write design also matches what a future async /
     // lock-free log queue would require, and removes the dependency on
@@ -139,7 +139,7 @@ void Write(const char* fmt, ...) {
 
     size_t need = (size_t)prefix + (size_t)bodyLen + 1; // +1 for '\n'
     if (need > cap) {
-        // Caller's formatted line exceeded the stack buffer — promote to
+        // Caller's formatted line exceeded the stack buffer -- promote to
         // heap and re-format. Re-using the va_list copy avoids the second
         // call into varargs the caller already consumed.
         heap.resize(need + 1);

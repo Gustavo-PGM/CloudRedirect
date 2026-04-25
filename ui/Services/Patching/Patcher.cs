@@ -483,7 +483,7 @@ namespace CloudRedirect.Services.Patching
                 // Take BOTH backups up front before either write. If we backed
                 // up cachePath, wrote the patched payload, then failed to back
                 // up dllPath, the user would be left with a patched payload + a
-                // .bak for cachePath but NO current .bak for dllPath — Revert
+                // .bak for cachePath but NO current .bak for dllPath -- Revert
                 // could not cleanly undo this state.
                 BackupBoth(cachePath, dllPath);
 
@@ -691,7 +691,7 @@ namespace CloudRedirect.Services.Patching
             var exe = FindSteamToolsExe();
             if (exe == null)
             {
-                Log("  SteamTools.exe not found — skipping");
+                Log("  SteamTools.exe not found -- skipping");
                 return 0;
             }
 
@@ -830,7 +830,7 @@ namespace CloudRedirect.Services.Patching
 
             // .bak is the rolling backup taken every patch/revert cycle. A torn
             // .bak from a non-atomic File.Copy would silently overwrite a working
-            // binary on subsequent Restore — atomic copy eliminates that.
+            // binary on subsequent Restore -- atomic copy eliminates that.
             var bak = path + ".bak";
             FileUtils.AtomicCopy(path, bak);
             Log($"  Backed up to {bak}");
@@ -839,7 +839,7 @@ namespace CloudRedirect.Services.Patching
         // Take both backups before either is consumed by a write. The patcher
         // applies coordinated changes to two files (payload cache + DLL); if a
         // single Backup throws between writes, one half is patched and the
-        // other has no current .bak — Revert/Restore cannot cleanly undo the
+        // other has no current .bak -- Revert/Restore cannot cleanly undo the
         // partial install. Up-front bracketing means either both backups
         // succeed (writes can proceed) or we throw before mutating anything.
         void BackupBoth(string firstPath, string secondPath)
@@ -852,7 +852,7 @@ namespace CloudRedirect.Services.Patching
         {
             // The original IV is intentionally reused for re-encryption.
             // This is acceptable because:
-            // 1. The payload is not a protocol message — it's a local cache file.
+            // 1. The payload is not a protocol message -- it's a local cache file.
             // 2. SteamTools itself uses the same IV when writing the cache.
             // 3. Generating a new IV would change the file prefix and potentially
             //    confuse SteamTools' cache validation.
@@ -1259,7 +1259,7 @@ namespace CloudRedirect.Services.Patching
                 }
 
                 Log("Patching payload (CloudRedirect namespace mode)..");
-                // Backup BOTH files up front before any write — see the
+                // Backup BOTH files up front before any write -- see the
                 // comment in ApplyOfflineSetup. Without this, an exception
                 // between the payload and DLL writes would leave the user
                 // with a patched payload + a .bak for cachePath but no
@@ -1280,9 +1280,9 @@ namespace CloudRedirect.Services.Patching
                         foreach (var err in p123Errors) Log(err);
                         // P1/P2/P3 errors are non-fatal: these patches disable SteamTools'
                         // built-in cloud redirect. If they fail (e.g. SteamTools version mismatch),
-                        // CloudRedirect's namespace hooks still work — the SteamTools redirect
+                        // CloudRedirect's namespace hooks still work -- the SteamTools redirect
                         // and ours will simply coexist (our hooks take priority).
-                        Log("  Warning: could not apply some P1/P2/P3 patches (continuing — non-fatal)");
+                        Log("  Warning: could not apply some P1/P2/P3 patches (continuing -- non-fatal)");
                     }
                     if (p123Applied > 0)
                         Log($"  Applied {p123Applied} cloud-disable patch(es) (P1/P2/P3)");
@@ -1414,7 +1414,7 @@ namespace CloudRedirect.Services.Patching
                     afterP123Revert = reverted;
                 }
 
-                // Write files (payload first, DLL second — matches apply order).
+                // Write files (payload first, DLL second -- matches apply order).
                 // Backup BOTH files before either write so a partial revert
                 // still has current .bak files for both halves.
                 BackupBoth(cachePath, dllPath);

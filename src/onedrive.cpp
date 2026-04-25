@@ -121,7 +121,7 @@ bool OneDriveProvider::ListChildrenById(const std::string& itemId, const std::st
         // nextLink is a full URL -- extract just the path+query part.
         // Graph docs don't guarantee "/v1.0/" in the URL (beta endpoints,
         // regional hosts, future changes). If we can't parse it, we stop
-        // iterating but must NOT report the listing as complete — returning
+        // iterating but must NOT report the listing as complete -- returning
         // success-complete with only page 1 read is exactly the silent
         // truncation the outComplete flag exists to catch. Prune decisions
         // at the caller will skip on !complete.

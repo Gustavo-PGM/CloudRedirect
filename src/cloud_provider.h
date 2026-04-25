@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <memory>
 
-// ICloudProvider — abstract interface for cloud storage backends.
+// ICloudProvider -- abstract interface for cloud storage backends.
 // All paths are relative with forward slashes: "{accountId}/{appId}/blobs/{filename}"
 // Implementations: GoogleDriveProvider, OneDriveProvider, LocalDiskProvider.
 
@@ -22,7 +22,7 @@ public:
     // For LocalDisk: path to the storage root directory.
     virtual bool Init(const std::string& configPath) = 0;
 
-    // Shut down gracefully — drain pending operations, release resources.
+    // Shut down gracefully -- drain pending operations, release resources.
     virtual void Shutdown() = 0;
 
     // True if the provider has valid credentials (or doesn't need them).

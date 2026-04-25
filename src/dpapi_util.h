@@ -63,7 +63,7 @@ inline std::string ReadTokenFile(const std::string& path, bool reencrypt = true)
             auto blob = Encrypt(raw);
             if (!blob.empty()) {
                 FileUtil::AtomicWriteBinary(path, blob.data(), blob.size());
-            } // else: DPAPI encryption failed — leave plaintext in place (non-critical)
+            } // else: DPAPI encryption failed -- leave plaintext in place (non-critical)
         }
         return raw;
     }

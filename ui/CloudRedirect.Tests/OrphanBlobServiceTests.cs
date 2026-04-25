@@ -35,7 +35,7 @@ public class OrphanBlobServiceTests
     public void ComputeOrphans_NoneReferenced_ReturnsAllSorted()
     {
         // Empty file_tokens.dat means every cloud blob is orphaned. This is
-        // the worst-case prune scenario &#8212; if a user accidentally wipes
+        // the worst-case prune scenario -- if a user accidentally wipes
         // file_tokens.dat and then runs prune, they lose every cloud save
         // for that app. The UI layer's ListingComplete + confirmation flow
         // exists to prevent this.
@@ -57,7 +57,7 @@ public class OrphanBlobServiceTests
     public void ComputeOrphans_CaseSensitive()
     {
         // A cloud blob named "Save.dat" is NOT satisfied by a file_tokens
-        // entry of "save.dat" &#8212; the native side's std::unordered_map
+        // entry of "save.dat" -- the native side's std::unordered_map
         // keying is case-sensitive, so the UI must match to avoid declaring
         // a legitimately-referenced blob an orphan.
         var cloud = new[] { "Save.dat" };
@@ -104,7 +104,7 @@ public class OrphanBlobServiceTests
     public void ComputeOrphans_LargeInput_PerformsLinearly()
     {
         // Sanity: 5000 cloud blobs, 4999 referenced. Should produce exactly 1
-        // orphan. Documents the O(n) contract &#8212; if someone
+        // orphan. Documents the O(n) contract -- if someone
         // accidentally introduces nested loops here, the regression shows up
         // as a timeout in CI.
         var cloud = new string[5000];

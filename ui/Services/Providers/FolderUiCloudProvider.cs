@@ -62,14 +62,10 @@ internal sealed class FolderUiCloudProvider : IUiCloudProvider
         IReadOnlyCollection<string> blobFilenames, CancellationToken cancel)
     {
         var blobsDir = Path.Combine(_syncPath, accountId, appId, "blobs");
-        // If the blobs directory is missing entirely, we cannot tell apart
-        // "legitimately nothing to delete" from "sync root is unmounted /
-        // misconfigured / offline." Unlike cloud providers (which auto-
-        // create folders on write), the folder provider persists this
-        // directory the moment anything has been cached, so a missing
-        // folder after ScanAsync claimed orphans is a user-visible
-        // misconfiguration. Report as failed so the UI surfaces it
-        // instead of announcing a phantom success.
+        // A missing blobs directory after ScanAsync reported orphans means
+        // the sync root is offline or misconfigured (the folder is created
+        // on first write and never auto-removed). Surface as failure so the
+        // UI doesn't announce a phantom success.
         if (!Directory.Exists(blobsDir))
         {
             return Task.FromResult(new CloudProviderClient.DeleteBlobsResult(

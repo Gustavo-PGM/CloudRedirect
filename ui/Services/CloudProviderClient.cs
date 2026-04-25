@@ -66,24 +66,18 @@ internal sealed class CloudProviderClient : IDisposable
         return config.DisplayName;
     }
 
-    // ==== Orphan-blob listing / deletion =====================================
+    // Orphan-blob listing / deletion
     //
     // Cloud blobs live under {provider}/CloudRedirect/{accountId}/{appId}/blobs/
     // (gdrive/onedrive) or {syncPath}/{accountId}/{appId}/blobs/ (folder). They
     // are the per-file save payloads Steam uploaded via the intercept path.
     //
-    // ListAppBlobsAsync and DeleteAppBlobsAsync power the UI's "prune orphan
-    // cloud blobs" action: scan cloud to find blob filenames for an app, and
-    // delete a specific subset of them by filename.
-    //
-    // CRITICAL COMPLETENESS CONTRACT: ListAppBlobsAsync returns a `Complete`
-    // flag. It is false if pagination did not run to conclusion, if an HTTP
-    // error interrupted enumeration, or if the network call threw. Callers
-    // MUST NOT make destructive decisions (e.g. "this blob is unreferenced,
-    // delete it") when Complete is false &#8212; a partial listing could make
-    // legitimate blobs appear orphaned. This mirrors the native-side
-    // ICloudProvider::ListChecked completeness discipline enforced at
-    // src/cloud_storage.cpp:1283-1566.
+    // ListAppBlobsAsync / DeleteAppBlobsAsync power the UI's prune-orphan
+    // action. ListAppBlobsAsync returns a Complete flag; it is false when
+    // pagination, HTTP, or provider errors interrupt enumeration. Callers
+    // must not delete based on an incomplete listing -- a partial result
+    // can make legitimate blobs look orphaned. Mirrors the native
+    // ICloudProvider::ListChecked discipline in src/cloud_storage.cpp.
 
     /// <summary>
     /// Result of listing blob filenames under a single app on the cloud.
@@ -196,19 +190,11 @@ internal sealed class CloudProviderClient : IDisposable
     }
 
     /// <summary>
-    /// A blob filename is unsafe if it contains path separators, a parent
-    /// traversal fragment, or a component that Windows' path canonicalization
-    /// would silently rewrite. <see cref="System.IO.Path.Combine"/> +
-    /// <see cref="System.IO.Path.GetFullPath(string)"/> on such input can
-    /// escape the intended directory or, worse, silently resolve to a
-    /// DIFFERENT file under the blobs folder &#8212; for example, Windows
-    /// strips trailing dots and spaces when canonicalizing a path component,
-    /// so <c>Path.GetFullPath(blobsDir + "\\foo.")</c> resolves to
-    /// <c>blobsDir\foo</c> and <see cref="System.IO.File.Delete"/> would
-    /// erase the legitimately-named file <c>foo</c> instead of the orphan
-    /// <c>foo.</c>. Cloud providers (OneDrive/GDrive are Linux-backed)
-    /// happily store trailing-dot / trailing-space filenames, so they can
-    /// appear in a listing even though Windows refuses to create them locally.
+    /// Rejects blob filenames Windows path canonicalization would rewrite.
+    /// Trailing dots/spaces are the main hazard: Linux-backed providers store
+    /// them but Path.GetFullPath strips them, so deleting "foo." would target
+    /// "foo" instead. Also rejects path separators, parent traversal, and the
+    /// reserved DOS device names.
     /// </summary>
     private static bool IsUnsafeBlobName(string name)
     {

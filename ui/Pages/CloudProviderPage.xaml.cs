@@ -319,7 +319,7 @@ public partial class CloudProviderPage : Page
     private void CancelAuth_Click(object sender, RoutedEventArgs e)
     {
         _authCts?.Cancel();
-        // Don't dispose _oauth here — the SignIn_Click finally block handles cleanup
+        // Don't dispose _oauth here -- the SignIn_Click finally block handles cleanup
         // after the async operation observes cancellation.
     }
 
@@ -429,7 +429,7 @@ public partial class CloudProviderPage : Page
         // resolved off the UI thread; otherwise we hit DPAPI + file I/O
         // synchronously. The user-gesture callers (Browse, provider
         // switch, post-OAuth) accept the synchronous cost in exchange
-        // for keeping their flow simple — those events are already
+        // for keeping their flow simple -- those events are already
         // tied to a click and the user has paid attention.
         var status = preCheckedStatus ?? Services.OAuthService.CheckTokenStatus(tokenPath);
         AuthStatus.Text = status.Message;

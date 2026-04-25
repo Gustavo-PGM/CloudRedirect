@@ -309,7 +309,7 @@ bool GoogleDriveProvider::ListRecursive(const std::string& folderId, const std::
     if (depth >= MAX_RECURSION_DEPTH) {
         LOG("[GDrive] ListRecursive: max depth %d reached at %s, stopping",
             MAX_RECURSION_DEPTH, prefix.c_str());
-        // Don't signal an error — we got as many files as the cap allows —
+        // Don't signal an error -- we got as many files as the cap allows --
         // but mark the listing incomplete so callers refuse destructive
         // prune operations based on it.
         if (outComplete) *outComplete = false;

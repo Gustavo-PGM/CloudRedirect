@@ -7,7 +7,7 @@
 #include <condition_variable>
 #include <unordered_set>
 
-// CloudStorage — central layer between cloud_intercept and ICloudProvider.
+// CloudStorage -- central layer between cloud_intercept and ICloudProvider.
 // Manages local blob cache, metadata sync, change number coordination,
 // and a background worker for async cloud uploads/deletes.
 // All public methods are thread-safe.
@@ -49,7 +49,7 @@ bool BlobExists(uint32_t accountId, uint32_t appId,
 ICloudProvider::ExistsStatus CheckBlobExists(uint32_t accountId, uint32_t appId,
                                              const std::string& filename);
 
-// Root token persistence — same as before but also syncs to cloud.
+// Root token persistence -- same as before but also syncs to cloud.
 // Returns true if local disk persist succeeded (cloud upload is async
 // and its result is reported separately via the work queue).
 bool SaveRootTokens(uint32_t accountId, uint32_t appId,

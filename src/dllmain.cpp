@@ -9,7 +9,7 @@ static std::once_flag g_initFlag;
 
 // Get Steam directory from the DLL's own location, as a UTF-8 string.
 //
-// Important: the entire DLL treats every "narrow" std::string path as UTF-8 —
+// Important: the entire DLL treats every "narrow" std::string path as UTF-8 --
 // FileUtil::Utf8ToPath / PathToUtf8, all ifstream/ofstream opens, all
 // filesystem::path construction downstream. This function is the single
 // root of g_steamPath; if it returned an ACP-encoded path (as a naive
@@ -20,7 +20,7 @@ static std::once_flag g_initFlag;
 // auto-cloud would misidentify the install as missing.
 //
 // GetModuleFileNameW returns wchar_t, which we explicitly convert via
-// WideCharToMultiByte(CP_UTF8) — the same path every other
+// WideCharToMultiByte(CP_UTF8) -- the same path every other
 // wide-to-narrow call in the codebase uses (see
 // GetKnownFolderPathString at src/local_storage.cpp:132).
 static std::string GetSteamPath() {
@@ -36,7 +36,7 @@ static std::string GetSteamPath() {
         if (wdllPath[i - 1] == L'\\') { endIdx = i; break; }
     }
 
-    // Route through FileUtil::WideToUtf8 — the codebase's single canonical
+    // Route through FileUtil::WideToUtf8 -- the codebase's single canonical
     // wide→UTF-8 encoder. The handcrafted block this replaces did not pass
     // WC_ERR_INVALID_CHARS, so a malformed UTF-16 module path (lone surrogate
     // injected by an attacker who managed to load the DLL from a hand-built
@@ -55,7 +55,7 @@ int CloudOnSendPkt(void* thisptr, const uint8_t* data, uint32_t size, void* recv
     // one-time init on first call (we're inside the Steam process by now)
     // If call_once throws, the flag remains unset and the next call retries.
     // We catch internally to prevent partial initialization from leaving the system
-    // in an inconsistent state — if init fails, we log and mark as failed so
+    // in an inconsistent state -- if init fails, we log and mark as failed so
     // subsequent calls skip init and return 0 (let Steam handle the packet).
     static bool g_initFailed = false;
     std::call_once(g_initFlag, [&]() {
@@ -124,7 +124,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
 
     case DLL_PROCESS_DETACH:
         // reserved != NULL means process is terminating (ExitProcess).
-        // Other threads are already dead — joining them or acquiring mutexes
+        // Other threads are already dead -- joining them or acquiring mutexes
         // would deadlock. Only run cleanup on explicit FreeLibrary (reserved == NULL).
         if (reserved == nullptr) {
             CloudIntercept::Shutdown();

@@ -172,7 +172,7 @@ namespace CloudRedirect.Services
         }
 
         // Body of the migration. Must only be called with _legacyMigrationGate
-        // held — concurrent execution would race on Directory.Move and surface
+        // held -- concurrent execution would race on Directory.Move and surface
         // user-visible IO errors.
         private static void MigrateLegacyBackupsLocked(string steamPath)
         {
