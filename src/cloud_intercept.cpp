@@ -2355,6 +2355,26 @@ static void SyncLuaFiles() {
             constexpr size_t MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100 MB aggregate
             for (mz_uint i = 0; i < numFiles; i++) {
                 char fname[256];
+                // mz_zip_reader_get_filename silently truncates if the
+                // in-zip filename is longer than the destination buffer
+                // (it does NOT return enough info to detect this when
+                // filename_buf_size > 0 — the returned size is post-clamp).
+                // Probe with a NULL buffer first: with filename_buf_size==0
+                // miniz returns the true required size from the central
+                // directory, letting us reject overlength names before any
+                // chance that truncation could chop a "../../foo" prefix
+                // and leave behind a valid-looking ".lua" suffix that
+                // IsValidLuaFilename would accept.
+                mz_uint nameLenPlusNul = mz_zip_reader_get_filename(&zip, i, nullptr, 0);
+                if (nameLenPlusNul == 0) {
+                    LOG("[LuaSync] Skipping zip entry %u: corrupt or missing CDH", i);
+                    continue;
+                }
+                if (nameLenPlusNul > sizeof(fname)) {
+                    LOG("[LuaSync] Skipping zip entry %u: overlength filename (%u bytes)",
+                        i, nameLenPlusNul);
+                    continue;
+                }
                 mz_zip_reader_get_filename(&zip, i, fname, sizeof(fname));
                 if (!IsValidLuaFilename(fname)) {
                     LOG("[LuaSync] Skipping invalid zip entry: %s", fname);
