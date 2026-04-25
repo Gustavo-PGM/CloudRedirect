@@ -3,7 +3,7 @@
 #include "local_disk_provider.h"
 #include "google_drive_provider.h"
 #include "onedrive_provider.h"
-#include "cloud_intercept.h"
+#include "cloud_metadata_paths.h"
 #include "file_util.h"
 #include "legacy_metadata_cleanup.h"
 #include "log.h"

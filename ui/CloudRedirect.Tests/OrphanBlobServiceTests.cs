@@ -224,7 +224,13 @@ public class OrphanBlobServiceTests
     [Fact]
     public void InternalMetadataFilenames_IsSupersetOfNativeConstants()
     {
-        var headerPath = FindRepoFile(Path.Combine("src", "cloud_intercept.h"));
+        // The k*MetadataPath constants live in their own header so cloud_storage
+        // can consume them without pulling the full intercept-layer interface.
+        // Fall back to cloud_intercept.h for older checkouts where the split
+        // hasn't happened yet, so the test isn't tightly bound to one layout.
+        var headerPath =
+            FindRepoFile(Path.Combine("src", "cloud_metadata_paths.h"))
+            ?? FindRepoFile(Path.Combine("src", "cloud_intercept.h"));
         if (headerPath is null)
             return; // Header unlocatable; rely on the hardcoded assertion above.
 
@@ -243,7 +249,7 @@ public class OrphanBlobServiceTests
         // string literals), fail loudly rather than vacuously pass.
         Assert.True(
             matches.Count >= 4,
-            $"Expected at least 4 k*MetadataPath constants in cloud_intercept.h, found {matches.Count}. " +
+            $"Expected at least 4 k*MetadataPath constants in {Path.GetFileName(headerPath)}, found {matches.Count}. " +
             "Regex may need updating to match a new literal form.");
 
         foreach (Match m in matches)
