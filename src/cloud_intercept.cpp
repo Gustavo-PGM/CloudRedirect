@@ -839,12 +839,15 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
         return;
     }
 
-    // Diagnostic: verify wrapped packet
-    uintptr_t wrappedVtable = *(uintptr_t*)wrappedPkt;
+    // Diagnostic: verify wrapped packet. Vtable + slot reads are
+    // Steam-internal and must be SEH-wrapped alongside the call itself --
+    // a freed/torn wrappedPkt would otherwise crash the network thread
+    // before reaching the existing handler below.
     using GetEMsgFn = unsigned int(__fastcall*)(void* self);
-    GetEMsgFn getEMsg = (GetEMsgFn)(*(uintptr_t*)(wrappedVtable + 0x40));
     unsigned int wrappedEmsg = 0;
     __try {
+        uintptr_t wrappedVtable = *(uintptr_t*)wrappedPkt;
+        GetEMsgFn getEMsg = (GetEMsgFn)(*(uintptr_t*)(wrappedVtable + 0x40));
         wrappedEmsg = getEMsg(wrappedPkt);
         LOG("[INJECT]   wrappedPkt=%p GetEMsg()=%u (expected %u)",
             wrappedPkt, wrappedEmsg, (unsigned)EMSG_SERVICE_METHOD_RESP);
@@ -1908,23 +1911,49 @@ static void PatchDepotVector(__int64 vec, uint32_t appId,
                              const std::unordered_map<uint32_t, uint64_t>& depotPins,
                              const char* vecName) {
     if (!vec) return;
-    uint8_t* arrayBase = *reinterpret_cast<uint8_t**>(vec);
-    int count = *reinterpret_cast<int*>(vec + 16);
-    if (!arrayBase || count <= 0) return;
 
-    for (int i = 0; i < count; i++) {
-        uint8_t* entry = arrayBase + static_cast<size_t>(i) * 32;
-        uint32_t depotId = *reinterpret_cast<uint32_t*>(entry);
-        auto pinIt = depotPins.find(depotId);
-        if (pinIt != depotPins.end()) {
-            uint64_t* pManifestId = reinterpret_cast<uint64_t*>(entry + 8);
-            uint64_t oldManifest = *pManifestId;
-            if (oldManifest != pinIt->second) {
-                *pManifestId = pinIt->second;
-                LOG("[ManifestPin] app %u depot %u (%s): manifest %llu -> %llu",
-                    appId, depotId, vecName, oldManifest, pinIt->second);
+    // Reads from a Steam-internal vector layout (pointer at +0, count at +16,
+    // 32-byte entries). The layout is reverse-engineered, so wrap every
+    // dereference in SEH and cap the loop bound to defend against a future
+    // Steam update changing the struct shape -- without this guard a layout
+    // shift would crash inside the host process at game-launch time.
+    uint8_t* arrayBase = nullptr;
+    int count = 0;
+    __try {
+        arrayBase = *reinterpret_cast<uint8_t**>(vec);
+        count = *reinterpret_cast<int*>(vec + 16);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[ManifestPin] PatchDepotVector(%s): faulted reading vector header for app %u",
+            vecName, appId);
+        return;
+    }
+
+    constexpr int kMaxDepotsPerVec = 4096;
+    if (!arrayBase || count <= 0) return;
+    if (count > kMaxDepotsPerVec) {
+        LOG("[ManifestPin] PatchDepotVector(%s): suspicious count=%d for app %u, skipping",
+            vecName, count, appId);
+        return;
+    }
+
+    __try {
+        for (int i = 0; i < count; i++) {
+            uint8_t* entry = arrayBase + static_cast<size_t>(i) * 32;
+            uint32_t depotId = *reinterpret_cast<uint32_t*>(entry);
+            auto pinIt = depotPins.find(depotId);
+            if (pinIt != depotPins.end()) {
+                uint64_t* pManifestId = reinterpret_cast<uint64_t*>(entry + 8);
+                uint64_t oldManifest = *pManifestId;
+                if (oldManifest != pinIt->second) {
+                    *pManifestId = pinIt->second;
+                    LOG("[ManifestPin] app %u depot %u (%s): manifest %llu -> %llu",
+                        appId, depotId, vecName, oldManifest, pinIt->second);
+                }
             }
         }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[ManifestPin] PatchDepotVector(%s): faulted iterating entries for app %u (count=%d)",
+            vecName, appId, count);
     }
 }
 
