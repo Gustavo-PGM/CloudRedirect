@@ -1958,11 +1958,19 @@ std::unique_ptr<ICloudProvider> CreateCloudProvider(const std::string& name) {
     if (lower == "local" || lower == "folder") {
         return std::make_unique<LocalDiskProvider>();
     }
+    // OAuth providers share CloudProviderBase; wire the auth-failure
+    // notification callback here so the base layer doesn't reverse-depend
+    // on CloudStorage.
+    auto wireAuthCallback = [](std::unique_ptr<CloudProviderBase> p)
+        -> std::unique_ptr<ICloudProvider> {
+        p->SetAuthFailureCallback(&CloudStorage::NotifyAuthFailure);
+        return p;
+    };
     if (lower == "gdrive") {
-        return std::make_unique<GoogleDriveProvider>();
+        return wireAuthCallback(std::make_unique<GoogleDriveProvider>());
     }
     if (lower == "onedrive") {
-        return std::make_unique<OneDriveProvider>();
+        return wireAuthCallback(std::make_unique<OneDriveProvider>());
     }
     LOG("[CloudStorage] CreateCloudProvider: unknown provider '%s'", name.c_str());
     return nullptr;
