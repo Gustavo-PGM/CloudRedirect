@@ -2923,19 +2923,41 @@ void Init(const std::string& steamPath) {
         std::string oldRoot = g_steamPath + "cloud_redirect\\blobs\\";
         std::string newRoot = g_steamPath + "cloud_redirect\\storage\\";
         std::error_code ec;
-        if (std::filesystem::is_directory(oldRoot, ec)) {
+        auto oldRootPath = FileUtil::Utf8ToPath(oldRoot);
+        if (std::filesystem::is_directory(oldRootPath, ec)) {
             int migrated = 0, skipped = 0;
-            for (auto& entry : std::filesystem::recursive_directory_iterator(oldRoot, ec)) {
-                if (!entry.is_regular_file()) continue;
-                auto rel = std::filesystem::relative(entry.path(), oldRoot, ec);
-                if (ec) continue;
-                auto dest = FileUtil::Utf8ToPath(newRoot) / rel;
-                if (std::filesystem::exists(dest, ec)) { skipped++; continue; }
-                std::filesystem::create_directories(dest.parent_path(), ec);
-                std::filesystem::rename(entry.path(), dest, ec);
-                if (!ec) migrated++;
+            // Manual increment with error_code: range-for would dispatch to
+            // the throwing operator++. This block runs on the DLL init
+            // thread, so an escaping filesystem_error would terminate
+            // Steam during startup before the HTTP server even comes up.
+            std::filesystem::recursive_directory_iterator it(oldRootPath, ec);
+            const std::filesystem::recursive_directory_iterator end;
+            while (!ec && it != end) {
+                const auto& entry = *it;
+                std::error_code regEc;
+                if (entry.is_regular_file(regEc)) {
+                    std::error_code relEc;
+                    auto rel = std::filesystem::relative(entry.path(), oldRootPath, relEc);
+                    if (!relEc) {
+                        auto dest = FileUtil::Utf8ToPath(newRoot) / rel;
+                        std::error_code existsEc;
+                        if (std::filesystem::exists(dest, existsEc)) {
+                            skipped++;
+                        } else {
+                            std::error_code mkEc;
+                            std::filesystem::create_directories(dest.parent_path(), mkEc);
+                            std::error_code mvEc;
+                            std::filesystem::rename(entry.path(), dest, mvEc);
+                            if (!mvEc) migrated++;
+                        }
+                    }
+                }
+                std::error_code stepEc;
+                it.increment(stepEc);
+                if (stepEc) break;
             }
-            std::filesystem::remove_all(oldRoot, ec);
+            std::error_code rmEc;
+            std::filesystem::remove_all(oldRootPath, rmEc);
             if (migrated > 0 || skipped > 0)
                 LOG("[NS] Migrated legacy blobs/ -> storage/: %d files moved, %d already existed (skipped)", migrated, skipped);
         }

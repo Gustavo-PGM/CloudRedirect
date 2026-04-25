@@ -283,30 +283,45 @@ static void RemoveLocalBlobsNotInCloud(uint32_t accountId, uint32_t appId,
     // caches dir handles and removing a dir mid-traversal produces undefined
     // iterator state. Defer cleanup until the iterator is destroyed.
     std::unordered_set<std::string> removedParents;
-    for (auto& entry : std::filesystem::recursive_directory_iterator(localBlobDirPath, ec)) {
-        if (ec) break;
-        if (!entry.is_regular_file(ec)) continue;
-
-        // rel is compared against cloudBlobNames (UTF-8 filenames straight
-        // from the cloud listing) and is used as a cloud identifier when
-        // preserving conflict copies. It must be UTF-8, never ACP.
-        std::string rel = FileUtil::PathToUtf8(
-            std::filesystem::relative(entry.path(), localBlobDirPath, ec));
-        if (ec) continue;
-        for (auto& c : rel) { if (c == '\\') c = '/'; }
-        if (rel == "cn.dat" || rel == "root_token.dat" ||
-            rel == "file_tokens.dat" || rel == "deleted.dat") continue;
-        if (cloudBlobNames.count(rel)) continue;
-
-        if (!PreserveLocalConflictCopy(accountId, appId, rel, FileUtil::PathToUtf8(entry.path()))) continue;
-        std::filesystem::path parentPath = entry.path().parent_path();
-        std::filesystem::remove(entry.path(), ec);
-        if (!ec) {
-            ++removed;
-            // parentPath feeds CleanupEmptyCacheDirs which calls back into
-            // LocalStorage paths keyed by UTF-8 strings.
-            removedParents.insert(FileUtil::PathToUtf8(parentPath));
+    // Manual increment to keep mid-walk failures (permission denied on a
+    // subdir, race with another worker deleting a sibling) inside an
+    // error_code instead of an escaping filesystem_error. SyncFromCloud
+    // runs on background workers; a throw out of here would call
+    // std::terminate and kill the host Steam process.
+    std::filesystem::recursive_directory_iterator it(localBlobDirPath, ec);
+    if (ec) return;
+    const std::filesystem::recursive_directory_iterator end;
+    while (it != end) {
+        const auto& entry = *it;
+        std::error_code regEc;
+        if (entry.is_regular_file(regEc)) {
+            // rel is compared against cloudBlobNames (UTF-8 filenames straight
+            // from the cloud listing) and is used as a cloud identifier when
+            // preserving conflict copies. It must be UTF-8, never ACP.
+            std::error_code relEc;
+            std::string rel = FileUtil::PathToUtf8(
+                std::filesystem::relative(entry.path(), localBlobDirPath, relEc));
+            if (!relEc) {
+                for (auto& c : rel) { if (c == '\\') c = '/'; }
+                bool skipReserved = (rel == "cn.dat" || rel == "root_token.dat" ||
+                                     rel == "file_tokens.dat" || rel == "deleted.dat");
+                if (!skipReserved && !cloudBlobNames.count(rel) &&
+                    PreserveLocalConflictCopy(accountId, appId, rel, FileUtil::PathToUtf8(entry.path()))) {
+                    std::filesystem::path parentPath = entry.path().parent_path();
+                    std::error_code rmEc;
+                    std::filesystem::remove(entry.path(), rmEc);
+                    if (!rmEc) {
+                        ++removed;
+                        // parentPath feeds CleanupEmptyCacheDirs which calls back into
+                        // LocalStorage paths keyed by UTF-8 strings.
+                        removedParents.insert(FileUtil::PathToUtf8(parentPath));
+                    }
+                }
+            }
         }
+        std::error_code stepEc;
+        it.increment(stepEc);
+        if (stepEc) break;
     }
     if (removed > 0) {
         LOG("[CloudStorage] SyncFromCloud app %u: removed %d stale local blob(s) absent from newer cloud CN",
@@ -395,14 +410,29 @@ static std::unordered_set<uint32_t> EnumerateLocalAppIds(uint32_t accountId) {
         return appIds;
     }
 
-    for (const auto& entry : std::filesystem::directory_iterator(accountRootPath, ec)) {
-        if (ec) break;
-        if (!entry.is_directory(ec)) continue;
-        const std::string name = entry.path().filename().string();
-        try {
-            appIds.insert(static_cast<uint32_t>(std::stoul(name)));
-        } catch (...) {
+    // Manual iteration with non-throwing increment. Range-for over
+    // directory_iterator dispatches to the throwing operator++ even when
+    // the constructor was passed an error_code, so a permission error or
+    // a sibling-directory delete race mid-walk would surface a
+    // filesystem_error here. This runs on a detached startup thread
+    // (ScheduleStartupMetadataSync), so an escaping exception calls
+    // std::terminate and tears down the host Steam process.
+    std::filesystem::directory_iterator it(accountRootPath, ec);
+    if (ec) return appIds;
+    const std::filesystem::directory_iterator end;
+    while (it != end) {
+        const auto& entry = *it;
+        std::error_code dirEc;
+        if (entry.is_directory(dirEc)) {
+            const std::string name = entry.path().filename().string();
+            try {
+                appIds.insert(static_cast<uint32_t>(std::stoul(name)));
+            } catch (...) {
+            }
         }
+        std::error_code stepEc;
+        it.increment(stepEc);
+        if (stepEc) break;
     }
     return appIds;
 }
