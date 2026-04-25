@@ -1058,18 +1058,21 @@ static void QuarantineCorruptCNFile(const std::string& cnPath, uint32_t appId) {
     }
 }
 
-// Persist change number to disk (must be called while holding g_mutex)
-static void SaveChangeNumberLocked(uint32_t accountId, uint32_t appId) {
+// Persist change number to disk (must be called while holding g_mutex).
+// Returns true on success; callers that mutated the in-memory CN before
+// calling can use the result to roll back if persistence failed.
+static bool SaveChangeNumberLocked(uint32_t accountId, uint32_t appId) {
     auto key = MakeKey(accountId, appId);
     auto it = g_changeNumbers.find(key);
-    if (it == g_changeNumbers.end()) return;
+    if (it == g_changeNumbers.end()) return false;
 
     std::string cnPath = GetAppPathInternal(accountId, appId) + "cn.dat";
     if (FileUtil::AtomicWriteText(cnPath, std::to_string(it->second))) {
         LOG("SaveChangeNumber: persisted CN=%llu for app %u", it->second, appId);
-    } else {
-        LOG("SaveChangeNumber: failed to persist CN for app %u", appId);
+        return true;
     }
+    LOG("SaveChangeNumber: failed to persist CN for app %u", appId);
+    return false;
 }
 
 void Init(const std::string& baseRoot) {
@@ -1143,43 +1146,84 @@ uint64_t GetChangeNumber(uint32_t accountId, uint32_t appId) {
     return 1;
 }
 
+// Forward declarations for tombstone helpers used by DeleteFile's CN
+// persist-failure recovery path; the definitions live further down with
+// the rest of the deleted.dat support code.
+static std::unordered_map<std::string, TombstoneInfo> LoadDeletedLocked(uint32_t accountId,
+                                                                        uint32_t appId,
+                                                                        bool* outNeedsRewrite = nullptr);
+static bool SaveDeletedLocked(uint32_t accountId, uint32_t appId,
+                              const std::unordered_map<std::string, TombstoneInfo>& deleted);
+
+// Seed g_changeNumbers[key] from cn.dat if the cache has no entry yet.
+// Without this, an `++g_changeNumbers[key]` against a missing key would
+// value-initialize to 0 and then increment to 1 -- silently overwriting
+// any larger CN already persisted on disk by a prior process. Callers
+// must hold g_mutex (write).
+static void EnsureCNCachedLocked(uint32_t accountId, uint32_t appId) {
+    auto key = MakeKey(accountId, appId);
+    if (g_changeNumbers.count(key)) return;
+
+    std::string cnPath = GetAppPathInternal(accountId, appId) + "cn.dat";
+    uint64_t cn = 1;
+    uint64_t parsed = 0;
+    switch (ReadCNFile(cnPath, parsed)) {
+        case CNParseResult::Valid:
+            cn = parsed;
+            break;
+        case CNParseResult::Corrupt:
+            QuarantineCorruptCNFile(cnPath, appId);
+            cn = 1;
+            break;
+        case CNParseResult::Absent:
+            cn = 1;
+            break;
+    }
+    g_changeNumbers[key] = cn;
+}
+
 void SetChangeNumber(uint32_t accountId, uint32_t appId, uint64_t cn) {
     std::lock_guard<std::shared_mutex> lock(g_mutex);
     auto key = MakeKey(accountId, appId);
+
+    // Snapshot the prior in-memory value so we can roll back if persisting
+    // the new CN to cn.dat fails. Otherwise the in-memory cache would race
+    // ahead of disk; the next process restart would read the smaller on-disk
+    // value while this session keeps publishing the larger one to cloud,
+    // which then wins on resync and treats the local writes as stale.
+    auto prevIt = g_changeNumbers.find(key);
+    bool hadPrev = prevIt != g_changeNumbers.end();
+    uint64_t prevCN = hadPrev ? prevIt->second : 0;
+
     g_changeNumbers[key] = cn;
-    SaveChangeNumberLocked(accountId, appId);
+    if (!SaveChangeNumberLocked(accountId, appId)) {
+        if (hadPrev) g_changeNumbers[key] = prevCN;
+        else g_changeNumbers.erase(key);
+        LOG("SetChangeNumber: persist failed for app %u, rolled back in-memory CN", appId);
+        return;
+    }
     LOG("SetChangeNumber: CN=%llu for app %u", cn, appId);
 }
 
 uint64_t IncrementChangeNumber(uint32_t accountId, uint32_t appId) {
     std::lock_guard<std::shared_mutex> lock(g_mutex);
     auto key = MakeKey(accountId, appId);
-    auto it = g_changeNumbers.find(key);
-    if (it == g_changeNumbers.end()) {
-        // Mirror GetChangeNumber's corrupt-detection path so a damaged
-        // cn.dat is quarantined rather than silently overwritten with a
-        // small fresh value. Falling back to 1 here means the first
-        // increment publishes CN=2 — previously the same code silently
-        // "reset to 2" on corrupt input with no forensic trace.
-        std::string cnPath = GetAppPathInternal(accountId, appId) + "cn.dat";
-        uint64_t cn = 1;
-        uint64_t parsed = 0;
-        switch (ReadCNFile(cnPath, parsed)) {
-            case CNParseResult::Valid:
-                cn = parsed;
-                break;
-            case CNParseResult::Corrupt:
-                QuarantineCorruptCNFile(cnPath, appId);
-                cn = 1;
-                break;
-            case CNParseResult::Absent:
-                cn = 1;
-                break;
-        }
-        g_changeNumbers[key] = cn;
+    EnsureCNCachedLocked(accountId, appId);
+    // If cn.dat persistence fails we must not let in-memory race ahead of
+    // disk: SetChangeNumber's rationale (rollback on persist failure)
+    // applies identically here. Without rollback, this session keeps
+    // publishing the bumped CN to cloud while a future process restart
+    // reads the smaller on-disk value -- cloud then "wins" against newer
+    // local writes on the next sync.
+    uint64_t prevCN = g_changeNumbers[key];
+    uint64_t newCN  = prevCN + 1;
+    g_changeNumbers[key] = newCN;
+    if (!SaveChangeNumberLocked(accountId, appId)) {
+        g_changeNumbers[key] = prevCN;
+        LOG("IncrementChangeNumber: persist failed for app %u, rolled back to %llu",
+            appId, prevCN);
+        return prevCN;
     }
-    uint64_t newCN = ++g_changeNumbers[key];
-    SaveChangeNumberLocked(accountId, appId);
     return newCN;
 }
 
@@ -1423,8 +1467,38 @@ bool WriteFile(uint32_t accountId, uint32_t appId, const std::string& filename, 
         LOG("WriteFile failed: %s (%zu bytes)", fullPath.c_str(), len);
         return false;
     }
-    ++g_changeNumbers[MakeKey(accountId, appId)];
-    SaveChangeNumberLocked(accountId, appId);
+    EnsureCNCachedLocked(accountId, appId);
+    auto cnKey = MakeKey(accountId, appId);
+    uint64_t prevCN = g_changeNumbers[cnKey];
+    g_changeNumbers[cnKey] = prevCN + 1;
+    if (!SaveChangeNumberLocked(accountId, appId)) {
+        // cn.dat persist failed. Critical constraint: AtomicWriteBinary
+        // already replaced any prior file at fullPath via MoveFileExW
+        // REPLACE_EXISTING -- there is no rollback for that. Calling
+        // remove() here would destroy BOTH the new bytes the user just
+        // wrote AND the prior version's bytes (already gone from the
+        // atomic replace), turning a transient cn.dat I/O hiccup into
+        // permanent save loss. Save loss is non-negotiable; the file
+        // stays on disk.
+        //
+        // We DO roll back the in-memory CN: leaving the cache one ahead
+        // of disk lets this session publish a CN to cloud that the next
+        // process restart can't reproduce, and on the next sync cloud's
+        // (smaller, last-persisted) view would "win" and overwrite the
+        // newer local file. With the cache rolled back, the in-memory
+        // CN matches disk; the next successful WriteFile or
+        // SetChangeNumber will bump from the same baseline. The user's
+        // file content is preserved verbatim, just under the prior CN
+        // until the next durable bump catches up.
+        //
+        // We still return false so the RPC caller knows the metadata
+        // write was not durable. Steam's retry will redo AtomicWriteBinary
+        // (idempotent on identical bytes) and re-attempt the bump.
+        g_changeNumbers[cnKey] = prevCN;
+        LOG("WriteFile: cn.dat persist failed for app %u; rolled back in-memory CN, file %s preserved on disk",
+            appId, fullPath.c_str());
+        return false;
+    }
     LOG("WriteFile: app %u %s (%zu bytes)", appId, filename.c_str(), len);
     return true;
 }
@@ -1474,8 +1548,53 @@ bool DeleteFile(uint32_t accountId, uint32_t appId, const std::string& filename)
         return false;
     }
     if (removed) {
-        ++g_changeNumbers[MakeKey(accountId, appId)];
-        SaveChangeNumberLocked(accountId, appId);
+        EnsureCNCachedLocked(accountId, appId);
+        auto cnKey = MakeKey(accountId, appId);
+        uint64_t prevCN = g_changeNumbers[cnKey];
+        g_changeNumbers[cnKey] = prevCN + 1;
+        if (!SaveChangeNumberLocked(accountId, appId)) {
+            // The file is already gone from disk but cn.dat couldn't be
+            // bumped. Two failure modes if we did nothing else:
+            //  - Roll forward (keep cache at prev+1): in-memory races
+            //    ahead of disk; next process restart sees stale cn.dat
+            //    and would lose the deletion to a cloud-side resync.
+            //  - Roll back (cache=prev): disk and cache agree but a
+            //    future SyncFromCloud sees the cloud's old copy and
+            //    treats it as authoritative, RESURRECTING the file the
+            //    user just deleted -- exactly the failure mode tombstones
+            //    exist to prevent.
+            // Drop a tombstone so SyncFromCloud's resurrection guard
+            // fires regardless of the cn.dat hiccup, then roll back the
+            // CN cache so it stays coherent with disk. We're already
+            // holding g_mutex exclusively, so write through the locked
+            // helpers directly. If SaveDeletedLocked also fails the user
+            // is no worse off than the pre-fix code path -- the LOGs in
+            // the helpers will surface it.
+            auto deleted = LoadDeletedLocked(accountId, appId, nullptr);
+            // Stamp the tombstone at prevCN, not prevCN+1: we never
+            // durably advanced the CN past prevCN (the persist failed),
+            // so claiming the deletion happened "at CN+1" introduces a
+            // tombstone-vs-live-CN invariant break that no other code
+            // path expects. The resurrection guard still fires for any
+            // future cloud blob at cn > prevCN, which is the relevant
+            // invariant.
+            uint64_t cnAtDelete = prevCN;
+            uint64_t now = static_cast<uint64_t>(std::time(nullptr));
+            auto exist = deleted.find(filename);
+            if (exist == deleted.end()) {
+                deleted[filename] = TombstoneInfo{ cnAtDelete, now };
+            } else {
+                exist->second.cn = (std::max)(exist->second.cn, cnAtDelete);
+                if (exist->second.createTimeUnix == 0) {
+                    exist->second.createTimeUnix = now;
+                }
+            }
+            (void)SaveDeletedLocked(accountId, appId, deleted);
+            g_changeNumbers[cnKey] = prevCN;
+            LOG("DeleteFile: cn.dat persist failed for app %u after removing %s; tombstoned at cn=%llu, rolled back CN",
+                appId, filename.c_str(), (unsigned long long)cnAtDelete);
+            return false;
+        }
         LOG("DeleteFile: app %u %s", appId, filename.c_str());
         return true;
     }
@@ -2167,7 +2286,7 @@ std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, 
 
 static std::unordered_map<std::string, TombstoneInfo> LoadDeletedLocked(uint32_t accountId,
                                                                         uint32_t appId,
-                                                                        bool* outNeedsRewrite = nullptr) {
+                                                                        bool* outNeedsRewrite) {
     // Caller holds g_mutex (shared or exclusive).
     std::unordered_map<std::string, TombstoneInfo> deleted;
     if (outNeedsRewrite) *outNeedsRewrite = false;
@@ -2326,7 +2445,12 @@ void MarkDeleted(uint32_t accountId, uint32_t appId, const std::string& filename
     if (!inserted && it->second.cn >= cnAtDelete && it->second.createTimeUnix > 0) {
         return;
     }
-    deleted[filename] = TombstoneInfo{ cnAtDelete, now };
+    // Preserve the highest CN seen so far. Without this, upgrading a v2-format
+    // tombstone with cn=200/createTime=0 using a fresh MarkDeleted at cn=5 would
+    // regress the resurrection guard down to 5: cloud blobs with cn between 6
+    // and 200 would then resurrect a file the user had deleted at the higher CN.
+    uint64_t mergedCn = inserted ? cnAtDelete : (std::max)(it->second.cn, cnAtDelete);
+    deleted[filename] = TombstoneInfo{ mergedCn, now };
     if (!SaveDeletedLocked(accountId, appId, deleted)) {
         // Persistence failed — the in-memory snapshot is now ahead of disk.
         // The next LoadDeletedLocked will reflect only what's on disk, so
@@ -2334,12 +2458,12 @@ void MarkDeleted(uint32_t accountId, uint32_t appId, const std::string& filename
         // from SaveDeletedLocked; just log the site context.
         LOG("MarkDeleted: app %u tombstone for %s (cn=%llu createTime=%llu) NOT persisted",
             appId, filename.c_str(),
-            (unsigned long long)cnAtDelete, (unsigned long long)now);
+            (unsigned long long)mergedCn, (unsigned long long)now);
         return;
     }
     LOG("MarkDeleted: app %u tombstoned %s at cn=%llu createTime=%llu (%zu total)",
         appId, filename.c_str(),
-        (unsigned long long)cnAtDelete, (unsigned long long)now, deleted.size());
+        (unsigned long long)mergedCn, (unsigned long long)now, deleted.size());
 }
 
 void ClearDeleted(uint32_t accountId, uint32_t appId, const std::string& filename) {
