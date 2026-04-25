@@ -463,12 +463,13 @@ public partial class SetupPage : Page
             Log("═══ Pre-step: Download SteamTools Core DLLs ═══");
             try
             {
-                PatchResult repairResult = null;
-                await Task.Run(() =>
-                {
-                    var patcher = new Patcher(_steamPath, Log);
-                    repairResult = patcher.RepairCoreDlls();
-                });
+                // M18: RepairCoreDllsAsync is genuinely async (await on
+                // HttpClient), so we don't need Task.Run wrapping a
+                // GetAwaiter().GetResult() to keep the dispatcher
+                // responsive. The thread-pool thread is freed back to
+                // the pool while WinHTTP is in flight.
+                var patcher = new Patcher(_steamPath, Log);
+                PatchResult repairResult = await patcher.RepairCoreDllsAsync();
 
                 if (repairResult?.Succeeded != true)
                 {

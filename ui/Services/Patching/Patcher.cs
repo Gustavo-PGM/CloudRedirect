@@ -5,6 +5,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Security.Cryptography;
+using System.Threading.Tasks;
 using CloudRedirect.Services;
 using Microsoft.Win32;
 
@@ -208,8 +209,13 @@ namespace CloudRedirect.Services.Patching
 
         const string XinputUrl = "https://files.catbox.moe/heom44.dll";
         const string DwmapiUrl = "https://files.catbox.moe/32p6f9.dll";
-        const string XinputFallbackUrl = "http://update.aaasn.com/update";
-        const string DwmapiFallbackUrl = "http://update.aaasn.com/dwmapi";
+        // M13: Fallback host serves the same payload over HTTPS (verified 200 OK,
+        // identical Content-Length and ETag as plaintext). The hardcoded SHA-256
+        // check below already detects a tampered body, but using TLS removes the
+        // passive-observation channel (which DLL the user is repairing) and
+        // closes the active-MITM window entirely.
+        const string XinputFallbackUrl = "https://update.aaasn.com/update";
+        const string DwmapiFallbackUrl = "https://update.aaasn.com/dwmapi";
         const string XinputHash = "ddb1f0909c7092f06890674f90b5d4f1198724b05b4bf1e656b4063897340243";
         const string DwmapiHash = "1ce49ed63af004ad37a4d2921a5659a17001c4c0026d6245fcc0d543e9c265d0";
 
@@ -219,7 +225,19 @@ namespace CloudRedirect.Services.Patching
             return Convert.ToHexString(hash).ToLowerInvariant();
         }
 
-        public PatchResult RepairCoreDlls()
+        // M18: Proper async. The previous body did
+        //   http.GetByteArrayAsync(url).ConfigureAwait(false).GetAwaiter().GetResult()
+        // which blocks the calling thread for the duration of two 60s HttpClient
+        // calls. Callers already wrap us in Task.Run so the WPF dispatcher
+        // didn't lock up, but a thread-pool thread was held idle on every
+        // network roundtrip. Awaiting the HttpClient call frees that thread
+        // back to the pool while WinHTTP is in flight. Sync RepairCoreDlls()
+        // is kept as a thin wrapper so existing call sites compile, but new
+        // callers should prefer RepairCoreDllsAsync.
+        public PatchResult RepairCoreDlls() =>
+            RepairCoreDllsAsync().GetAwaiter().GetResult();
+
+        public async Task<PatchResult> RepairCoreDllsAsync()
         {
             _verbose = true;
             var result = new PatchResult();
@@ -263,7 +281,7 @@ namespace CloudRedirect.Services.Patching
                     Log($"Downloading {name}..");
                     try
                     {
-                        var dl = http.GetByteArrayAsync(url).ConfigureAwait(false).GetAwaiter().GetResult();
+                        var dl = await http.GetByteArrayAsync(url).ConfigureAwait(false);
                         if (dl != null && dl.Length > 0 && ComputeSha256(dl) == hash)
                             data = dl;
                         else
@@ -279,7 +297,7 @@ namespace CloudRedirect.Services.Patching
                         Log($"  Trying fallback..");
                         try
                         {
-                            var dl = http.GetByteArrayAsync(fallback).ConfigureAwait(false).GetAwaiter().GetResult();
+                            var dl = await http.GetByteArrayAsync(fallback).ConfigureAwait(false);
                             if (dl != null && dl.Length > 0 && ComputeSha256(dl) == hash)
                             {
                                 data = dl;
